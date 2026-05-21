@@ -11,7 +11,7 @@ const KNOWN_CLIENTS = [
   { id: 'cursor', label: 'Cursor' }
 ];
 const LIMIT_PROVIDERS = [
-  { id: 'claude', label: 'Claude Code' },
+  { id: 'claude', label: 'Claude', settingsLabel: 'Claude Code' },
   { id: 'codex', label: 'Codex' }
 ];
 const LIMIT_REFRESH_OPTIONS = [60000, 120000, 300000, 900000, 1800000];
@@ -204,6 +204,12 @@ function limitProviderMeta(provider) {
   return limitStatusLabel(provider.status, false);
 }
 
+function limitProviderPlan(provider) {
+  const label = String(provider?.accountLabel || '').trim();
+  if (label) return label;
+  return provider?.status && provider.status !== 'ok' ? limitStatusLabel(provider.status, false) : '';
+}
+
 function enabledLimitProviderSet() {
   if (state.settings?.limitsEnabled === false) return new Set();
   const raw = state.settings?.limitProviders;
@@ -271,6 +277,8 @@ function renderLimits() {
     row.className = `limit-row${provider.stale ? ' stale' : ''}`;
     const head = document.createElement('div');
     head.className = 'limit-head';
+    const titleBlock = document.createElement('div');
+    titleBlock.className = 'limit-title';
     const name = document.createElement('div');
     name.className = 'limit-name';
     const dot = document.createElement('span');
@@ -279,10 +287,14 @@ function renderLimits() {
     const title = document.createElement('span');
     title.textContent = label;
     name.append(dot, title);
-    const status = document.createElement('div');
-    status.className = 'limit-status';
-    status.textContent = limitProviderMeta(provider);
-    head.append(name, status);
+    const meta = document.createElement('div');
+    meta.className = 'limit-meta';
+    meta.textContent = provider.status === 'ok' || provider.stale ? limitProviderMeta(provider) : '';
+    titleBlock.append(name, meta);
+    const plan = document.createElement('div');
+    plan.className = 'limit-plan';
+    plan.textContent = limitProviderPlan(provider);
+    head.append(titleBlock, plan);
     const windows = document.createElement('div');
     windows.className = 'limit-windows';
     windows.append(limitWindowNode('Session', windowForKind(provider, 'session'), color, 0.95));
@@ -468,7 +480,7 @@ function renderLimitProviderCheckboxes() {
   }
   const enabled = enabledLimitProviderSet();
   els.limitProviderCheckboxes.replaceChildren();
-  for (const { id, label } of LIMIT_PROVIDERS) {
+  for (const { id, label, settingsLabel } of LIMIT_PROVIDERS) {
     const wrap = document.createElement('label');
     wrap.className = 'client-checkbox';
     const cb = document.createElement('input');
@@ -477,7 +489,7 @@ function renderLimitProviderCheckboxes() {
     cb.checked = enabled.has(id);
     cb.addEventListener('change', onLimitProviderToggle);
     const text = document.createElement('span');
-    text.textContent = label;
+    text.textContent = settingsLabel || label;
     wrap.append(cb, text);
     els.limitProviderCheckboxes.appendChild(wrap);
   }

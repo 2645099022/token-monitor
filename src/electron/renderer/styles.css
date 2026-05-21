@@ -380,6 +380,12 @@ input, textarea, [contenteditable="true"] {
   justify-content: space-between;
   gap: 8px;
 }
+.limit-head { align-items: start; }
+.limit-title {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
 .limit-name {
   display: flex;
   min-width: 0;
@@ -394,7 +400,25 @@ input, textarea, [contenteditable="true"] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.limit-status { flex: 0 0 auto; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.limit-meta {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.limit-plan {
+  flex: 0 0 auto;
+  max-width: 42%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .limit-windows {
   display: grid;
   grid-template-columns: 1fr 1fr;

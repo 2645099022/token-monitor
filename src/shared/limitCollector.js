@@ -86,6 +86,23 @@ function uniqueStrings(values) {
   return out;
 }
 
+function planLabelFromParts(...parts) {
+  const text = parts.map((part) => String(part || '')).find(Boolean) || '';
+  const raw = text.toLowerCase().replace(/^(claude|chatgpt|openai)[\s_-]+/, '').replace(/[_-]+/g, ' ').trim();
+  if (!raw || raw.includes('@')) return '';
+  const aliases = {
+    free: 'Free',
+    plus: 'Plus',
+    pro: 'Pro',
+    max: 'Max',
+    team: 'Team',
+    teams: 'Team',
+    enterprise: 'Enterprise'
+  };
+  if (aliases[raw]) return aliases[raw];
+  return raw.split(/\s+/).slice(0, 3).map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+}
+
 function extractClaudeOauth(credentials) {
   return credentials?.claudeAiOauth || credentials?.oauth || credentials || null;
 }
@@ -105,7 +122,8 @@ async function readClaudeCredentials(deps = {}) {
     if (oauth?.accessToken) {
       return {
         accessToken: String(oauth.accessToken),
-        identity: `path:${env.CLAUDE_CONFIG_DIR ? 'CLAUDE_CONFIG_DIR/.credentials.json' : '~/.claude/.credentials.json'}:${oauth.subscriptionType || ''}:${oauth.rateLimitTier || ''}`
+        identity: `path:${env.CLAUDE_CONFIG_DIR ? 'CLAUDE_CONFIG_DIR/.credentials.json' : '~/.claude/.credentials.json'}:${oauth.subscriptionType || ''}:${oauth.rateLimitTier || ''}`,
+        accountLabel: planLabelFromParts(oauth.subscriptionType, oauth.rateLimitTier)
       };
     }
   } catch (error) {
@@ -119,7 +137,8 @@ async function readClaudeCredentials(deps = {}) {
       if (oauth?.accessToken) {
         return {
           accessToken: String(oauth.accessToken),
-          identity: `keychain:Claude Code-credentials:${oauth.subscriptionType || ''}:${oauth.rateLimitTier || ''}`
+          identity: `keychain:Claude Code-credentials:${oauth.subscriptionType || ''}:${oauth.rateLimitTier || ''}`,
+          accountLabel: planLabelFromParts(oauth.subscriptionType, oauth.rateLimitTier)
         };
       }
     }
@@ -217,6 +236,7 @@ function mapClaudeUsageToProvider(usage, meta = {}) {
   return normalizeLimitProvider({
     provider: 'claude',
     accountKey: meta.accountKey || '',
+    accountLabel: meta.accountLabel || '',
     source: meta.source || 'oauth',
     status: 'ok',
     updatedAt: meta.updatedAt,
@@ -235,6 +255,7 @@ async function fetchClaudeLimits(options = {}, deps = {}) {
     }, deps);
     return mapClaudeUsageToProvider(usage, {
       accountKey: hashKey('claude', credentials.identity),
+      accountLabel: credentials.accountLabel,
       updatedAt: nowIso(nowMs),
       source: 'oauth'
     });
@@ -367,6 +388,7 @@ function parseClaudeCliUsageText(text, now = new Date()) {
   const secondaryResetDescription = extractClaudeReset(lines, 'Current week');
   const accountEmail = (clean.match(/(?:Account|Email):\s*([^\s@]+@[^\s@]+)/i) || [])[1] || '';
   const accountOrganization = ((clean.match(/(?:Org|Organization):\s*(.+)/i) || [])[1] || '').trim();
+  const accountLabel = planLabelFromParts((clean.match(/(?:Plan|Subscription):\s*([A-Za-z][A-Za-z0-9 _-]{0,30})/i) || [])[1] || '');
   if (sessionPercentLeft === null) throw errorWithStatus('unavailable', 'Claude CLI usage missing current session');
   return {
     sessionPercentLeft,
@@ -375,6 +397,7 @@ function parseClaudeCliUsageText(text, now = new Date()) {
     secondaryResetDescription,
     primaryResetsAt: parseClaudeResetDate(primaryResetDescription, now),
     secondaryResetsAt: parseClaudeResetDate(secondaryResetDescription, now),
+    accountLabel,
     accountKey: [accountEmail, accountOrganization].filter(Boolean).join('|') || 'claude-cli'
   };
 }
@@ -399,6 +422,7 @@ function mapClaudeCliUsageToProvider(text, meta = {}) {
   return normalizeLimitProvider({
     provider: 'claude',
     accountKey: hashKey('claude-cli', parsed.accountKey),
+    accountLabel: parsed.accountLabel,
     source: 'cli',
     status: 'ok',
     updatedAt: meta.updatedAt,
@@ -513,8 +537,30 @@ function codexWindowKind(name, window) {
   return 'session';
 }
 
+function codexRateLimitSnapshot(payload = {}) {
+  const rateLimitsById = payload.rateLimitsByLimitId || payload.rate_limits_by_limit_id || {};
+  return rateLimitsById.codex || payload.rateLimits || payload.rate_limits || {};
+}
+
+function codexAccountLabel(payload = {}) {
+  const snapshot = codexRateLimitSnapshot(payload);
+  const account = payload.account || {};
+  return planLabelFromParts(
+    snapshot.planType,
+    snapshot.plan_type,
+    account.planType,
+    account.plan_type,
+    account.loginMethod,
+    account.login_method,
+    account.plan,
+    account.subscription?.planType,
+    account.subscription?.plan_type,
+    account.subscription?.plan
+  );
+}
+
 function mapCodexRateLimitsToProvider(payload, meta = {}) {
-  const rateLimits = payload?.rateLimits || payload?.rate_limits || {};
+  const rateLimits = codexRateLimitSnapshot(payload);
   const windows = [];
   for (const key of ['primary', 'secondary']) {
     const window = rateLimits[key];
@@ -529,6 +575,7 @@ function mapCodexRateLimitsToProvider(payload, meta = {}) {
   return normalizeLimitProvider({
     provider: 'codex',
     accountKey: meta.accountKey || '',
+    accountLabel: meta.accountLabel || codexAccountLabel(payload),
     source: meta.source || 'rpc',
     status: rateLimits.rateLimitReachedType ? 'rateLimited' : 'ok',
     updatedAt: meta.updatedAt,
@@ -724,11 +771,12 @@ async function readCodexRpcWithCommand(command, deps = {}) {
     const rateLimitResult = await rpc.send('account/rateLimits/read');
     const accountResult = await rpc.send('account/read').catch(() => null);
     const account = accountResult?.account || null;
-    const rateLimits = rateLimitResult?.rateLimits || rateLimitResult?.rate_limits || {};
+    const rateLimitsByLimitId = rateLimitResult?.rateLimitsByLimitId || rateLimitResult?.rate_limits_by_limit_id || {};
+    const rateLimits = rateLimitResult?.rateLimits || rateLimitResult?.rate_limits || rateLimitsByLimitId.codex || {};
     if (!account && !rateLimits?.primary && !rateLimits?.secondary) {
       throw errorWithStatus('notConfigured', 'Codex account not configured');
     }
-    return { account, rateLimits };
+    return { account, rateLimits, rateLimitsByLimitId };
   } finally {
     try { child.kill('SIGTERM'); } catch (_) {}
   }
@@ -755,6 +803,7 @@ async function fetchCodexLimits(options = {}, deps = {}) {
   const identity = payload.account?.email || `${payload.account?.type || 'account'}:${payload.account?.planType || ''}:${deps.codexAuthPath || codexAuthPath(deps.env || process.env)}`;
   return mapCodexRateLimitsToProvider(payload, {
     accountKey: hashKey('codex', identity),
+    accountLabel: codexAccountLabel(payload),
     updatedAt: nowIso(nowMs),
     source: 'rpc'
   });

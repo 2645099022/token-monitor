@@ -35,6 +35,13 @@ function normalizeSource(value) {
   return VALID_SOURCES.has(raw) ? raw : '';
 }
 
+function normalizeAccountLabel(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > 32 || raw.includes('@') || /^https?:\/\//i.test(raw)) return '';
+  const clean = raw.replace(/[^a-z0-9 +._-]/gi, '').replace(/\s+/g, ' ').trim();
+  return clean.length <= 32 ? clean : '';
+}
+
 function normalizeWindowKind(value) {
   const raw = String(value || '').trim().toLowerCase().replace(/[_\s-]+/g, '');
   if (raw === 'session') return 'session';
@@ -97,7 +104,7 @@ function normalizeLimitProvider(input) {
   return {
     provider,
     accountKey: input.accountKey ? String(input.accountKey) : '',
-    accountLabel: '',
+    accountLabel: normalizeAccountLabel(input.accountLabel),
     status: normalizeStatus(input.status),
     source: normalizeSource(input.source),
     updatedAt: normalizeIsoTimestamp(input.updatedAt) || normalizeIsoTimestamp(input.checkedAt),

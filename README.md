@@ -186,6 +186,7 @@ are gitignored.
 ## Acknowledgments
 
 - [tokscale](https://github.com/junhoyeo/tokscale) for log parsing and token accounting.
+- [CodexBar](https://github.com/steipete/CodexBar) for AI Tool Limits research.
 
 ## License
 
