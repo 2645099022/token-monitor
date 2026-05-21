@@ -2,6 +2,7 @@
 
 const clientLabels = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes', gemini: 'Gemini', cursor: 'Cursor', opencode: 'OpenCode', openclaw: 'OpenClaw' };
 const clientColors = { claude: '#cc7c5e', codex: '#49a3b0', hermes: '#a57df0', gemini: '#6ab4f0', deepseek: '#6ab4f0', cursor: '#f0d66a', opencode: '#7fb069', openclaw: '#d4845c', default: '#6ab4f0' };
+const clientsWithIcon = new Set(['claude', 'codex']);
 const KNOWN_CLIENTS = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
@@ -281,12 +282,16 @@ function renderLimits() {
     titleBlock.className = 'limit-title';
     const name = document.createElement('div');
     name.className = 'limit-name';
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    dot.style.background = color;
+    const mark = document.createElement('span');
+    if (clientsWithIcon.has(id)) {
+      mark.className = `limit-icon limit-icon-${id}`;
+    } else {
+      mark.className = 'dot';
+      mark.style.background = color;
+    }
     const title = document.createElement('span');
     title.textContent = label;
-    name.append(dot, title);
+    name.append(mark, title);
     const meta = document.createElement('div');
     meta.className = 'limit-meta';
     meta.textContent = provider.status === 'ok' || provider.stale ? limitProviderMeta(provider) : '';

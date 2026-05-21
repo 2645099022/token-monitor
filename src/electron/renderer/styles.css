@@ -347,6 +347,27 @@ input, textarea, [contenteditable="true"] {
   border-radius: 50%;
   background: var(--blue);
 }
+.limit-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  background-color: currentColor;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+.limit-icon-claude {
+  -webkit-mask-image: url(../../../assets/icons/claude.svg);
+  mask-image: url(../../../assets/icons/claude.svg);
+}
+.limit-icon-codex {
+  -webkit-mask-image: url(../../../assets/icons/codex.svg);
+  mask-image: url(../../../assets/icons/codex.svg);
+}
 .row-name span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-metrics { display: grid; flex: 0 0 auto; gap: 2px; text-align: right; }
 .row-value { color: var(--text); white-space: nowrap; }
