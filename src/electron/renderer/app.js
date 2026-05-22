@@ -69,9 +69,9 @@ const deviceColors = ['#49a3b0', '#6ab4f0', '#cc7c5e', '#a57df0', '#f0d66a', '#f
 const fallbackModelColors = ['#6ab4f0', '#cc7c5e', '#a57df0', '#49a3b0', '#f0d66a', '#f06a7b'];
 const baseBreakdownOrder = ['tool', 'device', 'model'];
 const state = { period: 'today', breakdown: 'tool', settings: null, stats: null, refreshTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, mode: 'idle' };
-const defaultAppearance = { glassOpacity: 68, glassBlur: 32, systemGlass: true, showLiveDot: true, showToolIcons: true };
+const defaultAppearance = { glassOpacity: 68, glassBlur: 32, zoomFactor: 1, systemGlass: true, showLiveDot: true, showToolIcons: true };
 const els = {
-  shell: document.querySelector('.shell'), status: document.getElementById('status'), liveDot: document.getElementById('liveDot'), totalTokens: document.getElementById('totalTokens'), cost: document.getElementById('cost'), breakdown: document.getElementById('breakdown'), limitsPanel: document.getElementById('limitsPanel'), breakdownToggle: document.getElementById('breakdownToggle'), pinButton: document.getElementById('pinButton'), settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'), hubUrlInput: document.getElementById('hubUrlInput'), secretInput: document.getElementById('secretInput'), deviceIdInput: document.getElementById('deviceIdInput'), limitProviderCheckboxes: document.getElementById('limitProviderCheckboxes'), limitsRefreshInput: document.getElementById('limitsRefreshInput'), showLimitSourceInput: document.getElementById('showLimitSourceInput'), systemGlassInput: document.getElementById('systemGlassInput'), liveDotInput: document.getElementById('liveDotInput'), toolIconsInput: document.getElementById('toolIconsInput'), discordRpcInput: document.getElementById('discordRpcInput'), glassInput: document.getElementById('glassInput'), blurInput: document.getElementById('blurInput'), saveSettingsButton: document.getElementById('saveSettingsButton'), clientCheckboxes: document.getElementById('clientCheckboxes'), resetAppearanceButton: document.getElementById('resetAppearanceButton'), openConfigButton: document.getElementById('openConfigButton'), refreshButton: document.getElementById('refreshButton'), minButton: document.getElementById('minButton'), closeButton: document.getElementById('closeButton')
+  shell: document.querySelector('.shell'), status: document.getElementById('status'), liveDot: document.getElementById('liveDot'), totalTokens: document.getElementById('totalTokens'), cost: document.getElementById('cost'), breakdown: document.getElementById('breakdown'), limitsPanel: document.getElementById('limitsPanel'), breakdownToggle: document.getElementById('breakdownToggle'), pinButton: document.getElementById('pinButton'), settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'), hubUrlInput: document.getElementById('hubUrlInput'), secretInput: document.getElementById('secretInput'), deviceIdInput: document.getElementById('deviceIdInput'), limitProviderCheckboxes: document.getElementById('limitProviderCheckboxes'), limitsRefreshInput: document.getElementById('limitsRefreshInput'), showLimitSourceInput: document.getElementById('showLimitSourceInput'), systemGlassInput: document.getElementById('systemGlassInput'), liveDotInput: document.getElementById('liveDotInput'), toolIconsInput: document.getElementById('toolIconsInput'), discordRpcInput: document.getElementById('discordRpcInput'), glassInput: document.getElementById('glassInput'), blurInput: document.getElementById('blurInput'), zoomInput: document.getElementById('zoomInput'), resetGlassButton: document.getElementById('resetGlassButton'), resetDepthButton: document.getElementById('resetDepthButton'), resetZoomButton: document.getElementById('resetZoomButton'), saveSettingsButton: document.getElementById('saveSettingsButton'), clientCheckboxes: document.getElementById('clientCheckboxes'), openConfigButton: document.getElementById('openConfigButton'), refreshButton: document.getElementById('refreshButton'), minButton: document.getElementById('minButton'), closeButton: document.getElementById('closeButton')
 };
 
 function formatNumber(value) { return Math.round(Number(value || 0)).toLocaleString('en-US'); }
@@ -487,27 +487,25 @@ function applyAppearanceSettings(settings) {
   els.liveDot.style.display = (settings?.showLiveDot !== false) ? '' : 'none';
 }
 
-function applyAppearanceFromControls() {
-  const patch = {
+function appearancePatchFromControls() {
+  return {
     systemGlass: Boolean(els.systemGlassInput.checked),
     showLiveDot: Boolean(els.liveDotInput.checked),
     showToolIcons: Boolean(els.toolIconsInput.checked),
     glassOpacity: Number(els.glassInput.value === '' ? defaultAppearance.glassOpacity : els.glassInput.value),
-    glassBlur: Number(els.blurInput.value === '' ? defaultAppearance.glassBlur : els.blurInput.value)
+    glassBlur: Number(els.blurInput.value === '' ? defaultAppearance.glassBlur : els.blurInput.value),
+    zoomFactor: Number(els.zoomInput.value === '' ? defaultAppearance.zoomFactor * 100 : els.zoomInput.value) / 100
   };
+}
+
+function applyAppearanceFromControls() {
+  const patch = appearancePatchFromControls();
   applyAppearanceSettings(patch);
   window.tokenMonitor.previewAppearance?.(patch).catch(() => {});
 }
 
 async function saveAppearanceFromControls() {
-  await saveSettings({
-    systemGlass: Boolean(els.systemGlassInput.checked),
-    showLiveDot: Boolean(els.liveDotInput.checked),
-    showToolIcons: Boolean(els.toolIconsInput.checked),
-    discordRpcEnabled: Boolean(els.discordRpcInput.checked),
-    glassOpacity: Number(els.glassInput.value === '' ? defaultAppearance.glassOpacity : els.glassInput.value),
-    glassBlur: Number(els.blurInput.value === '' ? defaultAppearance.glassBlur : els.blurInput.value)
-  });
+  await saveSettings({ ...appearancePatchFromControls(), discordRpcEnabled: Boolean(els.discordRpcInput.checked) });
 }
 
 function syncSettingsForm() {
@@ -522,6 +520,7 @@ function syncSettingsForm() {
   els.discordRpcInput.checked = Boolean(state.settings.discordRpcEnabled);
   els.glassInput.value = String(state.settings.glassOpacity ?? 68);
   els.blurInput.value = String(state.settings.glassBlur ?? 32);
+  els.zoomInput.value = String(Math.round((Number(state.settings.zoomFactor) || 1) * 100));
   els.pinButton.classList.toggle('active', Boolean(state.settings.alwaysOnTop));
   renderClientCheckboxes();
   renderLimitProviderCheckboxes();
@@ -612,6 +611,21 @@ async function saveSettings(patch) {
   restartTimer();
 }
 
+function updateTitleFit() {
+  const measure = document.querySelector('.app-title-measure');
+  const container = document.querySelector('.app-title');
+  if (!measure || !container) return;
+  const dotSpace = (els.liveDot?.offsetWidth || 4) + 5;
+  // 4px buffer so the swap happens just before clipping would visibly start.
+  const collapse = measure.scrollWidth + 4 > container.clientWidth - dotSpace;
+  els.shell.classList.toggle('title-collapsed', collapse);
+}
+
+if (typeof ResizeObserver === 'function') {
+  const tb = document.querySelector('.titlebar');
+  if (tb) new ResizeObserver(updateTitleFit).observe(tb);
+}
+
 async function init() {
   state.settings = await window.tokenMonitor.getSettings();
   syncSettingsForm();
@@ -626,6 +640,7 @@ async function init() {
   } catch (_) {}
   await refreshStats();
   restartTimer();
+  updateTitleFit();
 }
 
 for (const tab of document.querySelectorAll('.tab')) {
@@ -662,17 +677,30 @@ els.limitsRefreshInput.addEventListener('change', async () => {
 els.showLimitSourceInput.addEventListener('change', async () => {
   await saveSettings({ showLimitSource: els.showLimitSourceInput.checked });
 });
-els.resetAppearanceButton.addEventListener('click', async () => {
-  await saveSettings(defaultAppearance);
+els.resetGlassButton.addEventListener('click', async () => {
+  els.glassInput.value = String(defaultAppearance.glassOpacity);
+  applyAppearanceFromControls();
+  await saveSettings({ glassOpacity: defaultAppearance.glassOpacity });
+});
+els.resetDepthButton.addEventListener('click', async () => {
+  els.blurInput.value = String(defaultAppearance.glassBlur);
+  applyAppearanceFromControls();
+  await saveSettings({ glassBlur: defaultAppearance.glassBlur });
 });
 els.glassInput.addEventListener('input', applyAppearanceFromControls);
 els.blurInput.addEventListener('input', applyAppearanceFromControls);
+els.zoomInput.addEventListener('input', applyAppearanceFromControls);
 els.systemGlassInput.addEventListener('change', saveAppearanceFromControls);
 els.liveDotInput.addEventListener('change', saveAppearanceFromControls);
 els.toolIconsInput.addEventListener('change', saveAppearanceFromControls);
 els.discordRpcInput.addEventListener('change', saveAppearanceFromControls);
 els.glassInput.addEventListener('change', saveAppearanceFromControls);
 els.blurInput.addEventListener('change', saveAppearanceFromControls);
+els.zoomInput.addEventListener('change', saveAppearanceFromControls);
+els.resetZoomButton.addEventListener('click', async () => {
+  els.zoomInput.value = String(Math.round(defaultAppearance.zoomFactor * 100));
+  await saveSettings({ zoomFactor: defaultAppearance.zoomFactor });
+});
 els.openConfigButton.addEventListener('click', () => window.tokenMonitor.openUserData());
 els.refreshButton.addEventListener('click', refreshStats);
 els.minButton.addEventListener('click', () => window.tokenMonitor.minimize());

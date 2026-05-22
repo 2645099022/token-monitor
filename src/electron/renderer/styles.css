@@ -79,7 +79,43 @@ input, textarea, [contenteditable="true"] {
   gap: 12px;
   min-height: 30px;
 }
-.app-title { font-size: 16px; font-weight: 700; line-height: 1.12; text-shadow: 0 1px 10px rgba(0, 0, 0, 0.35); }
+.titlebar > div:first-child { min-width: 0; flex: 1 1 auto; }
+.app-title {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  font-size: clamp(13px, 4.5vw, 16px);
+  font-weight: 700;
+  line-height: 1.12;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.35);
+}
+.app-title-text {
+  min-width: 0;
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-title-mark {
+  display: none;
+  font-weight: 700;
+  line-height: 1;
+}
+/* Offscreen probe: rendered with the same font/size as the title, used by JS */
+/* to detect "would Token Monitor still fit?". Independent of the live text */
+/* element so toggling its visibility never disturbs the measurement. */
+.app-title-measure {
+  position: absolute;
+  top: 0;
+  left: -9999px;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: nowrap;
+}
+/* Swap text → Σ at the exact width where the title would start to truncate, */
+/* driven by JS overflow detection (see renderer/app.js). */
+.shell.title-collapsed .app-title-text { display: none; }
+.shell.title-collapsed .app-title-mark { display: inline; }
 .live-dot {
   display: inline-block;
   width: 4px;
@@ -105,7 +141,8 @@ input, textarea, [contenteditable="true"] {
 .title-controls {
   -webkit-app-region: no-drag;
   position: relative;
-  flex: 0 0 148px;
+  flex: 0 1 148px;
+  min-width: 100px;
   width: 148px;
   height: 30px;
 }
@@ -248,6 +285,8 @@ input, textarea, [contenteditable="true"] {
   cursor: pointer;
 }
 .reset-appearance-button:hover { border-color: var(--line-strong); color: var(--text); }
+.slider-label { display: flex; align-items: center; justify-content: space-between; }
+.reset-inline { width: 18px; height: 18px; font-size: 10px; line-height: 1; }
 .settings-panel input, .settings-panel select {
   width: 100%;
   min-width: 0;
@@ -514,21 +553,21 @@ input, textarea, [contenteditable="true"] {
 .mode-button:hover { border-color: rgba(115, 189, 245, 0.62); color: var(--blue); }
 .error { color: var(--red); }
 
-@media (max-height: 310px) {
-  .shell { gap: 10px; padding: 14px 16px; }
-  .titlebar { min-height: 38px; }
-  .total-panel { padding-top: 6px; }
-  .total-number { margin-top: 8px; font-size: clamp(42px, 12vw, 64px); }
-  .breakdown, .limits-panel, .footer { display: none; }
+/* Progressive collapse as the window gets shorter. Width is intentionally not a */
+/* trigger — a narrow but tall window is a valid sidebar layout. Sections drop */
+/* in order of least → most important: footer, then limits, then breakdown. */
+@media (max-height: 280px) {
+  .footer { display: none; }
 }
-
-@media (max-height: 220px) {
-  .shell { gap: 8px; padding: 12px 16px; }
-  .titlebar { min-height: 34px; }
-  .app-title { font-size: 15px; }
-  .status { margin-top: 2px; }
-  .total-panel { padding-top: 2px; }
-  .label-row { font-size: 10px; }
-  .total-number { margin-top: 4px; font-size: clamp(38px, 12vw, 58px); }
-  .cost { margin-top: 4px; }
+@media (max-height: 240px) {
+  .limits-panel { display: none; }
+}
+@media (max-height: 200px) {
+  .shell { gap: 10px; padding: 12px 14px; }
+  .titlebar { min-height: clamp(28px, 8vh, 38px); }
+  .total-panel { padding: 4px 2px; }
+  .label-row { font-size: clamp(9px, 2.6vw, 11px); }
+  .total-number { margin-top: clamp(2px, 1.2vh, 8px); font-size: clamp(22px, 13vw, 60px); }
+  .cost { margin-top: clamp(2px, 1vh, 6px); font-size: clamp(10px, 2.8vw, 12px); }
+  .breakdown { display: none; }
 }

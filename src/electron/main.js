@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell } = require('electron');
 const { defaultDeviceId, loadDotEnv, pidFilePath } = require('../shared/config');
 const { startCollector } = require('../shared/collector');
 const { normalizeLimitsRefreshMs, parseBoolean, parseLimitProviders } = require('../shared/limitCollector');
@@ -13,6 +13,10 @@ loadDotEnv();
 
 const APP_NAME = 'Token Monitor';
 const APP_ICON_PATH = path.join(__dirname, '..', '..', 'assets', 'icon.png');
+
+const DEFAULT_WINDOW = { width: 360, height: 500 };
+const WINDOW_LIMITS = { minWidth: 240, minHeight: 140, maxWidth: 1200, maxHeight: 1400 };
+const ZOOM_LIMITS = { min: 0.7, max: 1.6, step: 0.1 };
 
 let mainWindow = null;
 let settingsPath = null;
@@ -40,8 +44,72 @@ function defaultSettings() {
     limitsEnabled: parseBoolean(process.env.TOKEN_MONITOR_LIMITS_ENABLED, true),
     limitProviders: parseLimitProviders(process.env.TOKEN_MONITOR_LIMIT_PROVIDERS).join(','),
     limitsRefreshMs: normalizeLimitsRefreshMs(process.env.TOKEN_MONITOR_LIMITS_REFRESH_MS),
-    showLimitSource: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_SOURCE, false)
+    showLimitSource: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_SOURCE, false),
+    windowBounds: null,
+    zoomFactor: 1
   };
+}
+
+function clampZoom(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(ZOOM_LIMITS.max, Math.max(ZOOM_LIMITS.min, Number(n.toFixed(2))));
+}
+
+function isBoundsOnScreen(bounds) {
+  if (!bounds || typeof bounds.x !== 'number' || typeof bounds.y !== 'number') return false;
+  try {
+    const display = screen.getDisplayMatching({
+      x: bounds.x, y: bounds.y, width: bounds.width || 1, height: bounds.height || 1
+    });
+    const wa = display.workArea;
+    return bounds.x + bounds.width > wa.x &&
+      bounds.x < wa.x + wa.width &&
+      bounds.y + bounds.height > wa.y &&
+      bounds.y < wa.y + wa.height;
+  } catch (_) { return false; }
+}
+
+function restoredBounds() {
+  const saved = settings?.windowBounds;
+  if (!saved || typeof saved.width !== 'number' || typeof saved.height !== 'number') return null;
+  const width = Math.min(WINDOW_LIMITS.maxWidth, Math.max(WINDOW_LIMITS.minWidth, saved.width));
+  const height = Math.min(WINDOW_LIMITS.maxHeight, Math.max(WINDOW_LIMITS.minHeight, saved.height));
+  if (!isBoundsOnScreen({ ...saved, width, height })) return { width, height };
+  return { x: saved.x, y: saved.y, width, height };
+}
+
+let persistBoundsTimer = null;
+function persistBoundsSoon() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized() || mainWindow.isFullScreen()) return;
+  if (persistBoundsTimer) clearTimeout(persistBoundsTimer);
+  persistBoundsTimer = setTimeout(() => {
+    persistBoundsTimer = null;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const next = mainWindow.getBounds();
+    const prev = settings.windowBounds || {};
+    if (prev.x === next.x && prev.y === next.y && prev.width === next.width && prev.height === next.height) return;
+    settings.windowBounds = next;
+    saveSettings();
+  }, 400);
+}
+
+function applyZoomFactor() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.setZoomFactor(clampZoom(settings.zoomFactor));
+}
+
+function setZoomFactor(value) {
+  const next = clampZoom(value);
+  if (next === clampZoom(settings.zoomFactor)) return;
+  settings.zoomFactor = next;
+  saveSettings();
+  applyZoomFactor();
+}
+
+function adjustZoom(delta) {
+  setZoomFactor(clampZoom(settings.zoomFactor) + delta);
 }
 
 function readSettings() {
@@ -318,15 +386,15 @@ async function fetchStats() {
   return response.json();
 }
 
-function createWindow(bounds) {
+function createWindow(boundsOverride) {
   if (!settings) settings = readSettings();
   const glass = nativeBlurEnabled();
+  const bounds = boundsOverride || restoredBounds() || DEFAULT_WINDOW;
   mainWindow = new BrowserWindow({
-    width: bounds?.width ?? 360,
-    height: bounds?.height ?? 500,
-    ...(bounds && typeof bounds.x === 'number' ? { x: bounds.x, y: bounds.y } : {}),
-    minWidth: 300,
-    minHeight: 170,
+    width: bounds.width,
+    height: bounds.height,
+    ...(typeof bounds.x === 'number' ? { x: bounds.x, y: bounds.y } : {}),
+    ...WINDOW_LIMITS,
     frame: false,
     transparent: true,
     resizable: true,
@@ -338,7 +406,8 @@ function createWindow(bounds) {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      zoomFactor: clampZoom(settings.zoomFactor)
     }
   });
   applyWindowSettings();
@@ -346,8 +415,21 @@ function createWindow(bounds) {
   keepNativeBlurActive();
   mainWindow.on('focus', keepNativeBlurActive);
   mainWindow.on('blur', keepNativeBlurActive);
+  mainWindow.on('resized', persistBoundsSoon);
+  mainWindow.on('moved', persistBoundsSoon);
+  mainWindow.webContents.on('before-input-event', handleZoomShortcut);
+  mainWindow.webContents.on('did-finish-load', applyZoomFactor);
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
+}
+
+function handleZoomShortcut(event, input) {
+  if (input.type !== 'keyDown') return;
+  if (!(input.control || input.meta)) return;
+  const key = input.key;
+  if (key === '=' || key === '+') { event.preventDefault(); adjustZoom(ZOOM_LIMITS.step); }
+  else if (key === '-' || key === '_') { event.preventDefault(); adjustZoom(-ZOOM_LIMITS.step); }
+  else if (key === '0') { event.preventDefault(); setZoomFactor(1); }
 }
 
 function rebuildWindow() {
@@ -395,9 +477,11 @@ app.whenReady().then(() => {
       limitsEnabled: parseBoolean(patch.limitsEnabled ?? settings.limitsEnabled, true),
       limitProviders: patch.limitProviders !== undefined ? parseLimitProviders(patch.limitProviders).join(',') : settings.limitProviders,
       limitsRefreshMs: normalizeLimitsRefreshMs(patch.limitsRefreshMs ?? settings.limitsRefreshMs),
-      showLimitSource: parseBoolean(patch.showLimitSource ?? settings.showLimitSource, false)
+      showLimitSource: parseBoolean(patch.showLimitSource ?? settings.showLimitSource, false),
+      zoomFactor: clampZoom(patch.zoomFactor ?? settings.zoomFactor)
     };
     saveSettings();
+    if (patch.zoomFactor !== undefined) applyZoomFactor();
     if (settings.discordRpcEnabled && !previousDiscordRpcEnabled) startDiscordRpc();
     else if (!settings.discordRpcEnabled && previousDiscordRpcEnabled) stopDiscordRpc();
     applyWindowSettings();
@@ -421,6 +505,9 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('appearance:preview', (_event, patch) => {
     applyNativeMaterial({ ...settings, ...patch });
+    if (patch && patch.zoomFactor !== undefined && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.setZoomFactor(clampZoom(patch.zoomFactor));
+    }
     return true;
   });
   ipcMain.handle('stats:get', () => fetchStats());
