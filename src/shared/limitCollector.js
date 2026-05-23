@@ -10,8 +10,12 @@ const { DEFAULT_LIMITS_REFRESH_MS, normalizeLimitProvider, normalizeLimitsSummar
 const LIMIT_PROVIDER_IDS = ['claude', 'codex'];
 const LIMIT_REFRESH_VALUES = new Set([60_000, 120_000, 300_000, 900_000, 1_800_000]);
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const CLAUDE_OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
+const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const CLAUDE_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 const CLAUDE_SESSION_WINDOW_MINUTES = 5 * 60;
 const CLAUDE_WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
+const TOKEN_MONITOR_USER_AGENT = 'token-monitor/0.1.0 (+https://github.com/Javis603/token-monitor)';
 
 function nowIso(nowMs) {
   return new Date(nowMs).toISOString();
@@ -72,6 +76,66 @@ function claudeCredentialPath(env = process.env) {
   return path.join(base, '.credentials.json');
 }
 
+function normalizeExpiresAt(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 20_000_000_000 ? Math.floor(value) : Math.floor(value * 1000);
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function listWslDistros(deps = {}) {
+  const readdirSync = deps.readdirSync || fs.readdirSync;
+  try {
+    return readdirSync('\\\\wsl$').filter((name) => name && !name.startsWith('.') && !name.includes('$'));
+  } catch (_) {
+    return [];
+  }
+}
+
+function wslClaudeCredentialPaths(deps = {}) {
+  const readdirSync = deps.readdirSync || fs.readdirSync;
+  const paths = [];
+  for (const distro of listWslDistros(deps)) {
+    const homeDir = `\\\\wsl$\\${distro}\\home`;
+    let users;
+    try { users = readdirSync(homeDir); } catch (_) { continue; }
+    for (const user of users) {
+      paths.push(`\\\\wsl$\\${distro}\\home\\${user}\\.claude\\.credentials.json`);
+    }
+  }
+  return paths;
+}
+
+async function rankClaudeCredentialFiles(deps = {}) {
+  const env = deps.env || process.env;
+  const statFn = deps.stat || fs.promises.stat;
+  const platform = deps.platform || process.platform;
+  const candidates = [];
+  const nativePath = deps.claudeCredentialPath || claudeCredentialPath(env);
+  candidates.push({
+    path: nativePath,
+    identityLabel: env.CLAUDE_CONFIG_DIR ? 'CLAUDE_CONFIG_DIR/.credentials.json' : '~/.claude/.credentials.json'
+  });
+  if (platform === 'win32' && !env.CLAUDE_CONFIG_DIR) {
+    for (const wslPath of wslClaudeCredentialPaths(deps)) {
+      candidates.push({
+        path: wslPath,
+        identityLabel: `wsl:${wslPath.slice(7).replace(/\\\.claude\\\.credentials\.json$/, '')}`
+      });
+    }
+  }
+  const stamped = [];
+  for (const candidate of candidates) {
+    try {
+      const stats = await statFn(candidate.path);
+      stamped.push({ ...candidate, mtimeMs: stats.mtimeMs });
+    } catch (_) {}
+  }
+  return stamped.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
 function codexAuthPath(env = process.env) {
   const base = env.CODEX_HOME || path.join(os.homedir(), '.codex');
   return path.join(base, 'auth.json');
@@ -113,32 +177,47 @@ async function readClaudeCredentials(deps = {}) {
   const env = deps.env || process.env;
   if (env.CLAUDE_CODE_OAUTH_TOKEN) {
     return {
+      source: 'env',
       accessToken: String(env.CLAUDE_CODE_OAUTH_TOKEN),
-      identity: 'env:CLAUDE_CODE_OAUTH_TOKEN'
+      refreshToken: null,
+      expiresAt: null,
+      identity: 'env:CLAUDE_CODE_OAUTH_TOKEN',
+      accountLabel: ''
     };
   }
 
-  const filePath = deps.claudeCredentialPath || claudeCredentialPath(env);
-  try {
-    const oauth = extractClaudeOauth(await readJsonFile(filePath, deps));
-    if (oauth?.accessToken) {
-      return {
-        accessToken: String(oauth.accessToken),
-        identity: `path:${env.CLAUDE_CONFIG_DIR ? 'CLAUDE_CONFIG_DIR/.credentials.json' : '~/.claude/.credentials.json'}:${oauth.subscriptionType || ''}:${oauth.rateLimitTier || ''}`,
-        accountLabel: planLabelFromParts(oauth.subscriptionType, oauth.rateLimitTier)
-      };
+  for (const candidate of await rankClaudeCredentialFiles(deps)) {
+    try {
+      const raw = await readJsonFile(candidate.path, deps);
+      const fileShape = raw && typeof raw === 'object' && raw.claudeAiOauth ? 'claudeAiOauth' : 'root';
+      const oauth = extractClaudeOauth(raw);
+      if (oauth?.accessToken) {
+        return {
+          source: 'file',
+          filePath: candidate.path,
+          fileShape,
+          accessToken: String(oauth.accessToken),
+          refreshToken: oauth.refreshToken ? String(oauth.refreshToken) : null,
+          expiresAt: normalizeExpiresAt(oauth.expiresAt),
+          identity: `path:${candidate.identityLabel}:${oauth.subscriptionType || ''}:${oauth.rateLimitTier || ''}`,
+          accountLabel: planLabelFromParts(oauth.subscriptionType, oauth.rateLimitTier)
+        };
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') continue;
     }
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
   }
 
-  if (process.platform === 'darwin' && deps.readMacKeychain !== false) {
+  if ((deps.platform || process.platform) === 'darwin' && deps.readMacKeychain !== false) {
     const text = await readMacKeychainSecret('Claude Code-credentials', deps).catch(() => '');
     if (text) {
       const oauth = extractClaudeOauth(JSON.parse(text));
       if (oauth?.accessToken) {
         return {
+          source: 'keychain',
           accessToken: String(oauth.accessToken),
+          refreshToken: oauth.refreshToken ? String(oauth.refreshToken) : null,
+          expiresAt: normalizeExpiresAt(oauth.expiresAt),
           identity: `keychain:Claude Code-credentials:${oauth.subscriptionType || ''}:${oauth.rateLimitTier || ''}`,
           accountLabel: planLabelFromParts(oauth.subscriptionType, oauth.rateLimitTier)
         };
@@ -246,15 +325,114 @@ function mapClaudeUsageToProvider(usage, meta = {}) {
   });
 }
 
+async function refreshClaudeAccessToken(refreshToken, deps = {}) {
+  if (!refreshToken) throw errorWithStatus('unauthorized', 'No refresh token available');
+  const fetchFn = deps.fetch || fetch;
+  const url = deps.claudeTokenUrl || CLAUDE_OAUTH_TOKEN_URL;
+  const timeoutMs = Number(deps.fetchTimeoutMs || 12000);
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    client_id: CLAUDE_OAUTH_CLIENT_ID
+  });
+  try {
+    const response = await fetchFn(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/json',
+        'user-agent': TOKEN_MONITOR_USER_AGENT
+      },
+      body: body.toString(),
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!response.ok) {
+      const status = response.status === 400 || response.status === 401 ? 'unauthorized'
+        : response.status === 429 ? 'sourceRateLimited' : 'unavailable';
+      throw errorWithStatus(status, `oauth/token returned ${response.status}`);
+    }
+    const json = await response.json();
+    const nowMs = (deps.now || Date.now)();
+    const lifetimeSec = Math.max(60, Number(json.expires_in) || 3600);
+    return {
+      accessToken: String(json.access_token),
+      refreshToken: json.refresh_token ? String(json.refresh_token) : refreshToken,
+      expiresAt: nowMs + lifetimeSec * 1000
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') throw errorWithStatus('unavailable', 'oauth/token timed out');
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function writeClaudeCredentials(filePath, fileShape, updated, deps = {}) {
+  const readFile = deps.readFile || fs.promises.readFile;
+  const writeFile = deps.writeFile || fs.promises.writeFile;
+  const rename = deps.rename || fs.promises.rename;
+  let existing;
+  try {
+    existing = JSON.parse(await readFile(filePath, 'utf8'));
+  } catch (_) { return false; }
+  if (!existing || typeof existing !== 'object') return false;
+  if (fileShape === 'claudeAiOauth') {
+    existing.claudeAiOauth = { ...(existing.claudeAiOauth || {}), ...updated };
+  } else {
+    Object.assign(existing, updated);
+  }
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    await writeFile(tmpPath, `${JSON.stringify(existing, null, 2)}\n`, { mode: 0o600 });
+    await rename(tmpPath, filePath);
+    return true;
+  } catch (_) {
+    try { await (deps.unlink || fs.promises.unlink)(tmpPath); } catch (__) {}
+    return false;
+  }
+}
+
+async function persistClaudeRefresh(credentials, refreshed, deps = {}) {
+  if (credentials.source !== 'file' || !credentials.filePath) return;
+  await writeClaudeCredentials(credentials.filePath, credentials.fileShape, refreshed, deps).catch(() => {});
+}
+
+function callClaudeUsage(accessToken, deps = {}) {
+  return fetchJson(CLAUDE_USAGE_URL, {
+    accept: 'application/json',
+    authorization: `Bearer ${accessToken}`,
+    'anthropic-beta': 'oauth-2025-04-20',
+    'user-agent': TOKEN_MONITOR_USER_AGENT
+  }, deps);
+}
+
 async function fetchClaudeLimits(options = {}, deps = {}) {
   const nowMs = (deps.now || Date.now)();
   try {
-    const credentials = await readClaudeCredentials(deps);
-    const usage = await fetchJson(CLAUDE_USAGE_URL, {
-      accept: 'application/json',
-      authorization: `Bearer ${credentials.accessToken}`,
-      'anthropic-beta': 'oauth-2025-04-20'
-    }, deps);
+    let credentials = await readClaudeCredentials(deps);
+
+    if (credentials.refreshToken && credentials.expiresAt
+      && credentials.expiresAt - nowMs < CLAUDE_REFRESH_LEEWAY_MS) {
+      try {
+        const refreshed = await refreshClaudeAccessToken(credentials.refreshToken, deps);
+        await persistClaudeRefresh(credentials, refreshed, deps);
+        credentials = { ...credentials, ...refreshed };
+      } catch (_) { /* fall through; reactive retry below may still succeed */ }
+    }
+
+    let usage;
+    try {
+      usage = await callClaudeUsage(credentials.accessToken, deps);
+    } catch (error) {
+      if (error?.status !== 'unauthorized' || !credentials.refreshToken) throw error;
+      const refreshed = await refreshClaudeAccessToken(credentials.refreshToken, deps);
+      await persistClaudeRefresh(credentials, refreshed, deps);
+      credentials = { ...credentials, ...refreshed };
+      usage = await callClaudeUsage(credentials.accessToken, deps);
+    }
+
     return mapClaudeUsageToProvider(usage, {
       accountKey: hashKey('claude', credentials.identity),
       accountLabel: credentials.accountLabel,
@@ -878,5 +1056,8 @@ module.exports = {
   parseClaudeCliUsageText,
   parseBoolean,
   parseLimitProviders,
-  normalizeLimitsRefreshMs
+  normalizeLimitsRefreshMs,
+  refreshClaudeAccessToken,
+  rankClaudeCredentialFiles,
+  wslClaudeCredentialPaths
 };
