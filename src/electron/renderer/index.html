@@ -75,6 +75,28 @@
           <div id="clientCheckboxes" class="client-checkboxes"></div>
         </div>
         <div class="settings-group">
+          <div class="settings-group-header"><span>Cursor Account</span></div>
+          <div id="cursorAccountStatus" class="settings-note">Checking…</div>
+          <div class="settings-actions">
+            <button id="cursorLoginButton">Open cursor.com in browser</button>
+            <button id="cursorLogoutButton" class="hidden">Logout</button>
+            <button id="cursorRefreshButton" class="hidden">Refresh</button>
+          </div>
+          <div id="cursorManualPanel">
+            <p class="settings-note">
+              <strong>1.</strong> Open <code>cursor.com/settings</code> in your browser (button above).<br>
+              <strong>2.</strong> Open DevTools (F12 or Cmd+Opt+I) → Application/Storage → Cookies → cursor.com.<br>
+              <strong>3.</strong> Copy the <code>WorkosCursorSessionToken</code> value.<br>
+              <strong>4.</strong> Paste it below and click Save.
+            </p>
+            <textarea id="cursorManualInput" rows="3" spellcheck="false" placeholder="WorkosCursorSessionToken=..."></textarea>
+            <div class="settings-actions">
+              <button id="cursorManualSubmit">Save token</button>
+            </div>
+          </div>
+          <div id="cursorErrorMessage" class="settings-note error hidden"></div>
+        </div>
+        <div class="settings-group">
           <div class="settings-group-header"><span>AI Tool Limits</span></div>
           <div id="limitProviderCheckboxes" class="client-checkboxes"></div>
           <label>Refresh

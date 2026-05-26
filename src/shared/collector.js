@@ -10,6 +10,7 @@ const { readJson, sharedDataDir } = require('./config');
 const { tokscalePackageNameForPlatform, tokscalePlatformKey } = require('./tokscalePlatform');
 const { extractUsageFromTokscale } = require('./usage');
 const { collectLimitsOnce, createLimitsCollector } = require('./limitCollector');
+const cursorAuth = require('./cursorAuth');
 
 function toUnpackedPath(p) {
   // electron-builder asarUnpack stores real files at .../app.asar.unpacked/...
@@ -87,6 +88,13 @@ function resolvePlatformBinary() {
   return decideResolver({ downloaded, bundled, shim });
 }
 
+function tokscaleCommand() {
+  const resolved = resolvePlatformBinary();
+  const useDirect = Boolean(resolved && resolved.source !== 'shim');
+  if (useDirect) return { bin: resolved.path, prefixArgs: [], env: process.env };
+  return { bin: process.execPath, prefixArgs: [TOKSCALE_BIN_JS], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } };
+}
+
 function parseJsonOutput(stdout) {
   const text = String(stdout || '').trim();
   if (!text) throw new Error('tokscale produced empty stdout');
@@ -101,15 +109,9 @@ function parseJsonOutput(stdout) {
 
 function runTokscale({ clients, flags, commandTimeoutMs }) {
   const userArgs = ['--json', '--client', clients, '--group-by', 'client,model', ...flags];
-  const resolved = resolvePlatformBinary();
-  const useDirect = Boolean(resolved && resolved.source !== 'shim');
-  const bin = useDirect ? resolved.path : process.execPath;
-  const args = useDirect ? userArgs : [TOKSCALE_BIN_JS, ...userArgs];
-  const spawnOpts = useDirect
-    ? { windowsHide: true }
-    : { windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } };
+  const { bin, prefixArgs, env } = tokscaleCommand();
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, spawnOpts);
+    const child = spawn(bin, [...prefixArgs, ...userArgs], { env, windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timeout = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`tokscale timed out after ${commandTimeoutMs}ms`)); }, commandTimeoutMs);
@@ -124,8 +126,20 @@ function runTokscale({ clients, flags, commandTimeoutMs }) {
   });
 }
 
+async function maybeSyncCursor(clientsCsv, logger) {
+  const enabled = new Set(String(clientsCsv || '').split(',').map((v) => v.trim().toLowerCase()));
+  if (!enabled.has('cursor')) return;
+  if (!cursorAuth.readActiveAccount()) return;
+  try {
+    await cursorAuth.runCursorSync();
+  } catch (err) {
+    if (typeof logger === 'function') logger(`cursor sync failed: ${err.message}`);
+  }
+}
+
 async function collectUsageOnce(options) {
   const { clients, allTimeSince, commandTimeoutMs, deviceId, agentVersion = '0.1.0' } = options;
+  await maybeSyncCursor(clients, options.logger);
   const todayJson = await runTokscale({ clients, flags: ['--today'], commandTimeoutMs });
   const monthJson = await runTokscale({ clients, flags: ['--month'], commandTimeoutMs });
   const allTimeJson = await runTokscale({ clients, flags: ['--since', allTimeSince], commandTimeoutMs });
@@ -281,5 +295,6 @@ module.exports = {
   readDownloadedPointer,
   resolvePlatformBinary,
   startCollector,
+  tokscaleCommand,
   watchPathsForClients
 };

@@ -3,7 +3,7 @@
 const http = require('node:http');
 const path = require('node:path');
 const { URL } = require('node:url');
-const { aggregateDevices, normalizeDeviceRecord } = require('../shared/usage');
+const { aggregateDevices, mergeDeviceRecord } = require('../shared/usage');
 const { isAuthorized, readJsonBody, sendJson, sendText } = require('../shared/http');
 const { loadDotEnv, parseArgs, projectRoot, readJson, writeJsonAtomic } = require('../shared/config');
 
@@ -82,7 +82,8 @@ function createHub({
       try {
         const payload = await readJsonBody(req);
         if (!payload.deviceId && !payload.id) return sendJson(res, 400, { error: 'deviceId_required' });
-        const record = normalizeDeviceRecord({ ...payload, receivedAt: new Date().toISOString() });
+        const deviceId = String(payload.deviceId || payload.id);
+        const record = mergeDeviceRecord(store.devices[deviceId], { ...payload, receivedAt: new Date().toISOString() });
         store.devices[record.deviceId] = record;
         persist();
         broadcastStats('ingest');

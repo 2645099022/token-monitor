@@ -46,6 +46,11 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     return () => ipcRenderer.removeListener('appUpdate:push', listener);
   },
   setTrayIcons: (icons) => ipcRenderer.invoke('tray:setIcons', icons),
+  cursor: {
+    loginManual: (token) => ipcRenderer.invoke('cursor:loginManual', token),
+    logout: () => ipcRenderer.invoke('cursor:logout'),
+    status: () => ipcRenderer.invoke('cursor:status')
+  },
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close')
 });

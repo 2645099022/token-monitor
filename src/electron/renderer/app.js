@@ -61,8 +61,10 @@ const KNOWN_CLIENTS = [
 ];
 const LIMIT_PROVIDERS = [
   { id: 'claude', label: 'Claude', settingsLabel: 'Claude Code' },
-  { id: 'codex', label: 'Codex' }
+  { id: 'codex', label: 'Codex' },
+  { id: 'cursor', label: 'Cursor' }
 ];
+const DEFAULT_LIMIT_PROVIDER_ORDER = LIMIT_PROVIDERS.map((provider) => provider.id).join(',');
 const LIMIT_REFRESH_OPTIONS = [60000, 120000, 300000, 900000, 1800000];
 const LIMIT_SOURCE_LABELS = { oauth: 'OAuth', cli: 'CLI', web: 'Web', rpc: 'CLI' };
 const deviceAccent = '#73bdf5';
@@ -409,6 +411,7 @@ function stableColor(value, colors) {
 
 function modelVendorFor(model) {
   const name = String(model || '').toLowerCase();
+  if (/^(cursor-)?auto$/.test(name)) return 'cursor';
   if (/claude|anthropic|sonnet|opus|haiku/.test(name)) return 'claude';
   if (/gpt|openai|codex|^o[134](?:-|$)|o[134]-(mini|pro|preview)|chatgpt/.test(name)) return 'codex';
   if (/gemini|gemma|google/.test(name)) return 'gemini';
@@ -483,6 +486,7 @@ function limitStatusLabel(status, stale) {
   if (status === 'ok') return 'Live';
   if (status === 'disabled') return 'Disabled';
   if (status === 'notConfigured') return 'Not signed in';
+  if (status === 'noSyncedData') return 'No synced data';
   if (status === 'unauthorized') return 'Sign in again';
   if (status === 'rateLimited') return 'Limited';
   if (status === 'sourceRateLimited') return 'Usage API limited';
@@ -506,7 +510,7 @@ function limitProviderPlan(provider) {
 
 function configuredLimitProviderOrder() {
   const raw = state.settings?.limitProviders;
-  const source = raw === undefined || raw === null ? 'claude,codex' : raw;
+  const source = raw === undefined || raw === null ? DEFAULT_LIMIT_PROVIDER_ORDER : raw;
   return String(source).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 }
 
@@ -515,14 +519,41 @@ function enabledLimitProviderSet() {
   return new Set(configuredLimitProviderOrder());
 }
 
+function missingLimitProviderStatus() {
+  return state.mode === 'sync' || String(state.settings?.hubUrl || '').trim() ? 'noSyncedData' : 'notConfigured';
+}
+
 function windowForKind(provider, kind) {
   return (provider?.windows || []).find((window) => window.kind === kind) || null;
+}
+
+function windowsForKind(provider, kind) {
+  return (provider?.windows || []).filter((window) => window.kind === kind);
+}
+
+function formatLimitAmount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '';
+  return `$${number.toFixed(2)}`;
+}
+
+function formatLimitWindowValue(window, fillPercent, hasPercent) {
+  if (hasPercent) return `${formatPercent(fillPercent)} left`;
+  if (!window) return '--';
+  const remaining = Number(window?.remaining);
+  if (Number.isFinite(remaining)) {
+    return window?.showMeter === false ? formatLimitAmount(remaining) : `${formatLimitAmount(remaining)} left`;
+  }
+  const limit = Number(window?.limit);
+  if (Number.isFinite(limit)) return `${formatLimitAmount(limit)} cap`;
+  return '';
 }
 
 function limitWindowNode(label, window, color, tone = 1) {
   const remaining = Number(window?.remainingPercent);
   const used = Number(window?.usedPercent);
-  const hasPercent = Number.isFinite(remaining) || Number.isFinite(used);
+  const showMeter = window?.showMeter !== false;
+  const hasPercent = showMeter && (Number.isFinite(remaining) || Number.isFinite(used));
   const fillPercent = Number.isFinite(remaining)
     ? remaining
     : Number.isFinite(used)
@@ -534,9 +565,9 @@ function limitWindowNode(label, window, color, tone = 1) {
   const text = document.createElement('div');
   text.className = 'limit-window-text';
   const name = document.createElement('span');
-  name.textContent = label;
+  name.textContent = window?.label || label;
   const value = document.createElement('span');
-  value.textContent = hasPercent ? `${formatPercent(fillPercent)} left` : '--';
+  value.textContent = formatLimitWindowValue(window, fillPercent, hasPercent);
   text.append(name, value);
   const meter = document.createElement('div');
   meter.className = 'limit-meter';
@@ -549,8 +580,13 @@ function limitWindowNode(label, window, color, tone = 1) {
   meter.append(fill);
   const reset = document.createElement('div');
   reset.className = 'limit-reset';
-  reset.textContent = formatReset(window?.resetsAt);
-  item.append(text, meter, reset);
+  reset.textContent = formatReset(window?.resetsAt) || window?.resetDescription || '';
+  if (showMeter) {
+    item.append(text, meter, reset);
+  } else {
+    item.classList.add('limit-window-note');
+    item.append(text, reset);
+  }
   return item;
 }
 
@@ -568,7 +604,7 @@ function renderLimits() {
   for (const { id, label } of rows) {
     const providerEnabled = limitsEnabled && enabled.has(id);
     const provider = providerEnabled
-      ? (providers.get(id) || { provider: id, status: state.stats ? 'notConfigured' : 'unavailable', windows: [] })
+      ? (providers.get(id) || { provider: id, status: state.stats ? missingLimitProviderStatus() : 'unavailable', windows: [] })
       : { provider: id, status: 'disabled', windows: [] };
     const color = clientColors[id] || clientColors.default;
     const row = document.createElement('div');
@@ -599,8 +635,19 @@ function renderLimits() {
     head.append(titleBlock, plan);
     const windows = document.createElement('div');
     windows.className = 'limit-windows';
-    windows.append(limitWindowNode('Session', windowForKind(provider, 'session'), color, 0.95));
-    windows.append(limitWindowNode('Weekly', windowForKind(provider, 'weekly'), color, 0.68));
+    if (provider.provider === 'cursor') {
+      windows.classList.add('limit-windows-cursor');
+      const billingWindows = windowsForKind(provider, 'billing');
+      const visibleWindows = billingWindows.length > 0 ? billingWindows : [null];
+      for (const billing of visibleWindows) {
+        const node = limitWindowNode('Billing cycle', billing, color, 0.68);
+        node.classList.add('limit-window-wide');
+        windows.append(node);
+      }
+    } else {
+      windows.append(limitWindowNode('Session', windowForKind(provider, 'session'), color, 0.95));
+      windows.append(limitWindowNode('Weekly', windowForKind(provider, 'weekly'), color, 0.68));
+    }
     row.append(head, windows);
     nodes.push(row);
   }
@@ -870,6 +917,7 @@ function renderClientCheckboxes() {
   for (const { id, label } of KNOWN_CLIENTS) {
     const wrap = document.createElement('label');
     wrap.className = 'client-checkbox';
+    if (id === 'cursor') wrap.dataset.client = 'cursor';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.dataset.client = id;
@@ -1330,5 +1378,95 @@ async function deliverTrayProviderIcons() {
   maybeUpdateBarsIcon();
 }
 
+async function refreshCursorStatus() {
+  const statusEl = document.getElementById('cursorAccountStatus');
+  const loginBtn = document.getElementById('cursorLoginButton');
+  const logoutBtn = document.getElementById('cursorLogoutButton');
+  const refreshBtn = document.getElementById('cursorRefreshButton');
+  const manualPanel = document.getElementById('cursorManualPanel');
+  const errorEl = document.getElementById('cursorErrorMessage');
+
+  errorEl.classList.add('hidden');
+  errorEl.textContent = '';
+
+  try {
+    const status = await window.tokenMonitor.cursor.status();
+    if (!status.loggedIn) {
+      statusEl.textContent = 'Not logged in';
+      loginBtn.classList.remove('hidden');
+      logoutBtn.classList.add('hidden');
+      refreshBtn.classList.add('hidden');
+      manualPanel.classList.remove('hidden');
+      setCursorCheckboxesEnabled(false);
+      return;
+    }
+    if (status.expired) {
+      statusEl.textContent = 'Session expired — please log in again';
+      loginBtn.classList.remove('hidden');
+      logoutBtn.classList.remove('hidden');
+      refreshBtn.classList.remove('hidden');
+      manualPanel.classList.remove('hidden');
+      setCursorCheckboxesEnabled(false);
+      return;
+    }
+    const parts = [];
+    if (status.email) parts.push(status.email);
+    if (status.membershipType) parts.push(`Cursor ${status.membershipType}`);
+    if (status.billingCycleEnd) {
+      const d = new Date(status.billingCycleEnd);
+      parts.push(`Billing resets ${d.toLocaleDateString()}`);
+    }
+    statusEl.textContent = `✓ ${parts.join(' · ')}`;
+    loginBtn.classList.add('hidden');
+    logoutBtn.classList.remove('hidden');
+    refreshBtn.classList.remove('hidden');
+    manualPanel.classList.add('hidden');
+    setCursorCheckboxesEnabled(true);
+  } catch (err) {
+    errorEl.textContent = `Status check failed: ${err.message}`;
+    errorEl.classList.remove('hidden');
+  }
+}
+
+function setCursorCheckboxesEnabled(enabled) {
+  document.querySelectorAll('#clientCheckboxes [data-client="cursor"]').forEach((el) => {
+    if (enabled) el.classList.remove('disabled');
+    else el.classList.add('disabled');
+    el.title = enabled ? '' : 'Login required to enable Cursor';
+  });
+}
+
+function setupCursorAccountUI() {
+  document.getElementById('cursorLoginButton').addEventListener('click', () => {
+    window.tokenMonitor.openExternal('https://cursor.com/settings');
+  });
+
+  document.getElementById('cursorLogoutButton').addEventListener('click', async () => {
+    await window.tokenMonitor.cursor.logout();
+    refreshCursorStatus();
+  });
+
+  document.getElementById('cursorRefreshButton').addEventListener('click', () => {
+    refreshCursorStatus();
+  });
+
+  document.getElementById('cursorManualSubmit').addEventListener('click', async () => {
+    const input = document.getElementById('cursorManualInput');
+    const errorEl = document.getElementById('cursorErrorMessage');
+    errorEl.classList.add('hidden');
+    const result = await window.tokenMonitor.cursor.loginManual(input.value);
+    if (!result.ok) {
+      errorEl.textContent = `Login failed: ${result.error}`;
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    input.value = '';
+    refreshCursorStatus();
+  });
+
+  refreshCursorStatus();
+}
+
+setupCursorAccountUI();
 deliverTrayProviderIcons();
 init();

@@ -6,8 +6,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { DEFAULT_LIMITS_REFRESH_MS, normalizeLimitProvider, normalizeLimitsSummary } = require('./limits');
+const cursorAuth = require('./cursorAuth');
+const cursorProbe = require('./cursorProbe');
 
-const LIMIT_PROVIDER_IDS = ['claude', 'codex'];
+const LIMIT_PROVIDER_IDS = ['claude', 'codex', 'cursor'];
 const LIMIT_REFRESH_VALUES = new Set([60_000, 120_000, 300_000, 900_000, 1_800_000]);
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const CLAUDE_OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
@@ -30,7 +32,7 @@ function parseBoolean(value, fallback = true) {
 function parseLimitProviders(value) {
   const isEmpty = value === undefined || value === null || value === ''
     || (Array.isArray(value) && value.length === 0);
-  const source = isEmpty ? 'claude,codex' : value;
+  const source = isEmpty ? 'claude,codex,cursor' : value;
   const raw = Array.isArray(source) ? source : String(source).split(',');
   const seen = new Set();
   const providers = [];
@@ -1054,6 +1056,7 @@ async function collectLimitsOnce(options = {}, deps = {}) {
   const fetchers = {
     claude: (providerOptions) => fetchClaudeLimits(providerOptions, deps),
     codex: (providerOptions) => fetchCodexLimits(providerOptions, deps),
+    cursor: (providerOptions) => fetchCursorLimits(providerOptions, deps),
     ...(deps.providerFetchers || {})
   };
   const providers = [];
@@ -1090,12 +1093,183 @@ function createLimitsCollector(options = {}, deps = {}) {
   return { snapshot };
 }
 
+function hashCursorAccountKey(account) {
+  const seed = account.userId || account.id || 'cursor';
+  return hashKey('cursor', seed);
+}
+
+function formatCursorMembership(type) {
+  if (!type || typeof type !== 'string') return '';
+  const raw = type.trim().toLowerCase();
+  if (!raw) return '';
+  if (raw === 'pro+' || raw === 'pro_plus') return 'Pro+';
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function percentFromUsedLimit(used, limit) {
+  const safeUsed = finiteNumber(used);
+  const safeLimit = finiteNumber(limit);
+  if (safeUsed === null || safeLimit === null || safeLimit <= 0) return null;
+  return Math.max(0, Math.min(100, (safeUsed / safeLimit) * 100));
+}
+
+function cursorResetIso(usage) {
+  if (!usage.billingCycleEnd) return null;
+  const date = new Date(usage.billingCycleEnd);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function cursorBillingWindow(label, fields = {}) {
+  return {
+    kind: 'billing',
+    label,
+    ...fields
+  };
+}
+
+async function fetchCursorLimits(options = {}, deps = {}) {
+  const nowMs = (deps.now || Date.now)();
+  const updatedAt = new Date(nowMs).toISOString();
+  const readActiveAccount = deps.readActiveAccount || cursorAuth.readActiveAccount;
+  const probe = deps.probe || cursorProbe.probe;
+
+  const account = readActiveAccount();
+  if (!account) {
+    return {
+      provider: 'cursor',
+      accountKey: '',
+      accountLabel: '',
+      status: 'notConfigured',
+      source: 'web',
+      updatedAt,
+      windows: []
+    };
+  }
+
+  const result = await probe(account.sessionToken);
+  if (!result.ok) {
+    const kind = result.error?.kind === 'unauthorized' ? 'unauthorized' : 'unavailable';
+    return {
+      provider: 'cursor',
+      accountKey: hashCursorAccountKey(account),
+      accountLabel: account.label || '',
+      status: kind,
+      source: 'web',
+      updatedAt,
+      windows: []
+    };
+  }
+
+  const { usage } = result;
+  const resetsAt = cursorResetIso(usage);
+  const hasRequestUsage = finiteNumber(usage.requestsUsed) !== null
+    && finiteNumber(usage.requestsLimit) !== null
+    && usage.requestsLimit > 0;
+  const totalPercent = hasRequestUsage
+    ? percentFromUsedLimit(usage.requestsUsed, usage.requestsLimit)
+    : usage.planPercent;
+  const windows = [
+    cursorBillingWindow('Total', {
+      usedPercent: totalPercent,
+      used: hasRequestUsage ? usage.requestsUsed : usage.planUsedUsd,
+      limit: hasRequestUsage ? usage.requestsLimit : usage.planLimitUsd,
+      remaining: hasRequestUsage
+        ? Math.max(0, usage.requestsLimit - usage.requestsUsed)
+        : usage.planRemainingUsd,
+      resetsAt,
+      windowMinutes: null,
+      resetDescription: usage.membershipType ? `Cursor ${usage.membershipType}` : ''
+    })
+  ];
+
+  if (finiteNumber(usage.autoPercent) !== null) {
+    windows.push(cursorBillingWindow('Auto', {
+      usedPercent: usage.autoPercent,
+      resetsAt,
+      windowMinutes: null
+    }));
+  }
+
+  if (finiteNumber(usage.apiPercent) !== null) {
+    windows.push(cursorBillingWindow('API', {
+      usedPercent: usage.apiPercent,
+      resetsAt,
+      windowMinutes: null
+    }));
+  }
+
+  if (usage.hasOnDemandUsage || finiteNumber(usage.onDemandLimitUsd) !== null || (finiteNumber(usage.onDemandUsedUsd) !== null && usage.onDemandUsedUsd > 0)) {
+    const remaining = finiteNumber(usage.onDemandRemainingUsd)
+      ?? (finiteNumber(usage.onDemandLimitUsd) !== null
+        ? Math.max(0, usage.onDemandLimitUsd - (finiteNumber(usage.onDemandUsedUsd) || 0))
+        : null);
+    windows.push(cursorBillingWindow('Credits', {
+      usedPercent: finiteNumber(usage.onDemandPercent) ?? percentFromUsedLimit(usage.onDemandUsedUsd, usage.onDemandLimitUsd),
+      used: usage.onDemandUsedUsd,
+      limit: usage.onDemandLimitUsd,
+      remaining,
+      resetsAt: null,
+      windowMinutes: null,
+      resetDescription: '',
+      showMeter: false
+    }));
+  }
+
+  if (usage.hasTeamOnDemandUsage || finiteNumber(usage.teamOnDemandLimitUsd) !== null || (finiteNumber(usage.teamOnDemandUsedUsd) !== null && usage.teamOnDemandUsedUsd > 0)) {
+    const remaining = finiteNumber(usage.teamOnDemandRemainingUsd)
+      ?? (finiteNumber(usage.teamOnDemandLimitUsd) !== null
+        ? Math.max(0, usage.teamOnDemandLimitUsd - (finiteNumber(usage.teamOnDemandUsedUsd) || 0))
+        : null);
+    windows.push(cursorBillingWindow('Team credits', {
+      usedPercent: finiteNumber(usage.teamOnDemandPercent) ?? percentFromUsedLimit(usage.teamOnDemandUsedUsd, usage.teamOnDemandLimitUsd),
+      used: usage.teamOnDemandUsedUsd,
+      limit: usage.teamOnDemandLimitUsd,
+      remaining,
+      resetsAt: null,
+      windowMinutes: null,
+      resetDescription: '',
+      showMeter: false
+    }));
+  }
+
+  if (usage.hasTeamPooledUsage || finiteNumber(usage.teamPooledLimitUsd) !== null || (finiteNumber(usage.teamPooledUsedUsd) !== null && usage.teamPooledUsedUsd > 0)) {
+    const remaining = finiteNumber(usage.teamPooledRemainingUsd)
+      ?? (finiteNumber(usage.teamPooledLimitUsd) !== null
+        ? Math.max(0, usage.teamPooledLimitUsd - (finiteNumber(usage.teamPooledUsedUsd) || 0))
+        : null);
+    windows.push(cursorBillingWindow('Team pool', {
+      usedPercent: finiteNumber(usage.teamPooledPercent) ?? percentFromUsedLimit(usage.teamPooledUsedUsd, usage.teamPooledLimitUsd),
+      used: usage.teamPooledUsedUsd,
+      limit: usage.teamPooledLimitUsd,
+      remaining,
+      resetsAt,
+      windowMinutes: null,
+      resetDescription: 'Shared team usage pool.'
+    }));
+  }
+
+  return {
+    provider: 'cursor',
+    accountKey: hashCursorAccountKey(account),
+    accountLabel: formatCursorMembership(usage.membershipType) || account.label || '',
+    status: 'ok',
+    source: 'web',
+    updatedAt,
+    windows
+  };
+}
+
 module.exports = {
   collectLimitsOnce,
   codexCommandCandidates,
   createLimitsCollector,
   fetchClaudeLimits,
   fetchCodexLimits,
+  fetchCursorLimits,
   mapClaudeCliUsageToProvider,
   mapClaudeUsageToProvider,
   mapCodexRateLimitsToProvider,

@@ -15,6 +15,8 @@ const {
   resetToBundled
 } = require('../shared/tokscaleUpdater');
 const { checkLatestRelease } = require('../shared/appUpdater');
+const cursorAuth = require('../shared/cursorAuth');
+const cursorProbe = require('../shared/cursorProbe');
 const semver = require('semver');
 const { aggregateDevices } = require('../shared/usage');
 const { startDiscordRpc, stopDiscordRpc, updateDiscordRpc } = require('./discordRpc');
@@ -93,6 +95,16 @@ function defaultSettings() {
       dismissedVersion: null
     }
   };
+}
+
+function defaultLimitProviders() {
+  return parseLimitProviders(process.env.TOKEN_MONITOR_LIMIT_PROVIDERS).join(',');
+}
+
+function migrateLimitProviders(value) {
+  const normalized = parseLimitProviders(value).join(',');
+  if (normalized === 'claude,codex') return defaultLimitProviders();
+  return normalized;
 }
 
 function normalizeTrayContent(value, fallback = 'tokens') {
@@ -194,6 +206,9 @@ function readSettings() {
     // Migrate older configs that predate hubMode: infer from hubUrl.
     if (saved.hubMode === undefined) {
       merged.hubMode = (saved.hubUrl && String(saved.hubUrl).trim()) ? 'client' : 'local';
+    }
+    if (saved.limitProviders !== undefined) {
+      merged.limitProviders = migrateLimitProviders(saved.limitProviders);
     }
     merged.hubMode = normalizeHubMode(merged.hubMode);
     merged.hubHostPort = normalizeHubPort(merged.hubHostPort);
@@ -432,7 +447,7 @@ function startSyncCollector() {
     watchEnabled: true,
     watchDebounceMs: 1500,
     limitsEnabled: settings.limitsEnabled !== false,
-    limitProviders: settings.limitProviders ?? 'claude,codex',
+    limitProviders: settings.limitProviders ?? defaultLimitProviders(),
     limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
     onUpdate: (summary) => {
       if (isExternalAgentActive()) return;
@@ -499,7 +514,7 @@ function startLocalCollector() {
     watchEnabled: true,
     watchDebounceMs: 1500,
     limitsEnabled: settings.limitsEnabled !== false,
-    limitProviders: settings.limitProviders ?? 'claude,codex',
+    limitProviders: settings.limitProviders ?? defaultLimitProviders(),
     limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
     onUpdate: (summary, reason) => {
       localDevice = { ...summary, receivedAt: new Date().toISOString() };
@@ -877,6 +892,7 @@ function isAllowedExternalUrl(value) {
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/junhoyeo/tokscale')) return true;
   if (parsed.hostname === 'www.npmjs.com' && parsed.pathname.startsWith('/package/@tokscale/')) return true;
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/Javis603/token-monitor')) return true;
+  if ((parsed.hostname === 'cursor.com' || parsed.hostname === 'www.cursor.com') && parsed.pathname.startsWith('/settings')) return true;
   return false;
 }
 
@@ -972,6 +988,21 @@ function handleZoomShortcut(event, input) {
   if (key === '=' || key === '+') { event.preventDefault(); adjustZoom(ZOOM_LIMITS.step); }
   else if (key === '-' || key === '_') { event.preventDefault(); adjustZoom(-ZOOM_LIMITS.step); }
   else if (key === '0') { event.preventDefault(); setZoomFactor(1); }
+}
+
+let cursorStatusCache = { value: null, at: 0 };
+const CURSOR_STATUS_TTL_MS = 30 * 1000;
+
+function normalizeManualCookie(input) {
+  let s = String(input || '').trim();
+  if (!s) return '';
+  if (s.toLowerCase().startsWith('cookie:')) s = s.slice(7).trim();
+  // If they pasted the full cookie header, extract the WorkosCursorSessionToken= value.
+  const match = s.match(/WorkosCursorSessionToken=([^;\s]+)/);
+  if (match) return match[1];
+  // Otherwise assume the whole string is the raw token value.
+  if (/\s/.test(s)) return '';
+  return s;
 }
 
 function rebuildWindow() {
@@ -1144,6 +1175,52 @@ app.whenReady().then(() => {
   ipcMain.handle('appUpdate:getState', () => deriveAppUpdateState());
   ipcMain.handle('appUpdate:checkNow', () => runAppUpdateCheck({ force: true }));
   ipcMain.handle('appUpdate:dismiss', (_event, version) => dismissAppUpdateVersion(version));
+  ipcMain.handle('cursor:loginManual', async (_event, raw) => {
+    const token = normalizeManualCookie(raw);
+    if (!token) return { ok: false, error: 'Empty or malformed token' };
+    try {
+      const probeResult = await cursorProbe.probe(token);
+      if (!probeResult.ok) return { ok: false, error: probeResult.error?.message || 'Cursor rejected the token' };
+      await cursorAuth.runCursorLogin(token);
+      cursorStatusCache = { value: null, at: 0 };
+      return { ok: true, email: probeResult.user.email };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('cursor:logout', async () => {
+    try {
+      await cursorAuth.runCursorLogout();
+      cursorStatusCache = { value: null, at: 0 };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('cursor:status', async () => {
+    const now = Date.now();
+    if (cursorStatusCache.value && now - cursorStatusCache.at < CURSOR_STATUS_TTL_MS) {
+      return cursorStatusCache.value;
+    }
+    const account = cursorAuth.readActiveAccount();
+    if (!account) {
+      const value = { loggedIn: false };
+      cursorStatusCache = { value, at: now };
+      return value;
+    }
+    const probeResult = await cursorProbe.probe(account.sessionToken);
+    const value = probeResult.ok
+      ? {
+          loggedIn: true,
+          email: probeResult.user.email,
+          membershipType: probeResult.usage.membershipType,
+          billingCycleEnd: probeResult.usage.billingCycleEnd,
+          expired: false
+        }
+      : { loggedIn: true, expired: probeResult.error?.kind === 'unauthorized', error: probeResult.error?.message };
+    cursorStatusCache = { value, at: now };
+    return value;
+  });
   ipcMain.on('window:minimize', () => {
     if (settings?.trayMode) hidePopover();
     else mainWindow?.minimize();

@@ -1,10 +1,10 @@
 'use strict';
 
 const DEFAULT_LIMITS_REFRESH_MS = 5 * 60 * 1000;
-const VALID_PROVIDERS = new Set(['claude', 'codex']);
+const VALID_PROVIDERS = new Set(['claude', 'codex', 'cursor']);
 const VALID_STATUSES = new Set(['ok', 'disabled', 'notConfigured', 'unauthorized', 'rateLimited', 'sourceRateLimited', 'unavailable', 'error']);
 const VALID_SOURCES = new Set(['oauth', 'cli', 'web', 'rpc']);
-const WINDOW_ORDER = ['session', 'weekly'];
+const WINDOW_ORDER = ['session', 'weekly', 'billing'];
 
 function asNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -46,7 +46,15 @@ function normalizeWindowKind(value) {
   const raw = String(value || '').trim().toLowerCase().replace(/[_\s-]+/g, '');
   if (raw === 'session') return 'session';
   if (raw === 'weekly') return 'weekly';
+  if (raw === 'billing' || raw === 'billingcycle' || raw === 'monthly') return 'billing';
   return null;
+}
+
+function normalizeWindowLabel(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > 32) return '';
+  const clean = raw.replace(/[^a-z0-9 +._/-]/gi, '').replace(/\s+/g, ' ').trim();
+  return clean.length <= 32 ? clean : '';
 }
 
 function normalizeIsoTimestamp(value) {
@@ -82,6 +90,7 @@ function normalizeLimitWindow(input) {
   const usedPercent = percentFromWindow(input, used, limit);
   return {
     kind,
+    label: normalizeWindowLabel(input.label || input.displayLabel || input.title),
     used,
     limit,
     remaining,
@@ -89,7 +98,8 @@ function normalizeLimitWindow(input) {
     remainingPercent: usedPercent === null ? null : Number((100 - usedPercent).toFixed(3)),
     resetsAt: normalizeIsoTimestamp(input.resetsAt ?? input.resets_at ?? input.resetAt ?? input.reset_at),
     windowMinutes: numberOrNull(input.windowMinutes ?? input.window_minutes ?? input.windowDurationMins),
-    resetDescription: input.resetDescription ? String(input.resetDescription) : ''
+    resetDescription: input.resetDescription ? String(input.resetDescription) : '',
+    showMeter: input.showMeter !== false && input.meter !== false
   };
 }
 

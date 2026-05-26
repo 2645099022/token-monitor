@@ -1,5 +1,5 @@
 import { publicLimits } from '../../src/shared/limits.js';
-import { aggregateDevices, normalizeDeviceRecord } from '../../src/shared/usage.js';
+import { aggregateDevices, mergeDeviceRecord } from '../../src/shared/usage.js';
 
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
@@ -178,7 +178,9 @@ export class HubDO {
       try { payload = await request.json(); }
       catch (error) { return jsonResponse(400, { error: 'bad_request', message: error.message }); }
       if (!payload.deviceId && !payload.id) return jsonResponse(400, { error: 'deviceId_required' });
-      const record = normalizeDeviceRecord({ ...payload, receivedAt: new Date().toISOString() });
+      const deviceId = String(payload.deviceId || payload.id);
+      const existing = await this.state.storage.get(`dev:${deviceId}`);
+      const record = mergeDeviceRecord(existing, { ...payload, receivedAt: new Date().toISOString() });
       await this.state.storage.put(`dev:${record.deviceId}`, record);
       this.broadcast('ingest').catch(() => {});
       return jsonResponse(200, { ok: true, deviceId: record.deviceId, stats: await this.getStats() });

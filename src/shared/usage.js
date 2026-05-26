@@ -154,7 +154,8 @@ function extractUsageFromTokscale(json) {
     const tokens = tokenValue(row);
     const cost = costValue(row);
     const client = detectClient(row);
-    const model = detectModel(row);
+    let model = detectModel(row);
+    if (client === 'cursor' && model === 'auto') model = 'cursor-auto';
     period.totalTokens += Math.max(0, Math.round(tokens));
     period.costUsd += cost;
     if (client && tokens > 0) period.clients[client] = (period.clients[client] || 0) + Math.round(tokens);
@@ -179,6 +180,18 @@ function normalizeDeviceRecord(record) {
   };
   for (const periodName of PERIODS) normalized.periods[periodName] = normalizePeriod(record[periodName] || record.periods?.[periodName]);
   return normalized;
+}
+
+function mergeDeviceRecord(existing, incoming) {
+  const hasExisting = existing && typeof existing === 'object';
+  const hasIncomingLimits = incoming && typeof incoming === 'object' && Object.prototype.hasOwnProperty.call(incoming, 'limits');
+  const normalizedIncoming = normalizeDeviceRecord(incoming || {});
+  if (!hasExisting) return normalizedIncoming;
+
+  const normalizedExisting = normalizeDeviceRecord(existing);
+  if (incoming?.limitsOnly === true) normalizedIncoming.periods = normalizedExisting.periods;
+  if (!hasIncomingLimits) normalizedIncoming.limits = normalizedExisting.limits;
+  return normalizedIncoming;
 }
 
 function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
@@ -226,4 +239,4 @@ function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
   return aggregate;
 }
 
-module.exports = { PERIODS, aggregateDevices, emptyPeriod, extractUsageFromTokscale, normalizeDeviceRecord, normalizePeriod };
+module.exports = { PERIODS, aggregateDevices, emptyPeriod, extractUsageFromTokscale, mergeDeviceRecord, normalizeDeviceRecord, normalizePeriod };
