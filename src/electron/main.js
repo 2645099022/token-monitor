@@ -14,6 +14,8 @@ const {
   getTokscaleStatus,
   resetToBundled
 } = require('../shared/tokscaleUpdater');
+const { checkLatestRelease } = require('../shared/appUpdater');
+const semver = require('semver');
 const { aggregateDevices } = require('../shared/usage');
 const { startDiscordRpc, stopDiscordRpc, updateDiscordRpc } = require('./discordRpc');
 const { buildTrayIcon, createTray, formatTrayText, popoverBounds } = require('./tray');
@@ -72,7 +74,12 @@ function defaultSettings() {
     zoomFactor: 1,
     trayMode: false,
     trayContent: 'tokens',
-    startAtLogin: false
+    startAtLogin: false,
+    appUpdate: {
+      lastCheckedAt: null,
+      lastKnownLatest: null,
+      dismissedVersion: null
+    }
   };
 }
 
@@ -770,6 +777,86 @@ async function downloadTokscaleFromNpm() {
   }
 }
 
+const APP_UPDATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+let appUpdateCheckInFlight = false;
+let appUpdateLastError = null;
+
+function deriveAppUpdateState() {
+  const block = settings?.appUpdate || {};
+  const currentVersion = app.getVersion();
+  const latest = block.lastKnownLatest || null;
+  const dismissedVersion = block.dismissedVersion || null;
+  let hasUpdate = false;
+  if (latest && semver.valid(latest.version) && semver.valid(currentVersion)) {
+    hasUpdate = semver.gt(latest.version, currentVersion) && latest.version !== dismissedVersion;
+  }
+  return {
+    currentVersion,
+    latest,
+    hasUpdate,
+    dismissedVersion,
+    lastCheckedAt: block.lastCheckedAt || null,
+    checking: appUpdateCheckInFlight,
+    lastError: appUpdateLastError
+  };
+}
+
+function sendAppUpdatePush() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('appUpdate:push', deriveAppUpdateState());
+}
+
+async function runAppUpdateCheck({ force = false } = {}) {
+  if (appUpdateCheckInFlight) return deriveAppUpdateState();
+  const block = settings?.appUpdate || {};
+  if (!force && block.lastCheckedAt) {
+    const last = Date.parse(block.lastCheckedAt);
+    if (Number.isFinite(last) && Date.now() - last < APP_UPDATE_COOLDOWN_MS) {
+      return deriveAppUpdateState();
+    }
+  }
+  appUpdateCheckInFlight = true;
+  appUpdateLastError = null;
+  if (force) sendAppUpdatePush();
+  try {
+    const result = await checkLatestRelease(app.getVersion());
+    if (result.ok) {
+      settings.appUpdate = {
+        ...(settings.appUpdate || {}),
+        lastCheckedAt: result.checkedAt,
+        lastKnownLatest: result.latest
+      };
+      saveSettings();
+      appUpdateLastError = null;
+    } else {
+      appUpdateLastError = force ? (result.error || 'Update check failed') : null;
+      if (!force) console.warn('App update check failed:', result.error);
+    }
+  } catch (error) {
+    appUpdateLastError = force ? (error.message || String(error)) : null;
+    if (!force) console.warn('App update check threw:', error);
+  } finally {
+    appUpdateCheckInFlight = false;
+    sendAppUpdatePush();
+  }
+  return deriveAppUpdateState();
+}
+
+function maybeRunBackgroundUpdateCheck() {
+  runAppUpdateCheck({ force: false }).catch(() => {});
+}
+
+function dismissAppUpdateVersion(version) {
+  if (typeof version !== 'string' || !version) return deriveAppUpdateState();
+  settings.appUpdate = {
+    ...(settings.appUpdate || {}),
+    dismissedVersion: version
+  };
+  saveSettings();
+  sendAppUpdatePush();
+  return deriveAppUpdateState();
+}
+
 function isAllowedExternalUrl(value) {
   let parsed;
   try { parsed = new URL(String(value || '')); }
@@ -777,6 +864,7 @@ function isAllowedExternalUrl(value) {
   if (parsed.protocol !== 'https:') return false;
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/junhoyeo/tokscale')) return true;
   if (parsed.hostname === 'www.npmjs.com' && parsed.pathname.startsWith('/package/@tokscale/')) return true;
+  if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/Javis603/token-monitor')) return true;
   return false;
 }
 
@@ -1025,6 +1113,9 @@ app.whenReady().then(() => {
     sendTokscalePush({ type: 'reset', status });
     return status;
   });
+  ipcMain.handle('appUpdate:getState', () => deriveAppUpdateState());
+  ipcMain.handle('appUpdate:checkNow', () => runAppUpdateCheck({ force: true }));
+  ipcMain.handle('appUpdate:dismiss', (_event, version) => dismissAppUpdateVersion(version));
   ipcMain.on('window:minimize', () => {
     if (settings?.trayMode) hidePopover();
     else mainWindow?.minimize();
@@ -1034,6 +1125,7 @@ app.whenReady().then(() => {
     else mainWindow?.close();
   });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  maybeRunBackgroundUpdateCheck();
 });
 
 app.on('second-instance', focusExistingWindow);

@@ -665,6 +665,39 @@ input, textarea, [contenteditable="true"] {
 .mode-button { width: auto; max-width: 52%; min-width: 0; height: 30px; padding: 0 10px; overflow: hidden; color: var(--muted); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .mode-button:hover { border-color: rgba(115, 189, 245, 0.62); color: var(--blue); }
 .error { color: var(--red); }
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 8px;
+  border-radius: 999px;
+  background: rgba(115, 189, 245, 0.12);
+  border: 1px solid rgba(115, 189, 245, 0.32);
+  color: var(--blue);
+  font-size: 10px;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.update-pill.hidden { display: none; }
+.update-pill:hover { background: rgba(115, 189, 245, 0.18); border-color: rgba(115, 189, 245, 0.52); }
+.update-pill-label { letter-spacing: 0.02em; }
+.update-pill-dismiss {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--blue);
+  opacity: 0.6;
+  font-size: 12px;
+  line-height: 1;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  cursor: pointer;
+}
+.update-pill-dismiss:hover { opacity: 1; }
 
 /* Progressive collapse as the window gets shorter. Width is intentionally not a */
 /* trigger — a narrow but tall window is a valid sidebar layout. Sections drop */

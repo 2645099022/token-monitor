@@ -125,6 +125,18 @@
           <div class="settings-group-header"><span>Integrations</span></div>
           <label class="checkbox-label"><input id="discordRpcInput" type="checkbox" />Discord Rich Presence</label>
         </div>
+        <div class="settings-group">
+          <div class="settings-group-header"><span>App Updates</span><span>GitHub releases</span></div>
+          <div class="tokscale-lines">
+            <div><span>Installed</span><strong id="appUpdateInstalled">—</strong></div>
+            <div><span>Latest</span><strong id="appUpdateLatest">Not checked</strong></div>
+          </div>
+          <div class="settings-actions">
+            <button id="appUpdateCheckButton" type="button">Check for updates</button>
+            <button id="appUpdateViewReleaseButton" type="button" class="hidden">View release</button>
+          </div>
+          <div id="appUpdateMessage" class="tokscale-message"></div>
+        </div>
         <div id="tokscaleGroup" class="settings-group">
           <div class="settings-group-header"><span>Tokscale</span><span>CLI dependency from npm</span></div>
           <div class="tokscale-lines">
@@ -159,6 +171,10 @@
       <section id="limitsPanel" class="limits-panel hidden"></section>
       <footer class="footer">
         <button id="breakdownToggle" class="mode-button">0 devices</button>
+        <a id="appUpdatePill" class="update-pill hidden" href="#" title="">
+          <span id="appUpdatePillLabel" class="update-pill-label"></span>
+          <button id="appUpdatePillDismiss" class="update-pill-dismiss" type="button" title="Dismiss this version" aria-label="Dismiss this version">×</button>
+        </a>
         <button id="refreshButton" class="refresh-button" title="Refresh">↻</button>
       </footer>
     </main>

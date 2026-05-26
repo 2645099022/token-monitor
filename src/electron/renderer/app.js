@@ -68,7 +68,7 @@ const LIMIT_SOURCE_LABELS = { oauth: 'OAuth', cli: 'CLI', web: 'Web', rpc: 'CLI'
 const deviceColors = ['#49a3b0', '#6ab4f0', '#cc7c5e', '#a57df0', '#f0d66a', '#f06a7b'];
 const fallbackModelColors = ['#6ab4f0', '#cc7c5e', '#a57df0', '#49a3b0', '#f0d66a', '#f06a7b'];
 const baseBreakdownOrder = ['tool', 'device', 'model'];
-const state = { period: 'today', breakdown: 'tool', settings: null, stats: null, refreshTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null };
+const state = { period: 'today', appUpdate: null, breakdown: 'tool', settings: null, stats: null, refreshTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null };
 const defaultAppearance = { glassOpacity: 68, glassBlur: 32, zoomFactor: 1, systemGlass: true, showLiveDot: true, showToolIcons: true };
 const els = {
   shell: document.querySelector('.shell'), status: document.getElementById('status'), liveDot: document.getElementById('liveDot'), totalTokens: document.getElementById('totalTokens'), cost: document.getElementById('cost'), breakdown: document.getElementById('breakdown'), limitsPanel: document.getElementById('limitsPanel'), breakdownToggle: document.getElementById('breakdownToggle'), pinButton: document.getElementById('pinButton'), settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'), hubUrlInput: document.getElementById('hubUrlInput'), secretInput: document.getElementById('secretInput'), deviceIdInput: document.getElementById('deviceIdInput'), limitProviderCheckboxes: document.getElementById('limitProviderCheckboxes'), limitsRefreshInput: document.getElementById('limitsRefreshInput'), showLimitSourceInput: document.getElementById('showLimitSourceInput'), systemGlassInput: document.getElementById('systemGlassInput'), liveDotInput: document.getElementById('liveDotInput'), toolIconsInput: document.getElementById('toolIconsInput'), discordRpcInput: document.getElementById('discordRpcInput'), trayModeInput: document.getElementById('trayModeInput'), trayContentInput: document.getElementById('trayContentInput'), glassInput: document.getElementById('glassInput'), blurInput: document.getElementById('blurInput'), zoomInput: document.getElementById('zoomInput'), resetGlassButton: document.getElementById('resetGlassButton'), resetDepthButton: document.getElementById('resetDepthButton'), resetZoomButton: document.getElementById('resetZoomButton'), saveSettingsButton: document.getElementById('saveSettingsButton'), clientCheckboxes: document.getElementById('clientCheckboxes'), openConfigButton: document.getElementById('openConfigButton'), refreshButton: document.getElementById('refreshButton'), minButton: document.getElementById('minButton'), closeButton: document.getElementById('closeButton')
@@ -95,7 +95,15 @@ Object.assign(els, {
   checkTokscaleButton: document.getElementById('checkTokscaleButton'),
   downloadTokscaleButton: document.getElementById('downloadTokscaleButton'),
   resetTokscaleButton: document.getElementById('resetTokscaleButton'),
-  openTokscaleLinkButton: document.getElementById('openTokscaleLinkButton')
+  openTokscaleLinkButton: document.getElementById('openTokscaleLinkButton'),
+  appUpdatePill: document.getElementById('appUpdatePill'),
+  appUpdatePillLabel: document.getElementById('appUpdatePillLabel'),
+  appUpdatePillDismiss: document.getElementById('appUpdatePillDismiss'),
+  appUpdateInstalled: document.getElementById('appUpdateInstalled'),
+  appUpdateLatest: document.getElementById('appUpdateLatest'),
+  appUpdateCheckButton: document.getElementById('appUpdateCheckButton'),
+  appUpdateViewReleaseButton: document.getElementById('appUpdateViewReleaseButton'),
+  appUpdateMessage: document.getElementById('appUpdateMessage')
 });
 
 function formatNumber(value) { return Math.round(Number(value || 0)).toLocaleString('en-US'); }
@@ -132,6 +140,57 @@ function formatUpdatedAge(value) {
 }
 function versionText(value) {
   return value ? `v${value}` : 'unknown';
+}
+function renderAppUpdatePill() {
+  const s = state.appUpdate;
+  const pill = els.appUpdatePill;
+  if (!pill) return;
+  if (!s || !s.hasUpdate || !s.latest) {
+    pill.classList.add('hidden');
+    pill.removeAttribute('href');
+    pill.setAttribute('title', '');
+    els.appUpdatePillLabel.textContent = '';
+    return;
+  }
+  pill.classList.remove('hidden');
+  pill.href = s.latest.htmlUrl;
+  pill.setAttribute('title', s.latest.name || `v${s.latest.version}`);
+  els.appUpdatePillLabel.textContent = `↑ v${s.latest.version}`;
+}
+function renderSettingsAppUpdateRow() {
+  const s = state.appUpdate;
+  if (!s) {
+    els.appUpdateInstalled.textContent = '—';
+    els.appUpdateLatest.textContent = 'Not checked';
+    els.appUpdateCheckButton.disabled = false;
+    els.appUpdateCheckButton.textContent = 'Check for updates';
+    els.appUpdateViewReleaseButton.classList.add('hidden');
+    els.appUpdateMessage.textContent = '';
+    els.appUpdateMessage.classList.remove('error');
+    return;
+  }
+  els.appUpdateInstalled.textContent = `v${s.currentVersion}`;
+  if (s.latest) {
+    const tail = s.hasUpdate ? '' : (semverLikeEqual(s.latest.version, s.currentVersion) ? ' (up to date)' : '');
+    els.appUpdateLatest.textContent = `v${s.latest.version}${tail}`;
+    els.appUpdateViewReleaseButton.classList.toggle('hidden', !s.hasUpdate);
+  } else {
+    els.appUpdateLatest.textContent = s.lastCheckedAt ? 'Up to date' : 'Not checked';
+    els.appUpdateViewReleaseButton.classList.add('hidden');
+  }
+  els.appUpdateCheckButton.disabled = Boolean(s.checking);
+  els.appUpdateCheckButton.textContent = s.checking ? 'Checking…' : 'Check for updates';
+  if (s.lastError) {
+    els.appUpdateMessage.textContent = "Couldn't reach GitHub";
+    els.appUpdateMessage.classList.add('error');
+  } else {
+    els.appUpdateMessage.textContent = '';
+    els.appUpdateMessage.classList.remove('error');
+  }
+}
+
+function semverLikeEqual(a, b) {
+  return typeof a === 'string' && typeof b === 'string' && a === b;
 }
 function compactAge(value) {
   const label = formatUpdatedAge(value);
@@ -891,6 +950,14 @@ if (typeof ResizeObserver === 'function') {
 async function init() {
   try { state.appInfo = await window.tokenMonitor.getAppInfo?.(); } catch (_) {}
   state.settings = await window.tokenMonitor.getSettings();
+  state.appUpdate = await window.tokenMonitor.getAppUpdateState();
+  renderAppUpdatePill();
+  renderSettingsAppUpdateRow();
+  window.tokenMonitor.onAppUpdatePush?.((payload) => {
+    state.appUpdate = payload;
+    renderAppUpdatePill();
+    renderSettingsAppUpdateRow();
+  });
   if (state.appInfo?.loginItemSupported) {
     state.settings.startAtLogin = Boolean(state.appInfo.loginItemOpenAtLogin);
   }
@@ -1010,6 +1077,34 @@ els.openTokscaleLinkButton?.addEventListener('click', () => window.tokenMonitor.
 els.refreshButton.addEventListener('click', refreshStats);
 els.minButton.addEventListener('click', () => window.tokenMonitor.minimize());
 els.closeButton.addEventListener('click', () => window.tokenMonitor.close());
+
+els.appUpdatePill.addEventListener('click', async (event) => {
+  event.preventDefault();
+  const latest = state.appUpdate?.latest;
+  if (!latest?.htmlUrl) return;
+  await window.tokenMonitor.openExternal(latest.htmlUrl);
+});
+
+els.appUpdatePillDismiss.addEventListener('click', async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  const version = state.appUpdate?.latest?.version;
+  if (!version) return;
+  state.appUpdate = await window.tokenMonitor.dismissAppUpdate(version);
+  renderAppUpdatePill();
+});
+
+els.appUpdateCheckButton.addEventListener('click', async () => {
+  state.appUpdate = await window.tokenMonitor.checkAppUpdateNow();
+  renderAppUpdatePill();
+  renderSettingsAppUpdateRow();
+});
+
+els.appUpdateViewReleaseButton.addEventListener('click', async () => {
+  const url = state.appUpdate?.latest?.htmlUrl;
+  if (!url) return;
+  await window.tokenMonitor.openExternal(url);
+});
 
 window.tokenMonitor.onSettingsPush?.((next) => {
   if (!next) return;
