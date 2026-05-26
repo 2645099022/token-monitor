@@ -65,7 +65,8 @@ const LIMIT_PROVIDERS = [
 ];
 const LIMIT_REFRESH_OPTIONS = [60000, 120000, 300000, 900000, 1800000];
 const LIMIT_SOURCE_LABELS = { oauth: 'OAuth', cli: 'CLI', web: 'Web', rpc: 'CLI' };
-const deviceColors = ['#49a3b0', '#6ab4f0', '#cc7c5e', '#a57df0', '#f0d66a', '#f06a7b'];
+const deviceAccent = '#73bdf5';
+const deviceStaleColor = '#8c97a7';
 const fallbackModelColors = ['#6ab4f0', '#cc7c5e', '#a57df0', '#49a3b0', '#f0d66a', '#f06a7b'];
 const baseBreakdownOrder = ['tool', 'device', 'model'];
 const state = { period: 'today', appUpdate: null, breakdown: 'tool', settings: null, stats: null, refreshTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null };
@@ -350,9 +351,10 @@ function rowTemplate(rowData) {
   return row;
 }
 
-function updateRow(row, { name, value, cost, max, color, stale, platform }) {
+function updateRow(row, { name, value, cost, max, color, stale, platform, local }) {
   const width = rowWidth(value, max);
-  row.className = `row${stale ? ' stale' : ''}`;
+  row.className = `row${stale ? ' stale' : ''}${local ? ' local' : ''}`;
+  row.title = local ? 'This device' : '';
   if (platform !== undefined) row.dataset.platform = platform || '';
   const mark = row.querySelector('.row-mark');
   const kind = iconKindFor({ key: row.dataset.key, platform: row.dataset.platform || '' }, state.breakdown);
@@ -395,8 +397,8 @@ function deviceLabel(device) {
   return device.deviceId || device.hostname || 'device';
 }
 
-function deviceColor(index, stale) {
-  return stale ? '#8c97a7' : deviceColors[index % deviceColors.length];
+function deviceColor(stale) {
+  return stale ? deviceStaleColor : deviceAccent;
 }
 
 function stableColor(value, colors) {
@@ -433,14 +435,16 @@ function modelColor(model) {
 }
 
 function deviceRowsForPeriod() {
-  return (state.stats?.devices || []).map((device, index) => ({
+  const localId = state.settings?.deviceId || '';
+  return (state.stats?.devices || []).map((device) => ({
     key: device.deviceId,
     name: deviceLabel(device),
     value: Number(device.periods?.[state.period]?.totalTokens || 0),
     cost: Number(device.periods?.[state.period]?.costUsd || 0),
-    color: deviceColor(index, Boolean(device.stale)),
+    color: deviceColor(Boolean(device.stale)),
     stale: Boolean(device.stale),
-    platform: device.platform || ''
+    platform: device.platform || '',
+    local: Boolean(localId) && device.deviceId === localId
   })).sort((a, b) => b.value - a.value);
 }
 
