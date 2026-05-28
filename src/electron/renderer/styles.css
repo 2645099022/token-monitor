@@ -116,8 +116,8 @@ input, textarea, [contenteditable="true"] {
 }
 /* Swap text → Σ at the exact width where the title would start to truncate, */
 /* driven by JS overflow detection (see renderer/app.js). */
-.shell.title-collapsed .app-title-text { display: none; }
-.shell.title-collapsed .app-title-mark { display: inline; }
+.shell.title-collapsed .app-title-text, .shell.title-icon-only .app-title-text { display: none; }
+.shell.title-collapsed .app-title-mark, .shell.title-icon-only .app-title-mark { display: inline; }
 .live-dot {
   display: inline-block;
   width: 4px;
