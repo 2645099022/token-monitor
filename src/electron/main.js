@@ -346,7 +346,8 @@ function expandFloatingBubble(options = {}) {
       replaceMainWindow(target, {
         collapsedFloatingBubble: false,
         focus: options.focus !== false,
-        suppressInitialNumberAnimation: true
+        suppressInitialNumberAnimation: true,
+        waitForContent: true
       });
       setTimeout(() => { floatingBubbleState.suppressNextCollapse = false; }, 300);
       sendFloatingBubbleState();
@@ -1208,15 +1209,30 @@ function loadWindowFile(target, options = {}) {
     if (settings?.trayMode) return; // stay hidden until tray click
     revealWindow(target);
   };
+  const waitForContent = options.waitForContent === true;
+  const onContentReady = (event) => {
+    if (event.sender === target.webContents) reveal();
+  };
   const fallbackTimer = setTimeout(reveal, 2500);
-  const cleanup = () => clearTimeout(fallbackTimer);
+  const cleanup = () => {
+    clearTimeout(fallbackTimer);
+    ipcMain.removeListener('window:contentReady', onContentReady);
+  };
   target.once('show', cleanup);
   target.once('closed', cleanup);
-  target.once('ready-to-show', reveal);
-  target.webContents.once('did-finish-load', () => {
-    applyZoomFactor(target);
-    reveal();
-  });
+  if (waitForContent) {
+    // A recreated window paints its static "0" defaults before the renderer's
+    // async stats fetch resolves; revealing on load would flash empty content.
+    // Wait until the renderer reports it has rendered real data instead.
+    ipcMain.on('window:contentReady', onContentReady);
+    target.webContents.once('did-finish-load', () => applyZoomFactor(target));
+  } else {
+    target.once('ready-to-show', reveal);
+    target.webContents.once('did-finish-load', () => {
+      applyZoomFactor(target);
+      reveal();
+    });
+  }
   target.webContents.once('did-fail-load', (_event, code, description) => {
     console.log(`[window] renderer load failed: ${code} ${description}`);
     reveal();
@@ -1295,6 +1311,7 @@ function createWindow(boundsOverride, options = {}) {
   win.webContents.on('before-input-event', handleZoomShortcut);
   win.webContents.once('did-finish-load', sendFloatingBubbleState);
   loadWindowFile(win, {
+    waitForContent: options.waitForContent === true,
     query: floatingBubbleInitialRendererQuery(floatingBubbleState, {
       collapsedWindow: collapsedFloatingBubble,
       suppressInitialNumberAnimation: options.suppressInitialNumberAnimation === true
@@ -1324,7 +1341,8 @@ function replaceMainWindow(bounds, options = {}) {
   // (otherwise window-all-closed fires and quits the app on Windows).
   createWindow(bounds, {
     collapsedFloatingBubble: options.collapsedFloatingBubble === true,
-    suppressInitialNumberAnimation: options.suppressInitialNumberAnimation === true
+    suppressInitialNumberAnimation: options.suppressInitialNumberAnimation === true,
+    waitForContent: options.waitForContent === true
   });
   const next = mainWindow;
   next.once('show', () => {

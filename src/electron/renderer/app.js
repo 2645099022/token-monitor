@@ -729,6 +729,8 @@ function breakdownLabel(deviceText) {
   return 'Tools';
 }
 
+let contentReadySignaled = false;
+
 function render() {
   if (!state.stats) return;
   if (state.breakdown === 'limits' && !limitViewAvailable()) {
@@ -760,6 +762,12 @@ function render() {
     els.breakdown.classList.remove('hidden');
     const rows = rowsForPeriod(period);
     renderRows(rows);
+  }
+  // Tell main the window has painted real content (not the static "0" defaults),
+  // so a recreated window can stay hidden until it's populated. See loadWindowFile.
+  if (!contentReadySignaled) {
+    contentReadySignaled = true;
+    window.tokenMonitor.signalContentReady?.();
   }
 }
 
