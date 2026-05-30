@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { extractUsageFromTokscale, mergeDeviceRecord } = require('../../src/shared/usage');
+const { aggregateDevices, extractUsageFromTokscale, mergeDeviceRecord } = require('../../src/shared/usage');
 
 function recordWithLimits(extra = {}) {
   return {
@@ -96,7 +96,27 @@ test('mergeDeviceRecord preserves usage for clients omitted by the active tracke
       models: { 'claude-3-5-sonnet': 100, 'gpt-5': 50 },
       modelCosts: { 'claude-3-5-sonnet': 1.25, 'gpt-5': 0.25 },
       clientModels: { hermes: { 'claude-3-5-sonnet': 100 }, codex: { 'gpt-5': 50 } },
-      clientModelCosts: { hermes: { 'claude-3-5-sonnet': 1.25 }, codex: { 'gpt-5': 0.25 } }
+      clientModelCosts: { hermes: { 'claude-3-5-sonnet': 1.25 }, codex: { 'gpt-5': 0.25 } },
+      sessions: {
+        'hermes:h1': {
+          client: 'hermes',
+          sessionId: 'h1',
+          totalTokens: 100,
+          costUsd: 1.25,
+          messageCount: 4,
+          models: { 'claude-3-5-sonnet': 100 },
+          modelCosts: { 'claude-3-5-sonnet': 1.25 }
+        },
+        'codex:c1': {
+          client: 'codex',
+          sessionId: 'c1',
+          totalTokens: 50,
+          costUsd: 0.25,
+          messageCount: 2,
+          models: { 'gpt-5': 50 },
+          modelCosts: { 'gpt-5': 0.25 }
+        }
+      }
     }
   };
   const incoming = {
@@ -123,6 +143,8 @@ test('mergeDeviceRecord preserves usage for clients omitted by the active tracke
   assert.equal(merged.periods.today.models['gpt-5'], 75);
   assert.equal(merged.periods.today.models['claude-3-5-sonnet'], 100);
   assert.equal(merged.periods.today.clientModels.hermes['claude-3-5-sonnet'], 100);
+  assert.equal(merged.periods.today.sessions['hermes:h1'].totalTokens, 100);
+  assert.equal(merged.periods.today.sessions['codex:c1'], undefined);
 });
 
 test('mergeDeviceRecord preserves omitted-client day and month usage only inside matching calendar periods', () => {
@@ -235,4 +257,118 @@ test('extractUsageFromTokscale keeps model usage grouped by client', () => {
   assert.equal(period.clientModels.hermes['claude-3-5-sonnet'], 100);
   assert.equal(period.clientModelCosts.hermes['claude-3-5-sonnet'], 1.25);
   assert.equal(period.clientModels.codex['gpt-5'], 50);
+});
+
+test('extractUsageFromTokscale keeps session usage grouped by client and model', () => {
+  const period = extractUsageFromTokscale({
+    groupBy: 'client,session,model',
+    entries: [
+      {
+        client: 'Codex',
+        sessionId: 'rollout-1',
+        model: 'gpt-5',
+        provider: 'openai',
+        input: 10,
+        output: 5,
+        cacheRead: 100,
+        reasoning: 2,
+        messageCount: 3,
+        cost: 0.25,
+        timestamp: '2026-05-30T04:00:00.000Z'
+      },
+      {
+        client: 'Codex',
+        sessionId: 'rollout-1',
+        model: 'gpt-4o',
+        provider: 'openai',
+        input: 2,
+        output: 3,
+        messageCount: 1,
+        cost: 0.05
+      },
+      {
+        client: 'Cursor',
+        sessionId: 'cursor-active',
+        model: 'auto',
+        provider: 'cursor',
+        input: 1,
+        output: 2,
+        cost: 0.01
+      }
+    ]
+  });
+
+  const codex = period.sessions['codex:rollout-1'];
+  assert.equal(codex.totalTokens, 122);
+  assert.equal(codex.costUsd, 0.3);
+  assert.equal(codex.messageCount, 4);
+  assert.equal(codex.inputTokens, 12);
+  assert.equal(codex.outputTokens, 8);
+  assert.equal(codex.cacheReadTokens, 100);
+  assert.equal(codex.reasoningTokens, 2);
+  assert.equal(codex.lastUsedAt, '2026-05-30T04:00:00.000Z');
+  assert.equal(codex.models['gpt-5'], 117);
+  assert.equal(codex.models['gpt-4o'], 5);
+  assert.equal(codex.providers.openai, 122);
+  assert.equal(period.sessions['cursor:cursor-active'].models['cursor-auto'], 3);
+});
+
+test('aggregateDevices combines session usage across devices', () => {
+  const aggregate = aggregateDevices([
+    {
+      deviceId: 'one',
+      receivedAt: '2026-05-30T00:00:00.000Z',
+      today: {
+        totalTokens: 10,
+        costUsd: 0.1,
+        clients: { codex: 10 },
+        clientCosts: { codex: 0.1 },
+        sessions: {
+          'codex:s1': {
+            client: 'codex',
+            sessionId: 's1',
+            totalTokens: 10,
+            costUsd: 0.1,
+            messageCount: 1,
+            inputTokens: 4,
+            outputTokens: 6,
+            models: { 'gpt-5': 10 },
+            modelCosts: { 'gpt-5': 0.1 }
+          }
+        }
+      }
+    },
+    {
+      deviceId: 'two',
+      receivedAt: '2026-05-30T00:00:00.000Z',
+      today: {
+        totalTokens: 5,
+        costUsd: 0.2,
+        clients: { codex: 5 },
+        clientCosts: { codex: 0.2 },
+        sessions: {
+          'codex:s1': {
+            client: 'codex',
+            sessionId: 's1',
+            totalTokens: 5,
+            costUsd: 0.2,
+            messageCount: 2,
+            inputTokens: 2,
+            outputTokens: 3,
+            models: { 'gpt-5': 5 },
+            modelCosts: { 'gpt-5': 0.2 }
+          }
+        }
+      }
+    }
+  ], 0, Date.parse('2026-05-30T00:01:00.000Z'));
+
+  const session = aggregate.periods.today.sessions['codex:s1'];
+  assert.equal(session.totalTokens, 15);
+  assert.equal(session.costUsd, 0.3);
+  assert.equal(session.messageCount, 3);
+  assert.equal(session.inputTokens, 6);
+  assert.equal(session.outputTokens, 9);
+  assert.equal(session.models['gpt-5'], 15);
+  assert.equal(session.modelCosts['gpt-5'], 0.3);
 });

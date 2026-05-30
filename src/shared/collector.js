@@ -110,7 +110,7 @@ function parseJsonOutput(stdout) {
 }
 
 function runTokscale({ clients, flags, commandTimeoutMs }) {
-  const userArgs = ['--json', '--client', clients, '--group-by', 'client,model', ...flags];
+  const userArgs = ['--json', '--client', clients, '--group-by', 'client,session,model', ...flags];
   const { bin, prefixArgs, env } = tokscaleCommand();
   return new Promise((resolve, reject) => {
     const child = spawn(bin, [...prefixArgs, ...userArgs], { env, windowsHide: true });
@@ -126,6 +126,150 @@ function runTokscale({ clients, flags, commandTimeoutMs }) {
       try { resolve(parseJsonOutput(stdout)); } catch (error) { reject(error); }
     });
   });
+}
+
+function isoFromDate(value) {
+  const date = value instanceof Date ? value : new Date(value || '');
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
+function timestampFromSessionId(id) {
+  const raw = String(id || '');
+  const isoMatch = raw.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/);
+  if (isoMatch) return isoFromDate(isoMatch[0]);
+  const localMatch = raw.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2})[:-](\d{2})(?:[:-](\d{2}))?/);
+  if (!localMatch) return '';
+  const [, year, month, day, hour, minute, second = '0'] = localMatch;
+  return isoFromDate(new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)));
+}
+
+function readFileTail(filePath, bytes = 64 * 1024) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const stat = fs.fstatSync(fd);
+    const length = Math.min(bytes, stat.size);
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, Math.max(0, stat.size - length));
+    return buffer.toString('utf8');
+  } catch (_) {
+    return '';
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  }
+}
+
+function timestampFromJsonLine(line) {
+  try {
+    const obj = JSON.parse(line);
+    return isoFromDate(obj.timestamp || obj.updatedAt || obj.updated_at || obj.createdAt || obj.created_at);
+  } catch (_) {
+    return '';
+  }
+}
+
+function lastJsonlTimestamp(filePath) {
+  const tail = readFileTail(filePath);
+  const lines = tail.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const timestamp = timestampFromJsonLine(lines[index]);
+    if (timestamp) return timestamp;
+  }
+  try { return fs.statSync(filePath).mtime.toISOString(); } catch (_) { return ''; }
+}
+
+function findSessionFiles(root, sessionIds) {
+  const wanted = new Set(Array.from(sessionIds).map((id) => `${id}.jsonl`));
+  const found = new Map();
+  if (wanted.size === 0) return found;
+
+  function walk(dir) {
+    if (found.size >= wanted.size) return;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
+    for (const entry of entries) {
+      if (found.size >= wanted.size) return;
+      const nextPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(nextPath);
+      } else if (entry.isFile() && wanted.has(entry.name)) {
+        found.set(entry.name.slice(0, -'.jsonl'.length), nextPath);
+      }
+    }
+  }
+
+  walk(root);
+  return found;
+}
+
+function codexSessionFile(home, sessionId) {
+  const match = String(sessionId || '').match(/^rollout-(\d{4})-(\d{2})-(\d{2})T/);
+  if (!match) return '';
+  const filePath = path.join(home, '.codex', 'sessions', match[1], match[2], match[3], `${sessionId}.jsonl`);
+  try { return fs.statSync(filePath).isFile() ? filePath : ''; } catch (_) { return ''; }
+}
+
+function sessionRefsForPeriods(periods) {
+  const refs = new Map();
+  for (const period of Object.values(periods || {})) {
+    for (const session of Object.values(period?.sessions || {})) {
+      if (!session?.client || !session?.sessionId) continue;
+      refs.set(`${session.client}:${session.sessionId}`, { client: session.client, sessionId: session.sessionId });
+    }
+  }
+  return refs;
+}
+
+function sessionTimestampMap(periods, home = os.homedir()) {
+  const refs = sessionRefsForPeriods(periods);
+  const byClient = new Map();
+  for (const ref of refs.values()) {
+    if (!byClient.has(ref.client)) byClient.set(ref.client, new Set());
+    byClient.get(ref.client).add(ref.sessionId);
+  }
+
+  const metadata = new Map();
+  const applyFile = (client, sessionId, filePath) => {
+    const startedAt = timestampFromSessionId(sessionId);
+    const lastUsedAt = lastJsonlTimestamp(filePath) || startedAt;
+    metadata.set(`${client}:${sessionId}`, { startedAt, lastUsedAt });
+  };
+
+  const claudeFiles = findSessionFiles(path.join(home, '.claude', 'projects'), byClient.get('claude') || []);
+  for (const [sessionId, filePath] of claudeFiles) applyFile('claude', sessionId, filePath);
+
+  const codexIds = byClient.get('codex') || new Set();
+  const missingCodexIds = new Set();
+  for (const sessionId of codexIds) {
+    const filePath = codexSessionFile(home, sessionId);
+    if (filePath) applyFile('codex', sessionId, filePath);
+    else missingCodexIds.add(sessionId);
+  }
+  const codexFiles = findSessionFiles(path.join(home, '.codex', 'sessions'), missingCodexIds);
+  for (const [sessionId, filePath] of codexFiles) applyFile('codex', sessionId, filePath);
+
+  for (const ref of refs.values()) {
+    const key = `${ref.client}:${ref.sessionId}`;
+    if (metadata.has(key)) continue;
+    const timestamp = timestampFromSessionId(ref.sessionId);
+    if (timestamp) metadata.set(key, { startedAt: timestamp, lastUsedAt: timestamp });
+  }
+
+  return metadata;
+}
+
+function applySessionTimestamps(periods, home) {
+  const metadata = sessionTimestampMap(periods, home);
+  for (const period of Object.values(periods || {})) {
+    for (const [key, session] of Object.entries(period?.sessions || {})) {
+      const meta = metadata.get(key);
+      if (!meta) continue;
+      if (meta.startedAt && (!session.startedAt || Date.parse(meta.startedAt) < Date.parse(session.startedAt))) session.startedAt = meta.startedAt;
+      if (meta.lastUsedAt && (!session.lastUsedAt || Date.parse(meta.lastUsedAt) > Date.parse(session.lastUsedAt))) session.lastUsedAt = meta.lastUsedAt;
+    }
+  }
 }
 
 async function maybeSyncCursor(clientsCsv, logger) {
@@ -173,6 +317,7 @@ async function collectUsageOnce(options) {
     today = extractUsageFromTokscale(todayJson);
     month = extractUsageFromTokscale(monthJson);
     allTime = extractUsageFromTokscale(allTimeJson);
+    applySessionTimestamps({ today, month, allTime }, options.homeDir || os.homedir());
   }
   const summary = {
     deviceId,

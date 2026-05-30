@@ -39,16 +39,19 @@ function numberValue(value) {
 }
 
 function archivedPeriod(input) {
+  const normalized = normalizePeriod({ sessions: input?.sessions });
   return {
     totalTokens: Math.max(0, Math.round(numberValue(input?.totalTokens))),
     costUsd: numberValue(input?.costUsd),
     models: normalizedModelMap(input?.models),
-    modelCosts: normalizedModelMap(input?.modelCosts, false)
+    modelCosts: normalizedModelMap(input?.modelCosts, false),
+    sessions: normalized.sessions
   };
 }
 
 function hasUsage(period) {
-  return numberValue(period?.totalTokens) > 0 || numberValue(period?.costUsd) > 0;
+  if (numberValue(period?.totalTokens) > 0 || numberValue(period?.costUsd) > 0) return true;
+  return Object.values(period?.sessions || {}).some((session) => numberValue(session?.totalTokens) > 0 || numberValue(session?.costUsd) > 0);
 }
 
 function normalizeModelName(value) {
@@ -73,11 +76,16 @@ function periodFor(record, periodName) {
 }
 
 function clientUsageFromPeriod(period, client) {
+  const sessions = {};
+  for (const [key, session] of Object.entries(period?.sessions || {})) {
+    if (session?.client === client) sessions[key] = session;
+  }
   return archivedPeriod({
     totalTokens: period?.clients?.[client],
     costUsd: period?.clientCosts?.[client],
     models: period?.clientModels?.[client],
-    modelCosts: period?.clientModelCosts?.[client]
+    modelCosts: period?.clientModelCosts?.[client],
+    sessions
   });
 }
 
@@ -165,6 +173,10 @@ function addClientUsage(period, client, usage) {
     period.modelCosts[model] = (period.modelCosts[model] || 0) + numberValue(modelCost);
     if (!period.clientModelCosts[client]) period.clientModelCosts[client] = {};
     period.clientModelCosts[client][model] = (period.clientModelCosts[client][model] || 0) + numberValue(modelCost);
+  }
+  const normalizedSessions = normalizePeriod({ sessions: usage?.sessions }).sessions;
+  for (const [key, session] of Object.entries(normalizedSessions)) {
+    period.sessions[key] = session;
   }
 }
 

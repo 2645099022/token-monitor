@@ -74,6 +74,31 @@ Example payload:
       "codex": {
         "gpt-5": 0.01
       }
+    },
+    "sessions": {
+      "codex:rollout-2026-05-30T11-44-50-abc": {
+        "client": "codex",
+        "sessionId": "rollout-2026-05-30T11-44-50-abc",
+        "totalTokens": 1234,
+        "costUsd": 0.01,
+        "messageCount": 3,
+        "inputTokens": 100,
+        "outputTokens": 34,
+        "cacheReadTokens": 1100,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 0,
+        "startedAt": "2026-05-30T03:44:50.000Z",
+        "lastUsedAt": "2026-05-30T04:07:32.679Z",
+        "models": {
+          "gpt-5": 1234
+        },
+        "modelCosts": {
+          "gpt-5": 0.01
+        },
+        "providers": {
+          "openai": 1234
+        }
+      }
     }
   },
   "month": {
@@ -133,6 +158,7 @@ Response includes:
 - `periods.month`
 - `periods.allTime`
 - `periods.*.clientModels` and `periods.*.clientModelCosts` for preserving model breakdowns when a tracked tool is disabled
+- `periods.*.sessions` keyed by `client:sessionId` for session-level usage when tokscale exposes session groups; widgets may use `lastUsedAt` for recent-first sorting when present
 - `limits.providers` aggregated by provider account
 - `devices`
 - stale status for devices that have not reported recently

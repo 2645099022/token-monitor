@@ -25,7 +25,27 @@ function deviceRecord() {
       models: { 'claude-3-5-sonnet': 100, 'gpt-5': 50 },
       modelCosts: { 'claude-3-5-sonnet': 1.25, 'gpt-5': 0.25 },
       clientModels: { hermes: { 'claude-3-5-sonnet': 100 }, codex: { 'gpt-5': 50 } },
-      clientModelCosts: { hermes: { 'claude-3-5-sonnet': 1.25 }, codex: { 'gpt-5': 0.25 } }
+      clientModelCosts: { hermes: { 'claude-3-5-sonnet': 1.25 }, codex: { 'gpt-5': 0.25 } },
+      sessions: {
+        'hermes:h1': {
+          client: 'hermes',
+          sessionId: 'h1',
+          totalTokens: 100,
+          costUsd: 1.25,
+          messageCount: 4,
+          models: { 'claude-3-5-sonnet': 100 },
+          modelCosts: { 'claude-3-5-sonnet': 1.25 }
+        },
+        'codex:c1': {
+          client: 'codex',
+          sessionId: 'c1',
+          totalTokens: 50,
+          costUsd: 0.25,
+          messageCount: 2,
+          models: { 'gpt-5': 50 },
+          modelCosts: { 'gpt-5': 0.25 }
+        }
+      }
     },
     month: {
       totalTokens: 450,
@@ -35,7 +55,18 @@ function deviceRecord() {
       models: { 'claude-3-5-sonnet': 300, 'gpt-5': 150 },
       modelCosts: { 'claude-3-5-sonnet': 3.75, 'gpt-5': 0.75 },
       clientModels: { hermes: { 'claude-3-5-sonnet': 300 }, codex: { 'gpt-5': 150 } },
-      clientModelCosts: { hermes: { 'claude-3-5-sonnet': 3.75 }, codex: { 'gpt-5': 0.75 } }
+      clientModelCosts: { hermes: { 'claude-3-5-sonnet': 3.75 }, codex: { 'gpt-5': 0.75 } },
+      sessions: {
+        'hermes:h1': {
+          client: 'hermes',
+          sessionId: 'h1',
+          totalTokens: 300,
+          costUsd: 3.75,
+          messageCount: 12,
+          models: { 'claude-3-5-sonnet': 300 },
+          modelCosts: { 'claude-3-5-sonnet': 3.75 }
+        }
+      }
     },
     allTime: {
       totalTokens: 1200,
@@ -45,7 +76,18 @@ function deviceRecord() {
       models: { 'claude-3-5-sonnet': 900, 'gpt-5': 300 },
       modelCosts: { 'claude-3-5-sonnet': 11.25, 'gpt-5': 0.75 },
       clientModels: { hermes: { 'claude-3-5-sonnet': 900 }, codex: { 'gpt-5': 300 } },
-      clientModelCosts: { hermes: { 'claude-3-5-sonnet': 11.25 }, codex: { 'gpt-5': 0.75 } }
+      clientModelCosts: { hermes: { 'claude-3-5-sonnet': 11.25 }, codex: { 'gpt-5': 0.75 } },
+      sessions: {
+        'hermes:h1': {
+          client: 'hermes',
+          sessionId: 'h1',
+          totalTokens: 900,
+          costUsd: 11.25,
+          messageCount: 24,
+          models: { 'claude-3-5-sonnet': 900 },
+          modelCosts: { 'claude-3-5-sonnet': 11.25 }
+        }
+      }
     }
   };
 }
@@ -101,6 +143,8 @@ test('archived client usage is added back while the client remains untracked', (
   assert.equal(summary.today.clientCosts.hermes, 1.25);
   assert.equal(summary.today.models['claude-3-5-sonnet'], 100);
   assert.equal(summary.today.modelCosts['claude-3-5-sonnet'], 1.25);
+  assert.equal(summary.today.sessions['hermes:h1'].totalTokens, 100);
+  assert.equal(summary.today.sessions['codex:c1'], undefined);
   assert.equal(summary.today.models['gpt-5'], 50);
   assert.equal(summary.month.totalTokens, 450);
   assert.equal(summary.allTime.totalTokens, 1200);
@@ -115,10 +159,13 @@ test('archived day and month usage follow calendar boundaries', () => {
   });
   assert.equal(nextDay.today.clients.hermes, undefined);
   assert.equal(nextDay.today.models['claude-3-5-sonnet'], undefined);
+  assert.equal(nextDay.today.sessions?.['hermes:h1'], undefined);
   assert.equal(nextDay.month.clients.hermes, 300);
   assert.equal(nextDay.month.models['claude-3-5-sonnet'], 300);
+  assert.equal(nextDay.month.sessions['hermes:h1'].totalTokens, 300);
   assert.equal(nextDay.allTime.clients.hermes, 900);
   assert.equal(nextDay.allTime.models['claude-3-5-sonnet'], 900);
+  assert.equal(nextDay.allTime.sessions['hermes:h1'].totalTokens, 900);
 
   const nextMonth = applyArchivedClientUsage(liveSummaryWithoutHermes(), archive, {
     activeClients: 'codex',
@@ -127,6 +174,7 @@ test('archived day and month usage follow calendar boundaries', () => {
   assert.equal(nextMonth.today.clients.hermes, undefined);
   assert.equal(nextMonth.month.clients.hermes, undefined);
   assert.equal(nextMonth.month.models['claude-3-5-sonnet'], undefined);
+  assert.equal(nextMonth.month.sessions?.['hermes:h1'], undefined);
   assert.equal(nextMonth.allTime.clients.hermes, 900);
   assert.equal(nextMonth.allTime.models['claude-3-5-sonnet'], 900);
 });

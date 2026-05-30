@@ -47,6 +47,11 @@ function iconKindFor(rowData, breakdown) {
       ? { kind: 'icon', iconClass: `row-icon-${vendor}` }
       : { kind: 'dot' };
   }
+  if (breakdown === 'session') {
+    return rowData.client && clientsWithIcon.has(rowData.client)
+      ? { kind: 'icon', iconClass: `row-icon-${rowData.client}` }
+      : { kind: 'dot' };
+  }
   return clientsWithIcon.has(rowData.key)
     ? { kind: 'icon', iconClass: `row-icon-${rowData.key}` }
     : { kind: 'dot' };
@@ -71,6 +76,7 @@ const DEFAULT_LIMIT_PROVIDER_ORDER = LIMIT_PROVIDERS.map((provider) => provider.
 const limitProviderOrderApi = window.TokenMonitorLimitProviderOrder;
 const i18n = window.TokenMonitorI18n;
 const currencyApi = window.TokenMonitorCurrency;
+const sessionRowsApi = window.TokenMonitorSessionRows;
 const LIMIT_REFRESH_OPTIONS = [60000, 120000, 300000, 900000, 1800000];
 const WINDOW_BEHAVIOR_VALUES = ['floating', 'normal', 'desktop'];
 const WINDOW_BEHAVIOR_ICONS = { floating: '⇧', normal: '○', desktop: '⇩' };
@@ -78,7 +84,7 @@ const LIMIT_SOURCE_LABELS = { oauth: 'OAuth', cli: 'CLI', web: 'Web', rpc: 'CLI'
 const deviceAccent = '#73bdf5';
 const deviceStaleColor = '#8c97a7';
 const fallbackModelColors = ['#6ab4f0', '#cc7c5e', '#a57df0', '#49a3b0', '#f0d66a', '#f06a7b'];
-const baseBreakdownOrder = ['tool', 'device', 'model'];
+const baseBreakdownOrder = ['tool', 'device', 'model', 'session'];
 const initialFloatingBubble = window.__TOKEN_MONITOR_INITIAL_FLOATING_BUBBLE__ || { collapsed: false, side: null };
 const state = { period: 'today', appUpdate: null, breakdown: 'tool', settings: null, stats: null, refreshTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null, cursorAccount: { status: null, error: '' }, cursorAccountExpanded: false, floatingBubble: initialFloatingBubble, suppressInitialNumberAnimation: window.__TOKEN_MONITOR_SUPPRESS_INITIAL_NUMBER_ANIMATION__ === true };
 const defaultAppearance = { glassOpacity: 68, glassBlur: 32, zoomFactor: 1, systemGlass: true, showLiveDot: true, showToolIcons: true, titleIconOnly: false };
@@ -388,30 +394,42 @@ function rowWidth(value, max) {
 }
 
 function rowTemplate(rowData) {
-  const { key, name, platform } = rowData;
+  const { key, name, platform, client, subtitle, detail, kind } = rowData;
   const row = document.createElement('div');
   row.dataset.key = key;
   if (platform) row.dataset.platform = platform;
-  row.innerHTML = '<div class="row-head"><div class="row-name"><span class="row-mark"></span><span></span></div><div class="row-metrics"><div class="row-value"></div><div class="row-cost"></div></div></div><div class="bar"><div class="bar-fill"></div></div>';
-  row.querySelector('.row-name span:last-child').textContent = name;
+  if (client) row.dataset.client = client;
+  if (kind) row.dataset.kind = kind;
+  row.innerHTML = '<div class="row-head"><div class="row-name"><span class="row-mark"></span><div class="row-label"><span class="row-title"></span><span class="row-subtitle"></span><span class="row-detail"></span></div></div><div class="row-metrics"><div class="row-value"></div><div class="row-cost"></div></div></div><div class="bar"><div class="bar-fill"></div></div>';
+  row.querySelector('.row-title').textContent = name;
+  row.querySelector('.row-subtitle').textContent = subtitle || '';
+  row.querySelector('.row-detail').textContent = detail || '';
   return row;
 }
 
-function updateRow(row, { name, value, cost, max, color, stale, platform, local }) {
+function updateRow(row, { name, subtitle, detail, value, cost, max, color, stale, platform, local, client, kind, title }) {
   const width = rowWidth(value, max);
-  row.className = `row${stale ? ' stale' : ''}${local ? ' local' : ''}`;
-  row.title = local ? 'This device' : '';
+  row.className = `row${kind ? ` ${kind}-row` : ''}${stale ? ' stale' : ''}${local ? ' local' : ''}`;
+  row.title = local ? 'This device' : (title || '');
   if (platform !== undefined) row.dataset.platform = platform || '';
+  if (client !== undefined) row.dataset.client = client || '';
+  if (kind !== undefined) row.dataset.kind = kind || '';
   const mark = row.querySelector('.row-mark');
-  const kind = iconKindFor({ key: row.dataset.key, platform: row.dataset.platform || '' }, state.breakdown);
-  if (kind.kind === 'icon') {
-    mark.className = `row-mark row-icon ${kind.iconClass}`;
+  const iconKind = iconKindFor({ key: row.dataset.key, platform: row.dataset.platform || '', client: row.dataset.client || '' }, state.breakdown);
+  if (iconKind.kind === 'icon') {
+    mark.className = `row-mark row-icon ${iconKind.iconClass}`;
     mark.style.background = '';
   } else {
     mark.className = 'row-mark dot';
     mark.style.background = color;
   }
-  row.querySelector('.row-name span:last-child').textContent = name;
+  row.querySelector('.row-title').textContent = name;
+  const subtitleEl = row.querySelector('.row-subtitle');
+  subtitleEl.textContent = subtitle || '';
+  subtitleEl.classList.toggle('hidden', !subtitle);
+  const detailEl = row.querySelector('.row-detail');
+  detailEl.textContent = detail || '';
+  detailEl.classList.toggle('hidden', !detail);
   row.querySelector('.row-value').textContent = formatNumber(value);
   row.querySelector('.row-cost').textContent = formatCost(cost || 0);
   const fill = row.querySelector('.bar-fill');
@@ -426,7 +444,7 @@ function renderRows(rows) {
     return;
   }
   const max = Math.max(1, ...rows.map((row) => row.value));
-  const signature = rows.map((row) => row.key).join('\n');
+  const signature = `${state.breakdown}\n${rows.map((row) => row.key).join('\n')}`;
   const existing = new Map(Array.from(els.breakdown.children).map((child) => [child.dataset.key, child]));
   if (signature !== state.rowSignature) {
     els.breakdown.replaceChildren(...rows.map((row) => existing.get(row.key) || rowTemplate(row)));
@@ -516,9 +534,23 @@ function modelRowsForPeriod(period) {
   return toolRowsForPeriod(period);
 }
 
+function sessionRowsForPeriod(period) {
+  const rows = sessionRowsApi.sessionRowsForPeriod(period, {
+    clientLabels,
+    clientColors,
+    modelColor,
+    stableColor,
+    fallbackColors: fallbackModelColors
+  });
+  if (rows.length > 0) return rows.sort((a, b) => b.sortTime - a.sortTime || b.value - a.value || b.cost - a.cost || a.name.localeCompare(b.name));
+  if (Number(period?.totalTokens || 0) === 0) return [];
+  return modelRowsForPeriod(period);
+}
+
 function rowsForPeriod(period) {
   if (state.breakdown === 'device') return deviceRowsForPeriod();
   if (state.breakdown === 'model') return modelRowsForPeriod(period);
+  if (state.breakdown === 'session') return sessionRowsForPeriod(period);
   return toolRowsForPeriod(period);
 }
 
@@ -725,6 +757,7 @@ function nextBreakdown(value) {
 function breakdownLabel(deviceText) {
   if (state.breakdown === 'device') return deviceText;
   if (state.breakdown === 'model') return 'Model';
+  if (state.breakdown === 'session') return 'Sessions';
   if (state.breakdown === 'limits') return 'Limits';
   return 'Tools';
 }
@@ -753,6 +786,7 @@ function render() {
   const deviceText = `${devices.length} device${devices.length === 1 ? '' : 's'}`;
   els.breakdownToggle.textContent = breakdownLabel(deviceText);
   els.breakdownToggle.removeAttribute('title');
+  els.shell.classList.toggle('session-mode', state.breakdown === 'session');
   if (state.breakdown === 'limits') {
     els.breakdown.classList.add('hidden');
     els.limitsPanel.classList.remove('hidden');

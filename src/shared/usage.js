@@ -15,6 +15,15 @@ const TOKEN_COMPONENT_KEYS = [
   'totalInput', 'totalOutput', 'totalCacheRead', 'totalCacheWrite'
 ];
 const COST_KEYS = ['costUsd', 'cost_usd', 'costUSD', 'cost', 'totalCost', 'total_cost'];
+const MESSAGE_COUNT_KEYS = ['messageCount', 'message_count', 'messages', 'totalMessages', 'total_messages'];
+const SESSION_ID_KEYS = ['sessionId', 'session_id', 'session', 'conversationId', 'conversation_id', 'threadId', 'thread_id'];
+const INPUT_TOKEN_KEYS = ['input', 'inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens', 'totalInput'];
+const OUTPUT_TOKEN_KEYS = ['output', 'outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens', 'totalOutput'];
+const CACHE_READ_TOKEN_KEYS = ['cacheRead', 'cacheReadTokens', 'cache_read_tokens', 'cachedTokens', 'cached_tokens', 'cacheReadInputTokens', 'totalCacheRead'];
+const CACHE_WRITE_TOKEN_KEYS = ['cacheWrite', 'cacheWriteTokens', 'cache_write_tokens', 'cacheCreationInputTokens', 'totalCacheWrite'];
+const REASONING_TOKEN_KEYS = ['reasoning', 'reasoningTokens', 'reasoning_tokens'];
+const STARTED_AT_KEYS = ['startedAt', 'started_at', 'createdAt', 'created_at'];
+const LAST_USED_AT_KEYS = ['lastUsedAt', 'last_used_at', 'updatedAt', 'updated_at', 'lastActivityAt', 'last_activity_at', 'timestamp'];
 
 function asNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -36,6 +45,17 @@ function firstNumber(obj, keys) {
   return 0;
 }
 
+function firstString(obj, keys) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      const value = String(obj[key] || '').trim();
+      if (value) return value;
+    }
+  }
+  return '';
+}
+
 function tokenValue(obj) {
   const direct = firstNumber(obj, TOKEN_KEYS);
   if (direct !== 0) return direct;
@@ -50,6 +70,16 @@ function costValue(obj) {
   return firstNumber(obj, COST_KEYS);
 }
 
+function timestampMs(value) {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.getTime() : 0;
+}
+
+function normalizeIsoTimestamp(value) {
+  const ms = timestampMs(value);
+  return ms > 0 ? new Date(ms).toISOString() : '';
+}
+
 function emptyPeriod() {
   return {
     totalTokens: 0,
@@ -59,7 +89,8 @@ function emptyPeriod() {
     models: {},
     modelCosts: {},
     clientModels: {},
-    clientModelCosts: {}
+    clientModelCosts: {},
+    sessions: {}
   };
 }
 
@@ -85,6 +116,16 @@ function detectClient(obj) {
 function normalizeModelName(value) {
   const raw = String(value || '').trim();
   return raw || null;
+}
+
+function normalizeSessionId(value) {
+  const raw = String(value || '').trim();
+  return raw || null;
+}
+
+function normalizeProviderName(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return raw.replace(/[^a-z0-9_-]+/g, '-') || null;
 }
 
 function hasOwn(object, key) {
@@ -118,10 +159,18 @@ function detectModel(obj) {
   return normalizeModelName(obj.model || obj.modelName || obj.model_name || obj.deployment || obj.engine);
 }
 
+function detectSessionId(obj) {
+  return normalizeSessionId(firstString(obj, SESSION_ID_KEYS));
+}
+
+function sessionKey(client, sessionId) {
+  return `${client}:${sessionId}`;
+}
+
 function looksLikeUsageRow(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
   if (tokenValue(obj) === 0 && costValue(obj) === 0) return false;
-  return Boolean(obj.client || obj.clients || obj.source || obj.platform || obj.agent || obj.tool || obj.model || obj.provider || obj.date || obj.name);
+  return Boolean(obj.client || obj.clients || obj.source || obj.platform || obj.agent || obj.tool || obj.model || obj.provider || obj.date || obj.name || detectSessionId(obj));
 }
 
 function collectUsageRows(node, rows) {
@@ -138,6 +187,128 @@ function collectUsageRows(node, rows) {
   for (const value of Object.values(node)) {
     if (value && (Array.isArray(value) || typeof value === 'object')) collectUsageRows(value, rows);
   }
+}
+
+function sessionTokenComponents(input) {
+  return {
+    inputTokens: Math.max(0, Math.round(firstNumber(input, INPUT_TOKEN_KEYS))),
+    outputTokens: Math.max(0, Math.round(firstNumber(input, OUTPUT_TOKEN_KEYS))),
+    cacheReadTokens: Math.max(0, Math.round(firstNumber(input, CACHE_READ_TOKEN_KEYS))),
+    cacheWriteTokens: Math.max(0, Math.round(firstNumber(input, CACHE_WRITE_TOKEN_KEYS))),
+    reasoningTokens: Math.max(0, Math.round(firstNumber(input, REASONING_TOKEN_KEYS)))
+  };
+}
+
+function emptySession(client, id) {
+  return {
+    client,
+    sessionId: id,
+    totalTokens: 0,
+    costUsd: 0,
+    messageCount: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    startedAt: '',
+    lastUsedAt: '',
+    models: {},
+    modelCosts: {},
+    providers: {}
+  };
+}
+
+function mergeSession(target, source) {
+  target.totalTokens += Math.max(0, Math.round(asNumber(source.totalTokens)));
+  target.costUsd += asNumber(source.costUsd);
+  target.messageCount += Math.max(0, Math.round(asNumber(source.messageCount)));
+  target.inputTokens += Math.max(0, Math.round(asNumber(source.inputTokens)));
+  target.outputTokens += Math.max(0, Math.round(asNumber(source.outputTokens)));
+  target.cacheReadTokens += Math.max(0, Math.round(asNumber(source.cacheReadTokens)));
+  target.cacheWriteTokens += Math.max(0, Math.round(asNumber(source.cacheWriteTokens)));
+  target.reasoningTokens += Math.max(0, Math.round(asNumber(source.reasoningTokens)));
+  const sourceStarted = timestampMs(source.startedAt);
+  const targetStarted = timestampMs(target.startedAt);
+  if (sourceStarted && (!targetStarted || sourceStarted < targetStarted)) target.startedAt = new Date(sourceStarted).toISOString();
+  const sourceLastUsed = timestampMs(source.lastUsedAt);
+  const targetLastUsed = timestampMs(target.lastUsedAt);
+  if (sourceLastUsed && sourceLastUsed > targetLastUsed) target.lastUsedAt = new Date(sourceLastUsed).toISOString();
+  for (const [model, tokens] of Object.entries(source.models || {})) {
+    const key = normalizeModelName(model);
+    if (key) target.models[key] = (target.models[key] || 0) + Math.max(0, Math.round(asNumber(tokens)));
+  }
+  for (const [model, cost] of Object.entries(source.modelCosts || {})) {
+    const key = normalizeModelName(model);
+    if (key) target.modelCosts[key] = (target.modelCosts[key] || 0) + asNumber(cost);
+  }
+  for (const [provider, tokens] of Object.entries(source.providers || {})) {
+    const key = normalizeProviderName(provider);
+    if (key) target.providers[key] = (target.providers[key] || 0) + Math.max(0, Math.round(asNumber(tokens)));
+  }
+  return target;
+}
+
+function addSession(period, session) {
+  if (!session?.client || !session?.sessionId) return;
+  const key = sessionKey(session.client, session.sessionId);
+  if (!period.sessions[key]) period.sessions[key] = emptySession(session.client, session.sessionId);
+  mergeSession(period.sessions[key], session);
+}
+
+function sessionFromRow(row) {
+  const client = detectClient(row);
+  const id = detectSessionId(row);
+  if (!client || !id) return null;
+  const session = emptySession(client, id);
+  session.totalTokens = Math.max(0, Math.round(tokenValue(row)));
+  session.costUsd = costValue(row);
+  session.messageCount = Math.max(0, Math.round(firstNumber(row, MESSAGE_COUNT_KEYS)));
+  Object.assign(session, sessionTokenComponents(row));
+  session.startedAt = normalizeIsoTimestamp(firstString(row, STARTED_AT_KEYS));
+  session.lastUsedAt = normalizeIsoTimestamp(firstString(row, LAST_USED_AT_KEYS));
+  let model = detectModel(row);
+  if (client === 'cursor' && model === 'auto') model = 'cursor-auto';
+  if (model && session.totalTokens > 0) session.models[model] = (session.models[model] || 0) + session.totalTokens;
+  if (model && session.costUsd > 0) session.modelCosts[model] = (session.modelCosts[model] || 0) + session.costUsd;
+  const provider = normalizeProviderName(row.provider);
+  if (provider && session.totalTokens > 0) session.providers[provider] = (session.providers[provider] || 0) + session.totalTokens;
+  return session;
+}
+
+function normalizeSession(input, fallbackKey) {
+  if (!input || typeof input !== 'object') return null;
+  const client = normalizeClientName(input.client || input.source || input.platform || input.agent || input.tool);
+  const id = normalizeSessionId(input.sessionId || input.session_id || input.session || input.conversationId || input.conversation_id || input.threadId || input.thread_id || fallbackKey);
+  if (!client || !id) return null;
+  const session = emptySession(client, id);
+  const components = sessionTokenComponents(input);
+  Object.assign(session, components);
+  const componentTotal = components.inputTokens + components.outputTokens + components.cacheReadTokens + components.cacheWriteTokens + components.reasoningTokens;
+  session.totalTokens = Math.max(0, Math.round(asNumber(input.totalTokens ?? input.total_tokens ?? input.tokens ?? componentTotal)));
+  session.costUsd = asNumber(input.costUsd ?? input.cost_usd ?? input.cost ?? 0);
+  session.messageCount = Math.max(0, Math.round(firstNumber(input, MESSAGE_COUNT_KEYS)));
+  session.startedAt = normalizeIsoTimestamp(firstString(input, STARTED_AT_KEYS));
+  session.lastUsedAt = normalizeIsoTimestamp(firstString(input, LAST_USED_AT_KEYS));
+  if (input.models && typeof input.models === 'object') {
+    for (const [model, value] of Object.entries(input.models)) {
+      const key = normalizeModelName(model);
+      if (key) session.models[key] = (session.models[key] || 0) + Math.max(0, Math.round(asNumber(value)));
+    }
+  }
+  if (input.modelCosts && typeof input.modelCosts === 'object') {
+    for (const [model, value] of Object.entries(input.modelCosts)) {
+      const key = normalizeModelName(model);
+      if (key) session.modelCosts[key] = (session.modelCosts[key] || 0) + asNumber(value);
+    }
+  }
+  if (input.providers && typeof input.providers === 'object') {
+    for (const [provider, value] of Object.entries(input.providers)) {
+      const key = normalizeProviderName(provider);
+      if (key) session.providers[key] = (session.providers[key] || 0) + Math.max(0, Math.round(asNumber(value)));
+    }
+  }
+  return session;
 }
 
 function normalizePeriod(input) {
@@ -193,6 +364,12 @@ function normalizePeriod(input) {
       }
     }
   }
+  if (input.sessions && typeof input.sessions === 'object') {
+    for (const [key, value] of Object.entries(input.sessions)) {
+      const session = normalizeSession(value, key);
+      if (session) addSession(period, session);
+    }
+  }
   return period;
 }
 
@@ -208,7 +385,8 @@ function extractUsageFromTokscale(json) {
       models: {},
       modelCosts: {},
       clientModels: {},
-      clientModelCosts: {}
+      clientModelCosts: {},
+      sessions: {}
     };
   }
   const period = emptyPeriod();
@@ -232,6 +410,8 @@ function extractUsageFromTokscale(json) {
       if (!period.clientModelCosts[client]) period.clientModelCosts[client] = {};
       period.clientModelCosts[client][model] = (period.clientModelCosts[client][model] || 0) + cost;
     }
+    const session = sessionFromRow(row);
+    if (session) addSession(period, session);
   }
   return period;
 }
@@ -267,6 +447,13 @@ function addClientModelUsage(target, client, models, costs) {
   }
 }
 
+function addClientSessionUsage(target, client, sessions) {
+  for (const session of Object.values(sessions || {})) {
+    if (session?.client !== client) continue;
+    addSession(target, session);
+  }
+}
+
 function shouldPreservePeriod(periodName, existingRecord, incomingRecord) {
   if (periodName === 'allTime') return true;
   const existingDate = recordDate(existingRecord);
@@ -292,6 +479,7 @@ function preserveUntrackedClientUsage(existingRecord, incomingRecord, trackedCli
       target.clients[client] = tokens;
       if (cost > 0) target.clientCosts[client] = cost;
       addClientModelUsage(target, client, source.clientModels?.[client], source.clientModelCosts?.[client]);
+      addClientSessionUsage(target, client, source.sessions);
     }
   }
 }
@@ -355,6 +543,7 @@ function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
           target.clientModelCosts[client][model] = (target.clientModelCosts[client][model] || 0) + cost;
         }
       }
+      for (const session of Object.values(source.sessions)) addSession(target, session);
     }
   }
   aggregate.limits = aggregateLimits(aggregate.devices, staleAfterMs, now);
@@ -371,6 +560,12 @@ function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
     for (const models of Object.values(aggregate.periods[periodName].clientModelCosts)) {
       for (const [model, cost] of Object.entries(models)) {
         models[model] = Number(cost.toFixed(6));
+      }
+    }
+    for (const session of Object.values(aggregate.periods[periodName].sessions)) {
+      session.costUsd = Number(session.costUsd.toFixed(6));
+      for (const [model, cost] of Object.entries(session.modelCosts)) {
+        session.modelCosts[model] = Number(cost.toFixed(6));
       }
     }
   }
