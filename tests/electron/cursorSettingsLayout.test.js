@@ -32,6 +32,14 @@ function functionBody(source, name, nextName) {
   return source.slice(start, end);
 }
 
+function functionBodyBeforeMarker(source, name, marker) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} function should exist`);
+  const end = source.indexOf(marker, start);
+  assert.notEqual(end, -1, `${marker} marker should follow ${name}`);
+  return source.slice(start, end);
+}
+
 test('Cursor account status stays inline with an email-only summary', () => {
   const html = readRendererFile('index.html');
   const toggle = html.match(/<button id="cursorSettingsToggle"[\s\S]*?<\/button>/)?.[0] || '';
@@ -73,4 +81,37 @@ test('Cursor account header omits plan and reset details', () => {
   assert.match(body, /const summary = status\.email \|\| t\('settings\.cursor\.loggedIn'\);/);
   assert.match(body, /setCursorStatusText\(statusEl, summary\);/);
   assert.doesNotMatch(body, /membershipType|billingCycleEnd|billingResets/);
+});
+
+test('OpenCode account panel mirrors Cursor linked-state controls', () => {
+  const html = readRendererFile('index.html');
+  const details = html.match(/<div id="opencodeSettingsDetails"[\s\S]*?<div class="settings-group">/)?.[0] || '';
+  assert.match(details, /<button id="opencodeLogoutButton" class="hidden" data-i18n="settings\.common\.logout">/);
+  assert.match(details, /<button id="opencodeRefreshButton" class="hidden" data-i18n="settings\.common\.refresh">/);
+  assert.match(details, /<div id="opencodeManualPanel">[\s\S]*?<textarea id="opencodeCookieInput"/);
+  assert.match(details, /data-i18n="settings\.opencode\.step3Before">Copy the<\/span> <code>auth<\/code> <span data-i18n="settings\.opencode\.step3After">value\.<\/span>/);
+  assert.doesNotMatch(details, /Name\/Value columns/);
+  assert.doesNotMatch(details, /auth=&lt;auth value&gt;/);
+  assert.doesNotMatch(details, /oc_locale/);
+  assert.doesNotMatch(details, /full Cookie header/);
+  assert.match(details, /placeholder="auth=\.\.\."/);
+  assert.match(details, /<div id="opencodeErrorMessage" class="settings-note error hidden"><\/div>/);
+
+  const app = readRendererFile('app.js');
+  const renderBody = functionBody(app, 'renderOpencodeStatus', 'refreshOpencodeStatus');
+  assert.match(
+    renderBody,
+    /if \(status\.saveFailed\) \{[\s\S]*logoutBtn\.classList\.add\('hidden'\);[\s\S]*refreshBtn\.classList\.add\('hidden'\);[\s\S]*manualPanel\.classList\.remove\('hidden'\);/,
+    'failed manual saves should not expose linked-account controls'
+  );
+  assert.match(renderBody, /t\('settings\.opencode\.statusLinked'\)/);
+  assert.match(renderBody, /logoutBtn\.classList\.remove\('hidden'\)/);
+  assert.match(renderBody, /refreshBtn\.classList\.remove\('hidden'\)/);
+  assert.match(renderBody, /manualPanel\.classList\.add\('hidden'\)/);
+
+  const setupBody = functionBodyBeforeMarker(app, 'setupCursorAccountUI', '\nsetupCursorAccountUI();');
+  assert.match(setupBody, /window\.tokenMonitor\.openExternal\('https:\/\/opencode\.ai\/auth'\)/);
+  assert.match(setupBody, /saveFailed: true/);
+  assert.match(setupBody, /window\.tokenMonitor\.opencode\.logout\(\)/);
+  assert.match(setupBody, /refreshOpencodeStatus\(\)/);
 });

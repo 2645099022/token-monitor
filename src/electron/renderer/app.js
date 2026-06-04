@@ -70,7 +70,8 @@ const LIMIT_PROVIDERS = [
   { id: 'claude', label: 'Claude', settingsLabel: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
   { id: 'cursor', label: 'Cursor' },
-  { id: 'antigravity', label: 'Antigravity' }
+  { id: 'antigravity', label: 'Antigravity' },
+  { id: 'opencode', label: 'OpenCode' }
 ];
 const DEFAULT_LIMIT_PROVIDER_ORDER = LIMIT_PROVIDERS.map((provider) => provider.id).join(',');
 const limitProviderOrderApi = window.TokenMonitorLimitProviderOrder;
@@ -81,7 +82,7 @@ const sessionDetailApi = window.TokenMonitorSessionDetail;
 const LIMIT_REFRESH_OPTIONS = [60000, 120000, 300000, 900000, 1800000];
 const WINDOW_BEHAVIOR_VALUES = ['floating', 'normal', 'desktop'];
 const WINDOW_BEHAVIOR_ICONS = { floating: '⇧', normal: '○', desktop: '⇩' };
-const LIMIT_SOURCE_LABELS = { oauth: 'OAuth', cli: 'CLI', web: 'Web', rpc: 'CLI' };
+const LIMIT_SOURCE_LABELS = { oauth: 'OAuth', cli: 'CLI', web: 'Web', rpc: 'CLI', local: 'Local' };
 const deviceAccent = '#73bdf5';
 const deviceStaleColor = '#8c97a7';
 const fallbackModelColors = ['#6ab4f0', '#cc7c5e', '#a57df0', '#49a3b0', '#f0d66a', '#f06a7b'];
@@ -96,7 +97,7 @@ function normalizeInitialViewValue(value, allowed, fallback) {
   return allowed.has(raw) ? raw : fallback;
 }
 
-const state = { period: normalizeInitialViewValue(initialViewState.period, viewPeriodValues, 'today'), appUpdate: null, breakdown: normalizeInitialViewValue(initialViewState.breakdown, viewBreakdownValues, 'tool'), settings: null, stats: null, refreshTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null, cursorAccount: { status: null, error: '' }, cursorAccountExpanded: false, floatingBubble: initialFloatingBubble, suppressInitialNumberAnimation: window.__TOKEN_MONITOR_SUPPRESS_INITIAL_NUMBER_ANIMATION__ === true, openSession: null, detailSort: 'time' };
+const state = { period: normalizeInitialViewValue(initialViewState.period, viewPeriodValues, 'today'), appUpdate: null, breakdown: normalizeInitialViewValue(initialViewState.breakdown, viewBreakdownValues, 'tool'), settings: null, stats: null, refreshTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null, cursorAccount: { status: null, error: '' }, cursorAccountExpanded: false, opencodeAccount: { status: null, error: '' }, opencodeCookieExpanded: false, floatingBubble: initialFloatingBubble, suppressInitialNumberAnimation: window.__TOKEN_MONITOR_SUPPRESS_INITIAL_NUMBER_ANIMATION__ === true, openSession: null, detailSort: 'time' };
 const defaultAppearance = { glassOpacity: 68, glassBlur: 32, zoomFactor: 1, systemGlass: true, showLiveDot: true, showToolIcons: true, titleIconOnly: false };
 const els = {
   shell: document.querySelector('.shell'), status: document.getElementById('status'), liveDot: document.getElementById('liveDot'), totalTokens: document.getElementById('totalTokens'), cost: document.getElementById('cost'), breakdown: document.getElementById('breakdown'), limitsPanel: document.getElementById('limitsPanel'), breakdownToggle: document.getElementById('breakdownToggle'), pinButton: document.getElementById('pinButton'), settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'), languageInput: document.getElementById('languageInput'), currencyInput: document.getElementById('currencyInput'), hubUrlInput: document.getElementById('hubUrlInput'), secretInput: document.getElementById('secretInput'), deviceIdInput: document.getElementById('deviceIdInput'), limitProviderCheckboxes: document.getElementById('limitProviderCheckboxes'), limitsRefreshInput: document.getElementById('limitsRefreshInput'), showLimitSourceInput: document.getElementById('showLimitSourceInput'), systemGlassInput: document.getElementById('systemGlassInput'), liveDotInput: document.getElementById('liveDotInput'), toolIconsInput: document.getElementById('toolIconsInput'), floatingBubbleInput: document.getElementById('floatingBubbleInput'), floatingBubbleTriggerInput: document.getElementById('floatingBubbleTriggerInput'), floatingBubbleTriggerRow: document.getElementById('floatingBubbleTriggerRow'), floatingBubbleContentInput: document.getElementById('floatingBubbleContentInput'), floatingBubbleContentRow: document.getElementById('floatingBubbleContentRow'), floatingBubbleContent: document.getElementById('floatingBubbleContent'), discordRpcInput: document.getElementById('discordRpcInput'), windowBehaviorInput: document.getElementById('windowBehaviorInput'), trayModeInput: document.getElementById('trayModeInput'), trayContentInput: document.getElementById('trayContentInput'), glassInput: document.getElementById('glassInput'), blurInput: document.getElementById('blurInput'), zoomInput: document.getElementById('zoomInput'), resetGlassButton: document.getElementById('resetGlassButton'), resetDepthButton: document.getElementById('resetDepthButton'), resetZoomButton: document.getElementById('resetZoomButton'), saveSettingsButton: document.getElementById('saveSettingsButton'), clientCheckboxes: document.getElementById('clientCheckboxes'), openConfigButton: document.getElementById('openConfigButton'), refreshButton: document.getElementById('refreshButton'), minButton: document.getElementById('minButton'), closeButton: document.getElementById('closeButton'), floatingBubbleTab: document.getElementById('floatingBubbleTab')
@@ -1404,6 +1405,7 @@ function syncSettingsForm() {
   els.zoomInput.value = String(Math.round((Number(state.settings.zoomFactor) || 1) * 100));
   renderClientCheckboxes();
   renderLimitProviderCheckboxes();
+  renderOpencodeStatus();
   applyAppearanceSettings(state.settings);
   renderTokscaleStatus();
   renderSettingsAppUpdateRow();
@@ -1996,9 +1998,114 @@ function setCursorAccountExpanded(expanded) {
   if (group) group.classList.toggle('expanded', next);
 }
 
+function setOpencodeCookieExpanded(expanded) {
+  const toggle = document.getElementById('opencodeSettingsToggle');
+  const details = document.getElementById('opencodeSettingsDetails');
+  const group = document.getElementById('opencodeCookieGroup');
+  if (!toggle || !details) return;
+  const next = Boolean(expanded);
+  state.opencodeCookieExpanded = next;
+  toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
+  details.classList.toggle('hidden', !next);
+  if (group) group.classList.toggle('expanded', next);
+}
+
 function setCursorStatusText(el, text) {
   el.textContent = text;
   el.title = text;
+}
+
+function renderOpencodeStatus() {
+  const statusEl = document.getElementById('opencodeCookieStatus');
+  const openBtn = document.getElementById('opencodeOpenBrowser');
+  const logoutBtn = document.getElementById('opencodeLogoutButton');
+  const refreshBtn = document.getElementById('opencodeRefreshButton');
+  const manualPanel = document.getElementById('opencodeManualPanel');
+  const errorEl = document.getElementById('opencodeErrorMessage');
+  if (!statusEl || !openBtn || !logoutBtn || !refreshBtn || !manualPanel || !errorEl) return;
+
+  errorEl.classList.add('hidden');
+  errorEl.textContent = '';
+
+  if (state.opencodeAccount.error) {
+    setCursorStatusText(statusEl, t('settings.common.error'));
+    errorEl.textContent = state.opencodeAccount.errorMessage || t('settings.opencode.statusCheckFailed', { message: state.opencodeAccount.error });
+    errorEl.classList.remove('hidden');
+    openBtn.classList.remove('hidden');
+    logoutBtn.classList.remove('hidden');
+    refreshBtn.classList.remove('hidden');
+    manualPanel.classList.remove('hidden');
+    setOpencodeCookieExpanded(true);
+    return;
+  }
+
+  const status = state.opencodeAccount.status;
+  if (!status) {
+    setCursorStatusText(statusEl, t('settings.common.checking'));
+    return;
+  }
+
+  if (status.saveFailed) {
+    setCursorStatusText(statusEl, t('settings.common.error'));
+    errorEl.textContent = status.error || t('settings.common.error');
+    errorEl.classList.remove('hidden');
+    openBtn.classList.remove('hidden');
+    logoutBtn.classList.add('hidden');
+    refreshBtn.classList.add('hidden');
+    manualPanel.classList.remove('hidden');
+    setOpencodeCookieExpanded(true);
+    return;
+  }
+
+  if (!status.linked) {
+    setCursorStatusText(statusEl, t('settings.opencode.statusNotSet'));
+    openBtn.classList.remove('hidden');
+    logoutBtn.classList.add('hidden');
+    refreshBtn.classList.add('hidden');
+    manualPanel.classList.remove('hidden');
+    return;
+  }
+
+  if (status.expired) {
+    setCursorStatusText(statusEl, t('settings.opencode.expired'));
+    errorEl.textContent = status.error || t('settings.opencode.expired');
+    errorEl.classList.remove('hidden');
+    openBtn.classList.remove('hidden');
+    logoutBtn.classList.remove('hidden');
+    refreshBtn.classList.remove('hidden');
+    manualPanel.classList.remove('hidden');
+    setOpencodeCookieExpanded(true);
+    return;
+  }
+
+  if (status.error) {
+    setCursorStatusText(statusEl, t('settings.common.error'));
+    errorEl.textContent = t('settings.opencode.statusCheckFailed', { message: status.error });
+    errorEl.classList.remove('hidden');
+    openBtn.classList.add('hidden');
+    logoutBtn.classList.remove('hidden');
+    refreshBtn.classList.remove('hidden');
+    manualPanel.classList.add('hidden');
+    return;
+  }
+
+  setCursorStatusText(statusEl, t('settings.opencode.statusLinked'));
+  openBtn.classList.add('hidden');
+  logoutBtn.classList.remove('hidden');
+  refreshBtn.classList.remove('hidden');
+  manualPanel.classList.add('hidden');
+}
+
+async function refreshOpencodeStatus() {
+  state.opencodeAccount = { status: null, error: '' };
+  renderOpencodeStatus();
+  try {
+    const status = await window.tokenMonitor.opencode.status();
+    state.opencodeAccount = { status, error: '' };
+  } catch (err) {
+    state.opencodeAccount = { status: null, error: err.message };
+  }
+  renderOpencodeStatus();
 }
 
 function renderCursorStatus() {
@@ -2117,6 +2224,57 @@ function setupCursorAccountUI() {
   });
 
   refreshCursorStatus();
+
+  const opencodeToggle = document.getElementById('opencodeSettingsToggle');
+  if (opencodeToggle) {
+    opencodeToggle.addEventListener('click', () => setOpencodeCookieExpanded(!state.opencodeCookieExpanded));
+    setOpencodeCookieExpanded(false);
+    renderOpencodeStatus();
+
+    document.getElementById('opencodeOpenBrowser').addEventListener('click', () => {
+      window.tokenMonitor.openExternal('https://opencode.ai/auth');
+    });
+
+    document.getElementById('opencodeLogoutButton').addEventListener('click', async () => {
+      await window.tokenMonitor.opencode.logout();
+      if (state.settings) state.settings.opencodeCookie = '';
+      await refreshOpencodeStatus();
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('opencodeRefreshButton').addEventListener('click', () => {
+      refreshOpencodeStatus();
+    });
+
+    document.getElementById('opencodeCookieSubmit').addEventListener('click', async () => {
+      const input = document.getElementById('opencodeCookieInput');
+      const errorEl = document.getElementById('opencodeErrorMessage');
+      errorEl.classList.add('hidden');
+      state.opencodeAccount = { status: null, error: '' };
+      renderOpencodeStatus();
+      const result = await window.tokenMonitor.opencode.saveCookie(input.value);
+      if (result?.ok) {
+        input.value = '';
+        if (state.settings) state.settings.opencodeCookie = result.cleared ? '' : 'set';
+        await refreshOpencodeStatus();
+        if (!result.cleared) setOpencodeCookieExpanded(false);
+        await refreshStats({ force: true });
+      } else {
+        const message = result?.error || t('settings.common.error');
+        state.opencodeAccount = {
+          status: {
+            linked: false,
+            saveFailed: true,
+            error: t('settings.opencode.saveFailed', { message })
+          },
+          error: ''
+        };
+        renderOpencodeStatus();
+      }
+    });
+
+    refreshOpencodeStatus();
+  }
 }
 
 setupCursorAccountUI();

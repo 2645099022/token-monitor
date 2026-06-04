@@ -64,6 +64,11 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     logout: () => ipcRenderer.invoke('cursor:logout'),
     status: () => ipcRenderer.invoke('cursor:status')
   },
+  opencode: {
+    saveCookie: (cookie) => ipcRenderer.invoke('opencode:saveCookie', cookie),
+    logout: () => ipcRenderer.invoke('opencode:logout'),
+    status: () => ipcRenderer.invoke('opencode:status')
+  },
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close')
 });

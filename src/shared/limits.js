@@ -1,9 +1,9 @@
 'use strict';
 
 const DEFAULT_LIMITS_REFRESH_MS = 5 * 60 * 1000;
-const VALID_PROVIDERS = new Set(['claude', 'codex', 'cursor', 'antigravity']);
+const VALID_PROVIDERS = new Set(['claude', 'codex', 'cursor', 'antigravity', 'opencode']);
 const VALID_STATUSES = new Set(['ok', 'disabled', 'notConfigured', 'unauthorized', 'rateLimited', 'sourceRateLimited', 'unavailable', 'error']);
-const VALID_SOURCES = new Set(['oauth', 'cli', 'web', 'rpc']);
+const VALID_SOURCES = new Set(['oauth', 'cli', 'web', 'rpc', 'local']);
 const WINDOW_ORDER = ['session', 'weekly', 'billing'];
 
 function asNumber(value) {

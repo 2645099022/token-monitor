@@ -26,7 +26,7 @@
 
 ## What is Token Monitor?
 
-A desktop widget that shows live token usage and AI Tool Limits across your AI coding tools — Claude Code, Codex, Hermes, OpenCode, OpenClaw, Cursor, Antigravity, and more — with breakdowns by tool, device, and model.
+A desktop widget that shows live token usage and AI Tool Limits across your AI coding tools — Claude Code, Codex, Hermes Agent, OpenCode, OpenClaw, Cursor, Antigravity, and more — with breakdowns by tool, device, and model.
 
 It runs entirely on your own machine by default. Add an optional hub to sync token changes from multiple Macs, Windows PCs, headless agents, and iPhone widgets in seconds.
 
@@ -38,14 +38,14 @@ Most usage monitors are useful on the machine they run on. Token Monitor is buil
 
 ## Features
 
-- **Live token tracking** for Claude Code, Codex, Hermes, OpenCode, OpenClaw, Cursor, and Antigravity (UI updates within seconds of each turn)
+- **Live token tracking** for Claude Code, Codex, Hermes Agent, OpenCode, OpenClaw, Cursor, and Antigravity (UI updates within seconds of each turn)
 - **Real-time multi-device sync** over Server-Sent Events
 - **Breakdown views** grouped by tool, device, model, session, or account limits
 - **Per-session detail** — open a Claude Code or Codex session to see tokens per prompt, expandable to each reply's exact token split and tools used (read on-demand from local transcripts, never synced)
 - **Cost breakdown** alongside token counts
-- **AI Tool Limits detection** for Claude Code, Codex, Cursor, and Antigravity with session, weekly, billing, and credits windows
+- **AI Tool Limits detection** for Claude Code, Codex, Cursor, Antigravity, and OpenCode with session, weekly, billing, and credits windows
 - **Appearance controls** for glass opacity, blur, and transparent window mode
-- **Menu bar (macOS) and system tray (Windows) popover** with live cost, tokens, or closest Claude/Codex/Cursor/Antigravity limit % next to the icon
+- **Menu bar (macOS) and system tray (Windows) popover** with live cost, tokens, or closest Claude/Codex/Cursor/Antigravity/OpenCode limit % next to the icon
 - **Floating Bubble mode** that collapses the widget into a draggable mini-window with click or hover preview and tray-style content
 - **Local-first:** no servers needed for single-device use
 - **Self-hosted sync backend** (in-widget hub, Node CLI hub, or Cloudflare Worker)
@@ -69,8 +69,8 @@ Token Monitor supports token usage, account-limit checks, and session details se
 |:---:|------|-----------|:---:|:---:|:---:|
 | <img src=".github/assets/tools-icon/claude.png" width="28" alt="Claude Code" /> | Claude Code | `~/.claude/projects/`, `~/.claude/transcripts/` | ✅ | ✅ | ✅ |
 | <img src=".github/assets/tools-icon/codex.png" width="28" alt="Codex" /> | Codex | `~/.codex/sessions/` | ✅ | ✅ | ✅ |
-| <img src=".github/assets/tools-icon/opencode.png" width="28" alt="OpenCode" /> | OpenCode | `~/.local/share/opencode/` | ✅ | — | — |
-| <img src=".github/assets/tools-icon/hermes-agent.png" width="28" alt="Hermes" /> | Hermes | `$HERMES_HOME` or `~/.hermes/` | ✅ | — | — |
+| <img src=".github/assets/tools-icon/opencode.png" width="28" alt="OpenCode" /> | OpenCode | `~/.local/share/opencode/` | ✅ | ✅ | — |
+| <img src=".github/assets/tools-icon/hermes-agent.png" width="28" alt="Hermes Agent" /> | Hermes Agent | `$HERMES_HOME` or `~/.hermes/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/openclaw.png" width="28" alt="OpenClaw" /> | OpenClaw | `~/.openclaw/agents/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/cursor.png" width="28" alt="Cursor" /> | Cursor | `~/.config/tokscale/cursor-cache/` (kept fresh by Cursor sync) | ✅ | ✅ | — |
 | <img src="assets/icons/antigravity.svg" width="28" alt="Antigravity" /> | Antigravity | `~/.config/tokscale/antigravity-cache/` (kept fresh by Antigravity sync) | ✅ | ✅ | — |
@@ -154,9 +154,9 @@ Click the `⚙` button in the widget header to open the Settings panel.
 
 - **Multi-device Sync** — three modes: **Local only** (this device, no hub), **Connect to a hub** (paste another machine's Hub URL + secret), or **Host hub on this device** (open a hub here so other devices can connect; LAN/Tailscale/ZeroTier addresses are listed for you).
 - **Tracked Tools** — checkboxes for each supported AI tool. Toggles take effect immediately and restart the collector with the new client list.
-- **AI Tool Limits** — choose Claude Code, Codex, Cursor, and Antigravity limit detection and refresh frequency.
+- **AI Tool Limits** — choose Claude Code, Codex, Cursor, Antigravity, and OpenCode limit detection and refresh frequency.
 - **Window behavior** — choose floating above apps, a normal window, or desktop pinned mode.
-- **Tray Mode** — switch to a menu bar (macOS) or system tray (Windows) popover and choose what shows next to the icon: cost, today's tokens, total tokens, cost + tokens, the closest Claude/Codex/Cursor/Antigravity limit % left, or icon-only.
+- **Tray Mode** — switch to a menu bar (macOS) or system tray (Windows) popover and choose what shows next to the icon: cost, today's tokens, total tokens, cost + tokens, the closest Claude/Codex/Cursor/Antigravity/OpenCode limit % left, or icon-only.
 - **Floating Bubble** — collapse the widget into a draggable mini-window, reopen it by click or hover preview, and choose bubble content from icon, tokens, cost, or AI Tool Limit bars.
 - **Appearance** — system glass, live dot, tool icons, Discord Rich Presence, glass opacity, and glass blur.
 - **Advanced** — opens the underlying `settings.json` for less-common options like `allTimeSince`.
@@ -194,7 +194,7 @@ The hub and agent only transmit summary fields:
 - total tokens per period (today / month / all-time)
 - cost totals (when `tokscale` returns cost data)
 - per-client and per-model breakdowns
-- normalized Claude Code/Codex/Cursor/Antigravity limit status when AI Tool Limits is enabled
+- normalized Claude Code/Codex/Cursor/Antigravity/OpenCode limit status when AI Tool Limits is enabled
 
 They do not transmit raw AI logs, prompts, source code, or conversation
 content. They also do not transmit OAuth credentials, access tokens, refresh

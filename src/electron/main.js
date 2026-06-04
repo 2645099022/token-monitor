@@ -20,6 +20,7 @@ const {
 const { checkLatestRelease } = require('../shared/appUpdater');
 const cursorAuth = require('../shared/cursorAuth');
 const cursorProbe = require('../shared/cursorProbe');
+const opencodeWeb = require('../shared/opencodeWeb');
 const semver = require('semver');
 const { normalizeCurrency } = require('../shared/currency');
 const {
@@ -131,6 +132,7 @@ function defaultSettings() {
     currency: normalizeCurrency(process.env.TOKEN_MONITOR_CURRENCY || 'USD'),
     startAtLogin: false,
     language: 'auto',
+    opencodeCookie: '',
     appUpdate: {
       lastCheckedAt: null,
       lastKnownLatest: null,
@@ -149,7 +151,9 @@ function defaultLimitProviderOrder() {
 
 function migrateLimitProviders(value) {
   const normalized = parseLimitProviders(value).join(',');
+  // Upgrade: users who had the old 2-provider or 4-provider full defaults get the new default (which includes opencode).
   if (normalized === 'claude,codex') return defaultLimitProviders();
+  if (normalized === 'claude,codex,cursor,antigravity') return defaultLimitProviders();
   return normalized;
 }
 
@@ -792,6 +796,7 @@ function startSyncCollector() {
     limitsEnabled: settings.limitsEnabled !== false,
     limitProviders: settings.limitProviders ?? defaultLimitProviders(),
     limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
+    opencodeCookie: settings.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
     onUpdate: async (summary) => {
       const visibleSummary = summaryWithArchivedClientUsage(summary);
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
@@ -870,6 +875,7 @@ function startLocalCollector() {
     limitsEnabled: settings.limitsEnabled !== false,
     limitProviders: settings.limitProviders ?? defaultLimitProviders(),
     limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
+    opencodeCookie: settings.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
     onUpdate: (summary, reason) => {
       const visibleSummary = summaryWithArchivedClientUsage(summary);
       localDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
@@ -1263,6 +1269,7 @@ function isAllowedExternalUrl(value) {
   if (parsed.hostname === 'www.npmjs.com' && parsed.pathname.startsWith('/package/@tokscale/')) return true;
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/Javis603/token-monitor')) return true;
   if ((parsed.hostname === 'cursor.com' || parsed.hostname === 'www.cursor.com') && parsed.pathname.startsWith('/settings')) return true;
+  if (parsed.hostname === 'opencode.ai' || parsed.hostname === 'www.opencode.ai') return true;
   return false;
 }
 
@@ -1432,7 +1439,23 @@ function replaceMainWindow(bounds, options = {}) {
 }
 
 let cursorStatusCache = { value: null, at: 0 };
+let opencodeStatusCache = { value: null, at: 0 };
 const CURSOR_STATUS_TTL_MS = 30 * 1000;
+
+function currentOpenCodeCookie() {
+  return settings?.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '';
+}
+
+async function readOpenCodeStatus() {
+  const cookie = currentOpenCodeCookie();
+  if (!cookie) return { linked: false };
+  const result = await opencodeWeb.fetchZen(cookie, {});
+  if (result.status === 'ok') return { linked: true, expired: false };
+  if (result.status === 'unauthorized') {
+    return { linked: true, expired: true, error: 'OpenCode cookie expired' };
+  }
+  return { linked: true, expired: false, error: result.status || 'OpenCode status check failed' };
+}
 
 function normalizeManualCookie(input) {
   let s = String(input || '').trim();
@@ -1741,10 +1764,44 @@ app.whenReady().then(() => {
       return { ok: false, error: err.message };
     }
   });
+  ipcMain.handle('opencode:saveCookie', async (_event, raw) => {
+    const cookie = opencodeWeb.sanitizeCookieHeader(raw);
+    if (!cookie) {
+      settings.opencodeCookie = '';
+      saveSettings();
+      opencodeStatusCache = { value: null, at: 0 };
+      startMode();
+      return { ok: true, cleared: true };
+    }
+    try {
+      const result = await opencodeWeb.fetchZen(cookie, {});
+      if (result.status === 'unauthorized') {
+        return { ok: false, error: 'OpenCode rejected the cookie (it may be expired)' };
+      }
+      settings.opencodeCookie = cookie;
+      saveSettings();
+      opencodeStatusCache = { value: null, at: 0 };
+      startMode();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
   ipcMain.handle('cursor:logout', async () => {
     try {
       await cursorAuth.runCursorLogout();
       cursorStatusCache = { value: null, at: 0 };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('opencode:logout', async () => {
+    try {
+      settings.opencodeCookie = '';
+      saveSettings();
+      opencodeStatusCache = { value: null, at: 0 };
+      startMode();
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1772,6 +1829,15 @@ app.whenReady().then(() => {
         }
       : { loggedIn: true, expired: probeResult.error?.kind === 'unauthorized', error: probeResult.error?.message };
     cursorStatusCache = { value, at: now };
+    return value;
+  });
+  ipcMain.handle('opencode:status', async () => {
+    const now = Date.now();
+    if (opencodeStatusCache.value && now - opencodeStatusCache.at < CURSOR_STATUS_TTL_MS) {
+      return opencodeStatusCache.value;
+    }
+    const value = await readOpenCodeStatus();
+    opencodeStatusCache = { value, at: now };
     return value;
   });
   ipcMain.on('window:minimize', () => {

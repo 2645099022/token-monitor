@@ -10,8 +10,10 @@ const { DEFAULT_LIMITS_REFRESH_MS, normalizeLimitProvider, normalizeLimitsSummar
 const cursorAuth = require('./cursorAuth');
 const cursorProbe = require('./cursorProbe');
 const antigravityProbe = require('./antigravityProbe');
+const opencodeLimits = require('./opencodeLimits');
+const opencodeWeb = require('./opencodeWeb');
 
-const LIMIT_PROVIDER_IDS = ['claude', 'codex', 'cursor', 'antigravity'];
+const LIMIT_PROVIDER_IDS = ['claude', 'codex', 'cursor', 'antigravity', 'opencode'];
 const LIMIT_REFRESH_VALUES = new Set([60_000, 120_000, 300_000, 900_000, 1_800_000]);
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const CLAUDE_OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
@@ -34,7 +36,7 @@ function parseBoolean(value, fallback = true) {
 function parseLimitProviders(value) {
   const isEmpty = value === undefined || value === null || value === ''
     || (Array.isArray(value) && value.length === 0);
-  const source = isEmpty ? 'claude,codex,cursor,antigravity' : value;
+  const source = isEmpty ? 'claude,codex,cursor,antigravity,opencode' : value;
   const raw = Array.isArray(source) ? source : String(source).split(',');
   const seen = new Set();
   const providers = [];
@@ -1154,6 +1156,42 @@ async function fetchAntigravityLimits(options = {}, deps = {}) {
   }
 }
 
+async function fetchOpenCodeLimits(options = {}, deps = {}) {
+  const nowMs = (deps.now || Date.now)();
+  const updatedAt = nowIso(nowMs);
+  const collectGo = deps.opencodeCollectGo || ((d) => opencodeLimits.collectGo(d));
+  const fetchZen = deps.opencodeFetchZen || ((cookie, d) => opencodeWeb.fetchZen(cookie, d));
+
+  const windows = [];
+  let status = 'notConfigured';
+  let source = 'local';
+  let accountLabel = '';
+  let accountKey = '';
+
+  const go = collectGo({ env: deps.env || process.env, now: () => nowMs });
+  if (go.status === 'ok') {
+    windows.push(...go.windows);
+    status = 'ok'; accountLabel = 'Go'; accountKey = hashKey('opencode', go.identity || 'go');
+  } else if (go.status === 'unavailable') {
+    status = 'unavailable';
+  }
+
+  const cookie = options.opencodeCookie;
+  if (cookie) {
+    const zen = await fetchZen(cookie, { now: () => nowMs });
+    if (zen.status === 'ok') {
+      windows.push(...zen.windows);
+      status = 'ok'; source = 'web';
+      if (!accountLabel) accountLabel = 'Zen';
+      if (!accountKey) accountKey = hashKey('opencode', `zen:${zen.workspaceId || ''}`);
+    } else if (status !== 'ok' && ['unauthorized', 'sourceRateLimited', 'unavailable'].includes(zen.status)) {
+      status = zen.status; source = 'web';
+    }
+  }
+
+  return normalizeLimitProvider({ provider: 'opencode', accountKey, accountLabel, source, status, updatedAt, windows });
+}
+
 function providerStatusFromError(error) {
   if (['disabled', 'notConfigured', 'unauthorized', 'rateLimited', 'sourceRateLimited', 'unavailable', 'error'].includes(error?.status)) return error.status;
   if (error?.code === 'ENOENT') return 'notConfigured';
@@ -1175,6 +1213,7 @@ async function collectLimitsOnce(options = {}, deps = {}) {
     codex: (providerOptions) => fetchCodexLimits(providerOptions, deps),
     cursor: (providerOptions) => fetchCursorLimits(providerOptions, deps),
     antigravity: (providerOptions) => fetchAntigravityLimits(providerOptions, deps),
+    opencode: (providerOptions) => fetchOpenCodeLimits(providerOptions, deps),
     ...(deps.providerFetchers || {})
   };
   const providers = [];
@@ -1386,6 +1425,7 @@ module.exports = {
   codexCommandCandidates,
   createLimitsCollector,
   fetchAntigravityLimits,
+  fetchOpenCodeLimits,
   fetchClaudeLimits,
   fetchCodexLimits,
   fetchCursorLimits,

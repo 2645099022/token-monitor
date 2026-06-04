@@ -148,6 +148,10 @@ The hub normalizes records before storing them.
 
 `limits` is optional. Agents and widgets include it when AI Tool Limits detection is enabled. Raw OAuth credentials, access tokens, refresh tokens, emails, and provider response bodies must never be sent.
 
+`limits.providers[].provider` is one of `claude`, `codex`, `cursor`, `antigravity`, or `opencode`.
+`limits.providers[].source` is one of `oauth`, `cli`, `web`, `rpc`, or `local`; `local` means the value was read from an on-disk store such as OpenCode Go usage from `opencode.db`.
+`windows[].kind` is `session`, `weekly`, or `billing`.
+
 ## `GET /api/stats`
 
 Returns aggregate stats for the widget.

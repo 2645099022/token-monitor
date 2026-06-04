@@ -754,6 +754,10 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   -webkit-mask-image: url(../../../assets/icons/antigravity.svg);
   mask-image: url(../../../assets/icons/antigravity.svg);
 }
+.limit-icon-opencode {
+  -webkit-mask-image: url(../../../assets/icons/opencode.svg);
+  mask-image: url(../../../assets/icons/opencode.svg);
+}
 .row-label {
   display: grid;
   min-width: 0;
@@ -1032,13 +1036,17 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 
 .cursor-settings-details.hidden { display: none; }
 #cursorManualPanel.hidden,
-#cursorErrorMessage.hidden { display: none; }
-#cursorManualPanel {
+#opencodeManualPanel.hidden,
+#cursorErrorMessage.hidden,
+#opencodeErrorMessage.hidden { display: none; }
+#cursorManualPanel,
+#opencodeManualPanel {
   display: grid;
   min-width: 0;
   gap: 8px;
 }
-#cursorManualPanel textarea {
+#cursorManualPanel textarea,
+#opencodeManualPanel textarea {
   width: 100%;
   font-family: monospace;
   font-size: 12px;
