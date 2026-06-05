@@ -1588,7 +1588,7 @@ els.breakdown.addEventListener('click', (event) => {
   if (!rowEl) return;
   const key = rowEl.dataset.key || '';            // "session:<client>:<sessionId>"
   const client = rowEl.dataset.client || '';
-  if (client !== 'claude' && client !== 'codex') return;
+  if (client !== 'claude' && client !== 'codex' && client !== 'opencode') return;
   const match = key.match(/^session:([^:]+):(.+)$/);
   if (!match) return;
   const sessionId = match[2];

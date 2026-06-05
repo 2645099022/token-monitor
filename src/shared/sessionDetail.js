@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const { resolveSessionFile } = require('./sessionFiles');
+const opencodeSession = require('./opencodeSession');
 
 function num(value) {
   const n = Number(value);
@@ -205,7 +206,8 @@ function groupEvents(events) {
       exchanges.push(current);
     } else if (event.kind === 'turn') {
       if (!current) { current = newExchange('', event.timestamp); exchanges.push(current); }
-      const turnEntry = { timestamp: event.timestamp, tokens: event.tokens, tools: event.tools, costEstimate: 0 };
+      // event.cost is set for OpenCode (real per-message cost); claude/codex leave it undefined → 0.
+      const turnEntry = { timestamp: event.timestamp, tokens: event.tokens, tools: event.tools, costEstimate: num(event.cost) };
       current.turns.push(turnEntry);
       addTokens(current.tokens, event.tokens);
       if (event.timestamp && (!current.startedAt || event.timestamp < current.startedAt)) current.startedAt = event.timestamp;
@@ -268,7 +270,28 @@ function totalsOf(exchanges, sessionCost) {
   return { totalTokens, costUsd: num(sessionCost), exchangeCount: exchanges.length, turnCount };
 }
 
-function readSessionDetail({ client, sessionId, period = 'total', sessionCost = 0, home }) {
+// OpenCode reports a real cost per assistant message, so exchanges use the true per-turn
+// cost (summed) rather than the proportional split Claude/Codex need.
+function sumRealCost(exchanges) {
+  for (const ex of exchanges) {
+    let cost = 0;
+    for (const t of ex.turns) cost += num(t.costEstimate);
+    ex.costEstimate = cost;
+  }
+  return exchanges;
+}
+
+function readOpenCodeSessionDetail({ sessionId, period = 'total', deps = {} }) {
+  const { found, events, sessionCost } = opencodeSession.readSessionEvents(sessionId, deps);
+  if (!found) return { found: false, client: 'opencode', sessionId, period, exchanges: [], totals: totalsOf([], sessionCost) };
+  const now = new Date((deps.now || Date.now)());
+  const grouped = sumRealCost(filterExchangesByPeriod(groupEvents(events), period, now));
+  const filteredCost = grouped.reduce((acc, ex) => acc + num(ex.costEstimate), 0);
+  return { found: true, client: 'opencode', sessionId, period, exchanges: grouped, totals: totalsOf(grouped, filteredCost) };
+}
+
+function readSessionDetail({ client, sessionId, period = 'total', sessionCost = 0, home, deps = {} }) {
+  if (client === 'opencode') return readOpenCodeSessionDetail({ sessionId, period, deps });
   const filePath = resolveSessionFile(client, sessionId, home);
   if (!filePath) return { found: false, client, sessionId, period, exchanges: [], totals: totalsOf([], sessionCost) };
   let text;

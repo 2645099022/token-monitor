@@ -14,6 +14,7 @@ const { emptyPeriod, extractUsageFromTokscale } = require('./usage');
 const { collectLimitsOnce, createLimitsCollector } = require('./limitCollector');
 const cursorAuth = require('./cursorAuth');
 const { findSessionFiles, codexSessionFile } = require('./sessionFiles');
+const opencodeSession = require('./opencodeSession');
 
 function toUnpackedPath(p) {
   // electron-builder asarUnpack stores real files at .../app.asar.unpacked/...
@@ -192,7 +193,7 @@ function sessionRefsForPeriods(periods) {
   return refs;
 }
 
-function sessionTimestampMap(periods, home = os.homedir()) {
+function sessionTimestampMap(periods, home = os.homedir(), deps = {}) {
   const refs = sessionRefsForPeriods(periods);
   const byClient = new Map();
   for (const ref of refs.values()) {
@@ -206,6 +207,17 @@ function sessionTimestampMap(periods, home = os.homedir()) {
     const lastUsedAt = lastJsonlTimestamp(filePath) || startedAt;
     metadata.set(`${client}:${sessionId}`, { startedAt, lastUsedAt });
   };
+
+  // OpenCode has no transcript file — its timestamps come from the opencode.db `session` table.
+  const opencodeIds = byClient.get('opencode') || new Set();
+  if (opencodeIds.size > 0) {
+    const readOpencodeMeta = deps.readOpencodeMeta || ((ids) => opencodeSession.readSessionMeta(ids));
+    for (const [sessionId, meta] of readOpencodeMeta(opencodeIds)) {
+      const startedAt = meta.startedAt || '';
+      const lastUsedAt = meta.lastUsedAt || startedAt;
+      if (startedAt || lastUsedAt) metadata.set(`opencode:${sessionId}`, { startedAt, lastUsedAt });
+    }
+  }
 
   const claudeFiles = findSessionFiles(path.join(home, '.claude', 'projects'), byClient.get('claude') || []);
   for (const [sessionId, filePath] of claudeFiles) applyFile('claude', sessionId, filePath);
@@ -230,8 +242,8 @@ function sessionTimestampMap(periods, home = os.homedir()) {
   return metadata;
 }
 
-function applySessionTimestamps(periods, home) {
-  const metadata = sessionTimestampMap(periods, home);
+function applySessionTimestamps(periods, home, deps = {}) {
+  const metadata = sessionTimestampMap(periods, home, deps);
   for (const period of Object.values(periods || {})) {
     for (const [key, session] of Object.entries(period?.sessions || {})) {
       const meta = metadata.get(key);
@@ -460,8 +472,10 @@ function startCollector(options) {
 }
 
 module.exports = {
+  applySessionTimestamps,
   collectUsageOnce,
   decideResolver,
+  sessionTimestampMap,
   locateBundledBinary,
   readDownloadedPointer,
   resolvePlatformBinary,

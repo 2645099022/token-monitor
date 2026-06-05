@@ -41,7 +41,7 @@ Most usage monitors are useful on the machine they run on. Token Monitor is buil
 - **Live token tracking** for Claude Code, Codex, Hermes Agent, OpenCode, OpenClaw, Cursor, and Antigravity (UI updates within seconds of each turn)
 - **Real-time multi-device sync** over Server-Sent Events
 - **Breakdown views** grouped by tool, device, model, session, or account limits
-- **Per-session detail** — open a Claude Code or Codex session to see tokens per prompt, expandable to each reply's exact token split and tools used (read on-demand from local transcripts, never synced)
+- **Per-session detail** — open a Claude Code, Codex, or OpenCode session to see tokens per prompt, expandable to each reply's exact token split and tools used (read on-demand from local transcripts or databases, never synced)
 - **Cost breakdown** alongside token counts
 - **AI Tool Limits detection** for Claude Code, Codex, Cursor, Antigravity, and OpenCode with session, weekly, billing, and credits windows
 - **Appearance controls** for glass opacity, blur, and transparent window mode
@@ -69,7 +69,7 @@ Token Monitor supports token usage, account-limit checks, and session details se
 |:---:|------|-----------|:---:|:---:|:---:|
 | <img src=".github/assets/tools-icon/claude.png" width="28" alt="Claude Code" /> | Claude Code | `~/.claude/projects/`, `~/.claude/transcripts/` | ✅ | ✅ | ✅ |
 | <img src=".github/assets/tools-icon/codex.png" width="28" alt="Codex" /> | Codex | `~/.codex/sessions/` | ✅ | ✅ | ✅ |
-| <img src=".github/assets/tools-icon/opencode.png" width="28" alt="OpenCode" /> | OpenCode | `~/.local/share/opencode/` | ✅ | ✅ | — |
+| <img src=".github/assets/tools-icon/opencode.png" width="28" alt="OpenCode" /> | OpenCode | `~/.local/share/opencode/` | ✅ | ✅ | ✅ |
 | <img src=".github/assets/tools-icon/hermes-agent.png" width="28" alt="Hermes Agent" /> | Hermes Agent | `$HERMES_HOME` or `~/.hermes/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/openclaw.png" width="28" alt="OpenClaw" /> | OpenClaw | `~/.openclaw/agents/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/cursor.png" width="28" alt="Cursor" /> | Cursor | `~/.config/tokscale/cursor-cache/` (kept fresh by Cursor sync) | ✅ | ✅ | — |

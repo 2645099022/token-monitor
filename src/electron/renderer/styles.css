@@ -1091,5 +1091,5 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .detail-role-user { color: #bda5f5; }
 .detail-role-sep { color: var(--muted); }
 .detail-turn-title { color: var(--muted); }
-.row.session-row[data-client="claude"], .row.session-row[data-client="codex"] { cursor: pointer; }
-.row.session-row[data-client="claude"] .row-metrics::after, .row.session-row[data-client="codex"] .row-metrics::after { content: '›'; color: var(--muted); font-size: 14px; line-height: 1; }
+.row.session-row[data-client="claude"], .row.session-row[data-client="codex"], .row.session-row[data-client="opencode"] { cursor: pointer; }
+.row.session-row[data-client="claude"] .row-metrics::after, .row.session-row[data-client="codex"] .row-metrics::after, .row.session-row[data-client="opencode"] .row-metrics::after { content: '›'; color: var(--muted); font-size: 14px; line-height: 1; }
