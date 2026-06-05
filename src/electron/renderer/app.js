@@ -5,21 +5,21 @@ const clientColors = {
   claude: '#cc7c5e',
   codex: '#49a3b0',
   hermes: '#d4af37',
-  gemini: '#4992ea',
+  gemini: '#4285f4',
   antigravity: '#4285f4',
-  deepseek: '#3982ff',
+  deepseek: '#4d6bfe',
   cursor: '#000000',
-  opencode: '#24292e',
-  openclaw: '#e05c2b',
+  opencode: '#000000',
+  openclaw: '#ff4d4d',
   xai: '#000000',
-  meta: '#0668e1',
+  meta: '#1d65c1',
   mistral: '#fa520f',
   qwen: '#615ced',
   moonshot: '#16191e',
-  zai: '#0066ff',
-  cohere: '#ff7759',
+  zai: '#000000',
+  cohere: '#39594d',
   xiaomi: '#ff6700',
-  minimax: '#b4393c',
+  minimax: '#f23f5d',
   default: '#6ab4f0'
 };
 const clientsWithIcon = new Set([
@@ -500,6 +500,7 @@ function modelVendorFor(model) {
   if (/cohere|command-r/.test(name)) return 'cohere';
   if (/mimo|xiaomi/.test(name)) return 'xiaomi';
   if (/minimax|\babab/.test(name)) return 'minimax';
+  if (/^big-pickle$/.test(name)) return 'opencode'; // OpenCode Zen stealth model — no vendor hint in the name
   return null;
 }
 
