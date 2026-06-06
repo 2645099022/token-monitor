@@ -1,9 +1,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
 const {
+  defaultViewDisplayPreferences,
   hasViewDisplayPreferences,
   moveViewDisplayOrder,
   normalizeHiddenViews,
@@ -21,6 +24,19 @@ const views = [
   { id: 'session', label: 'Sessions' },
   { id: 'limits', label: 'Limits' }
 ];
+
+test('defaultViewDisplayPreferences hides the Status view by default', () => {
+  assert.deepEqual(defaultViewDisplayPreferences(), {
+    viewDisplayOrder: '',
+    hiddenViews: 'status'
+  });
+});
+
+test('main default settings use the default view display preferences', () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, '../../src/electron/main.js'), 'utf8');
+  assert.match(mainSource, /defaultViewDisplayPreferences/);
+  assert.match(mainSource, /hiddenViews:\s*defaultViewDisplayPreferences\(\)\.hiddenViews/);
+});
 
 test('normalizeViewDisplayOrder drops invalid entries and appends missing views', () => {
   assert.deepEqual(

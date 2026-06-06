@@ -24,7 +24,7 @@
   }
 
   function defaultViewDisplayPreferences() {
-    return { viewDisplayOrder: '', hiddenViews: '' };
+    return { viewDisplayOrder: '', hiddenViews: 'status' };
   }
 
   function normalizeViewDisplayOrder(value, views) {

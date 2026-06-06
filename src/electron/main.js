@@ -16,6 +16,7 @@ const {
   normalizePinnedClients
 } = require('./renderer/clientDisplayPreferences');
 const {
+  defaultViewDisplayPreferences,
   normalizeHiddenViews,
   normalizeViewDisplayOrder
 } = require('./renderer/viewDisplayPreferences');
@@ -140,7 +141,7 @@ function defaultSettings() {
     hiddenClients: '',
     pinnedClients: '',
     viewDisplayOrder: '',
-    hiddenViews: '',
+    hiddenViews: defaultViewDisplayPreferences().hiddenViews,
     archivedClientUsage: { version: 1, clients: {} },
     allTimeSince: process.env.TOKEN_MONITOR_ALL_TIME_SINCE || '2024-01-01',
     limitsEnabled: parseBoolean(process.env.TOKEN_MONITOR_LIMITS_ENABLED, true),
