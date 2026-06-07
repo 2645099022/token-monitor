@@ -9,16 +9,22 @@
     oauth: 'OAuth',
     cli: 'CLI',
     web: 'Web',
-    rpc: 'App/CLI RPC',
+    rpc: 'RPC',
     local: 'Local'
   };
 
   const PROVIDER_SOURCE_LABELS = {
     claude: { oauth: 'OAuth', cli: 'CLI' },
-    codex: { rpc: 'App/CLI RPC' },
+    codex: { rpc: 'RPC' },
     cursor: { web: 'Web' },
     antigravity: { rpc: 'RPC' },
     opencode: { local: 'Local', web: 'Web' }
+  };
+
+  const CODEX_RPC_DETAIL_LABELS = {
+    app: 'App',
+    cli: 'CLI',
+    unknown: 'RPC'
   };
 
   const CAPABILITY_TAGS = {
@@ -41,6 +47,10 @@
     return normalizeId(typeof value === 'object' && value ? (value.source || fallback) : (value || fallback));
   }
 
+  function sourceDetailId(value) {
+    return normalizeId(typeof value === 'object' && value ? value.sourceDetail : '');
+  }
+
   function deviceKey(value) {
     return String(value || '').trim().toLowerCase();
   }
@@ -59,6 +69,10 @@
   function limitProviderSourceLabel(providerOrId, sourceFallback = '') {
     const provider = providerId(providerOrId);
     const source = sourceId(providerOrId, sourceFallback);
+    const sourceDetail = sourceDetailId(providerOrId);
+    if (provider === 'codex' && source === 'rpc' && CODEX_RPC_DETAIL_LABELS[sourceDetail]) {
+      return CODEX_RPC_DETAIL_LABELS[sourceDetail];
+    }
     return PROVIDER_SOURCE_LABELS[provider]?.[source] || SOURCE_LABELS[source] || '';
   }
 
@@ -183,6 +197,7 @@
     limitProviderCapabilityTags,
     limitProviderMainDeviceLabel,
     limitProviderProvenance,
+    limitProviderSourceLabel,
     limitProviderSettingsTags
   };
 });

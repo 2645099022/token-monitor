@@ -55,9 +55,14 @@ test('detected settings tags show only current source after status', () => {
     ['Linked', 'Web']
   );
   assert.deepEqual(
-    limitProviderSettingsTags({ provider: 'codex', status: 'ok', source: 'rpc' })
+    limitProviderSettingsTags({ provider: 'codex', status: 'ok', source: 'rpc', sourceDetail: 'app' })
       .map((tag) => tag.label),
-    ['Live', 'App/CLI RPC']
+    ['Live', 'App']
+  );
+  assert.deepEqual(
+    limitProviderSettingsTags({ provider: 'codex', status: 'ok', source: 'rpc', sourceDetail: 'cli' })
+      .map((tag) => tag.label),
+    ['Live', 'CLI']
   );
   assert.deepEqual(
     limitProviderSettingsTags({ provider: 'opencode', status: 'ok', source: 'web' })
@@ -67,7 +72,7 @@ test('detected settings tags show only current source after status', () => {
 });
 
 test('remote synced provider tags show the selected source device and local availability', () => {
-  const provider = { provider: 'codex', status: 'ok', source: 'rpc', sourceDeviceId: 'work-mac' };
+  const provider = { provider: 'codex', status: 'ok', source: 'rpc', sourceDetail: 'app', sourceDeviceId: 'work-mac' };
   const provenance = limitProviderProvenance(provider, {
     localDeviceId: 'local-mac',
     syncActive: true,
@@ -75,19 +80,19 @@ test('remote synced provider tags show the selected source device and local avai
       {
         deviceId: 'local-mac',
         hostname: 'local.local',
-        limits: { providers: [{ provider: 'codex', status: 'ok', source: 'rpc', accountKey: 'same' }] }
+        limits: { providers: [{ provider: 'codex', status: 'ok', source: 'rpc', sourceDetail: 'app', accountKey: 'same' }] }
       },
       {
         deviceId: 'work-mac',
         hostname: 'work.local',
-        limits: { providers: [{ provider: 'codex', status: 'ok', source: 'rpc', accountKey: 'same' }] }
+        limits: { providers: [{ provider: 'codex', status: 'ok', source: 'rpc', sourceDetail: 'app', accountKey: 'same' }] }
       }
     ]
   });
 
   assert.deepEqual(
     limitProviderSettingsTags(provider, provenance).map((tag) => tag.key || tag.label),
-    ['Live', 'App/CLI RPC', 'settings.limits.device.from', 'settings.limits.device.localAlso']
+    ['Live', 'App', 'settings.limits.device.from', 'settings.limits.device.localAlso']
   );
   assert.equal(provenance.selectedDeviceLabel, 'work-mac');
   assert.equal(limitProviderMainDeviceLabel(provenance, { showSource: false }), '');

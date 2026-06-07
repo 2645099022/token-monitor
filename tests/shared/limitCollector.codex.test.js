@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
 
-const { codexCommandCandidates } = require('../../src/shared/limitCollector');
+const { codexCommandCandidates, codexCommandSourceDetail, mapCodexRateLimitsToProvider } = require('../../src/shared/limitCollector');
 
 function dirent(name, directory = true) {
   return {
@@ -84,4 +84,41 @@ test('Codex command candidates include app-managed local binaries on Windows', (
   assert.equal(candidates.includes(impossibleNodeCandidate), false);
   assert.equal(candidates.includes(impossibleCodexExeCandidate), false);
   assert.ok(candidates.indexOf(expectedLocal) < candidates.indexOf(expectedAlias));
+});
+
+test('Codex command source detail separates app-managed binaries from CLI commands', () => {
+  assert.equal(
+    codexCommandSourceDetail('C:\\Users\\Javis\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe', 'win32'),
+    'app'
+  );
+  assert.equal(
+    codexCommandSourceDetail('C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.602.4764.0_x64__id\\app\\resources\\codex.exe', 'win32'),
+    'app'
+  );
+  assert.equal(
+    codexCommandSourceDetail('C:\\Users\\Javis\\AppData\\Roaming\\npm\\codex.cmd', 'win32'),
+    'cli'
+  );
+  assert.equal(codexCommandSourceDetail('codex.cmd', 'win32'), 'cli');
+  assert.equal(codexCommandSourceDetail('/Applications/Codex.app/Contents/Resources/codex', 'darwin'), 'app');
+});
+
+test('Codex provider preserves source detail for renderer labels', () => {
+  const provider = mapCodexRateLimitsToProvider({
+    account: { planType: 'plus' },
+    rateLimits: {
+      primary: {
+        usedPercent: 12,
+        resetsAt: '2026-06-01T00:00:00Z',
+        windowDurationMins: 300
+      }
+    }
+  }, {
+    source: 'rpc',
+    sourceDetail: 'app',
+    updatedAt: '2026-06-01T00:00:00Z'
+  });
+
+  assert.equal(provider.source, 'rpc');
+  assert.equal(provider.sourceDetail, 'app');
 });

@@ -897,6 +897,7 @@ function mapCodexRateLimitsToProvider(payload, meta = {}) {
     accountKey: meta.accountKey || '',
     accountLabel: meta.accountLabel || codexAccountLabel(payload),
     source: meta.source || 'rpc',
+    sourceDetail: meta.sourceDetail || payload.sourceDetail,
     status: rateLimits.rateLimitReachedType ? 'rateLimited' : 'ok',
     updatedAt: meta.updatedAt,
     windows
@@ -1110,6 +1111,37 @@ function codexCommandCandidates(env = process.env, platform = process.platform, 
   return uniqueStrings(candidates);
 }
 
+function codexCommandSourceDetail(command, platform = process.platform) {
+  const raw = String(command || '').trim();
+  if (!raw) return 'unknown';
+  const normalized = raw.replace(/\\/g, '/').toLowerCase();
+
+  if (normalized.includes('/codex.app/')) return 'app';
+  if (platform === 'win32') {
+    if (
+      normalized.includes('/programs/codex/') ||
+      normalized.includes('/openai/codex/bin/') ||
+      normalized.includes('/packages/openai.codex_') ||
+      normalized.includes('/windowsapps/openai.codex_') ||
+      normalized.includes('/microsoft/windowsapps/')
+    ) {
+      return 'app';
+    }
+    if (
+      normalized === 'codex' ||
+      normalized === 'codex.cmd' ||
+      normalized === 'codex.exe' ||
+      normalized.includes('/npm/codex.cmd') ||
+      normalized.includes('/node_modules/@openai/codex/') ||
+      normalized.includes('/.bun/bin/codex.exe')
+    ) {
+      return 'cli';
+    }
+  }
+  if (/(^|\/)codex(\.cmd|\.exe)?$/.test(normalized)) return 'cli';
+  return 'unknown';
+}
+
 function createJsonRpcClient(child, timeoutMs) {
   let nextId = 1;
   let buffer = '';
@@ -1199,7 +1231,12 @@ async function readCodexRpcWithCommand(command, deps = {}) {
     if (!account && !rateLimits?.primary && !rateLimits?.secondary) {
       throw errorWithStatus('notConfigured', 'Codex account not configured');
     }
-    return { account, rateLimits, rateLimitsByLimitId };
+    return {
+      account,
+      rateLimits,
+      rateLimitsByLimitId,
+      sourceDetail: codexCommandSourceDetail(command, deps.platform || process.platform)
+    };
   } finally {
     try { child.kill('SIGTERM'); } catch (_) {}
   }
@@ -1228,7 +1265,8 @@ async function fetchCodexLimits(options = {}, deps = {}) {
     accountKey: hashKey('codex', identity),
     accountLabel: codexAccountLabel(payload),
     updatedAt: nowIso(nowMs),
-    source: 'rpc'
+    source: 'rpc',
+    sourceDetail: payload.sourceDetail
   });
 }
 
@@ -1557,6 +1595,7 @@ async function fetchCursorLimits(options = {}, deps = {}) {
 module.exports = {
   collectLimitsOnce,
   codexCommandCandidates,
+  codexCommandSourceDetail,
   createLimitsCollector,
   fetchAntigravityLimits,
   fetchOpenCodeLimits,

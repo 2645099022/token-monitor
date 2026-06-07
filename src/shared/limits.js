@@ -4,6 +4,7 @@ const DEFAULT_LIMITS_REFRESH_MS = 5 * 60 * 1000;
 const VALID_PROVIDERS = new Set(['claude', 'codex', 'cursor', 'antigravity', 'opencode']);
 const VALID_STATUSES = new Set(['ok', 'disabled', 'notConfigured', 'unauthorized', 'rateLimited', 'sourceRateLimited', 'unavailable', 'error']);
 const VALID_SOURCES = new Set(['oauth', 'cli', 'web', 'rpc', 'local']);
+const VALID_SOURCE_DETAILS = new Set(['app', 'cli', 'unknown']);
 const WINDOW_ORDER = ['session', 'weekly', 'billing'];
 
 function asNumber(value) {
@@ -33,6 +34,11 @@ function normalizeStatus(value) {
 function normalizeSource(value) {
   const raw = String(value || '').trim().toLowerCase();
   return VALID_SOURCES.has(raw) ? raw : '';
+}
+
+function normalizeSourceDetail(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return VALID_SOURCE_DETAILS.has(raw) ? raw : '';
 }
 
 function normalizeAccountLabel(value) {
@@ -117,6 +123,7 @@ function normalizeLimitProvider(input) {
     accountLabel: normalizeAccountLabel(input.accountLabel),
     status: normalizeStatus(input.status),
     source: normalizeSource(input.source),
+    sourceDetail: normalizeSourceDetail(input.sourceDetail ?? input.source_detail),
     updatedAt: normalizeIsoTimestamp(input.updatedAt) || normalizeIsoTimestamp(input.checkedAt),
     windows,
     balanceUsd: numberOrNull(input.balanceUsd)

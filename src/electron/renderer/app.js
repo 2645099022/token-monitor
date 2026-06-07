@@ -87,11 +87,12 @@ const windowShortcutApi = window.TokenMonitorWindowShortcut;
 const LIMIT_REFRESH_OPTIONS = [60000, 120000, 300000, 900000, 1800000];
 const WINDOW_BEHAVIOR_VALUES = ['floating', 'normal', 'desktop'];
 const WINDOW_BEHAVIOR_ICONS = { floating: '⇧', normal: '○', desktop: '⇩' };
-const LIMIT_SOURCE_LABELS = { oauth: 'OAuth', cli: 'CLI', web: 'Web', rpc: 'CLI', local: 'Local' };
+const LIMIT_SOURCE_LABELS = { oauth: 'OAuth', cli: 'CLI', web: 'Web', rpc: 'RPC', local: 'Local' };
 const LIMIT_CAPABILITY_TAG_KEYS = {
   Auto: 'settings.limits.capability.auto',
   'OAuth/CLI': 'settings.limits.capability.oauthCli',
   'CLI RPC': 'settings.limits.capability.cliRpc',
+  'App/CLI RPC': 'settings.limits.capability.appCliRpc',
   'Manual login': 'settings.limits.capability.manualLogin',
   Web: 'settings.limits.capability.web',
   'App must be open': 'settings.limits.capability.appMustBeOpen',
@@ -798,7 +799,10 @@ function limitProviderMeta(provider, provenance = null) {
   }
   if (provider.status === 'ok') {
     const parts = [];
-    if (state.settings?.showLimitSource && LIMIT_SOURCE_LABELS[provider.source]) parts.push(LIMIT_SOURCE_LABELS[provider.source]);
+    if (state.settings?.showLimitSource) {
+      const sourceLabel = limitProviderPresentationApi.limitProviderSourceLabel(provider) || LIMIT_SOURCE_LABELS[provider.source];
+      if (sourceLabel) parts.push(sourceLabel);
+    }
     if (sourceDevice) parts.push(sourceDevice);
     return `${formatUpdatedAge(provider.updatedAt)}${parts.length ? ` · ${parts.join(' · ')}` : ''}`;
   }

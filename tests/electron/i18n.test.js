@@ -77,7 +77,9 @@ test('window shortcut labels stay concise in Chinese', () => {
 });
 
 test('AI limit capability labels stay compact in Chinese', () => {
+  assert.equal(translate('en', 'settings.limits.capability.appCliRpc'), 'App/CLI RPC');
   assert.equal(translate('zh-TW', 'settings.limits.capability.appMustBeOpen'), '需開啟 App');
+  assert.equal(translate('zh-TW', 'settings.limits.capability.appCliRpc'), 'App/CLI RPC');
   assert.equal(translate('zh-TW', 'settings.limits.capability.manualLogin'), '手動登入');
   assert.equal(translate('zh-TW', 'settings.limits.status.openApp'), '請開啟 App');
   assert.equal(translate('zh-TW', 'settings.limits.status.linked'), '已連結');
@@ -87,6 +89,7 @@ test('AI limit capability labels stay compact in Chinese', () => {
   assert.equal(translate('zh-TW', 'settings.limits.device.localAlso'), '本機也有');
   assert.equal(translate('zh-TW', 'settings.limits.capability.web'), 'Web');
   assert.equal(translate('zh-CN', 'settings.limits.capability.appMustBeOpen'), '需打开 App');
+  assert.equal(translate('zh-CN', 'settings.limits.capability.appCliRpc'), 'App/CLI RPC');
   assert.equal(translate('zh-CN', 'settings.limits.capability.manualLogin'), '手动登录');
   assert.equal(translate('zh-CN', 'settings.limits.device.from', { device: 'work-mac' }), '来自 work-mac');
   assert.equal(translate('zh-CN', 'settings.limits.status.noSyncedData'), '暂无同步数据');
