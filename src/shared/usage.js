@@ -198,6 +198,26 @@ function utcDayKey(date) {
   return `${utcMonthKey(date)}-${String(date.getUTCDate()).padStart(2, '0')}`;
 }
 
+// today/month are wall-clock windows: the device stamps each with the UTC
+// instant it ends (next local midnight / next month start, computed in the
+// device's own timezone). The hub expires a frozen snapshot with nowMs >= endsAt
+// so an offline device's stale "today" stops counting once its day rolls over.
+const WINDOW_PERIODS = ['today', 'month'];
+
+function normalizePeriodWindows(value) {
+  if (!value || typeof value !== 'object') return null;
+  const result = {};
+  for (const periodName of WINDOW_PERIODS) {
+    const window = value[periodName];
+    if (!window || typeof window !== 'object') continue;
+    const endsAt = normalizeIsoTimestamp(window.endsAt);
+    if (!endsAt) continue;
+    result[periodName] = { endsAt };
+    if (window.key) result[periodName].key = String(window.key);
+  }
+  return Object.keys(result).length ? result : null;
+}
+
 function detectModel(obj) {
   if (!obj || typeof obj !== 'object') return null;
   return normalizeModelName(obj.model || obj.modelName || obj.model_name || obj.deployment || obj.engine);
@@ -506,6 +526,10 @@ function normalizeDeviceRecord(record) {
   if (hasOwn(record, 'clientStatus')) normalized.clientStatus = normalizeClientStatus(record.clientStatus);
   if (hasOwn(record, 'wslStatus')) normalized.wslStatus = normalizeWslStatus(record.wslStatus);
   if (hasOwn(record, 'history')) normalized.history = coerceHistory(record.history);
+  if (hasOwn(record, 'periodWindows')) {
+    const windows = normalizePeriodWindows(record.periodWindows);
+    if (windows) normalized.periodWindows = windows;
+  }
   for (const periodName of PERIODS) normalized.periods[periodName] = normalizePeriod(record[periodName] || record.periods?.[periodName]);
   return normalized;
 }
@@ -614,7 +638,10 @@ function mergeDeviceRecord(existing, incoming) {
   if (!hasExisting) return normalizedIncoming;
 
   const normalizedExisting = normalizeDeviceRecord(existing);
-  if (incoming?.limitsOnly === true) normalizedIncoming.periods = normalizedExisting.periods;
+  if (incoming?.limitsOnly === true) {
+    normalizedIncoming.periods = normalizedExisting.periods;
+    if (hasOwn(normalizedExisting, 'periodWindows')) normalizedIncoming.periodWindows = normalizedExisting.periodWindows;
+  }
   if (!hasIncomingLimits) normalizedIncoming.limits = normalizedExisting.limits;
   else normalizedIncoming.limits = mergeDeviceLimits(normalizedExisting, normalizedIncoming);
   if (!hasIncomingHistory && hasOwn(normalizedExisting, 'history')) normalizedIncoming.history = normalizedExisting.history;
@@ -700,6 +727,26 @@ function mergePeriods(...periods) {
   return target;
 }
 
+// True when a device's today/month snapshot belongs to a window that has
+// already ended, so it must not be summed into the live aggregate. Uses the
+// device-local endsAt when present; old agents without periodWindows fall back
+// to a best-effort UTC day/month comparison against the snapshot timestamp.
+// allTime is cumulative and never expires.
+function isPeriodExpired(record, periodName, nowMs) {
+  if (periodName === 'allTime') return false;
+  const endsAt = record?.periodWindows?.[periodName]?.endsAt;
+  if (endsAt) {
+    const endMs = timestampMs(endsAt);
+    if (endMs > 0) return nowMs >= endMs;
+  }
+  const recordedAt = recordDate(record);
+  if (!recordedAt) return false;
+  const nowDate = new Date(nowMs);
+  if (periodName === 'today') return utcDayKey(recordedAt) !== utcDayKey(nowDate);
+  if (periodName === 'month') return utcMonthKey(recordedAt) !== utcMonthKey(nowDate);
+  return false;
+}
+
 function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
   const aggregate = { updatedAt: new Date().toISOString(), periods: {}, devices: [] };
   for (const periodName of PERIODS) aggregate.periods[periodName] = emptyPeriod();
@@ -725,6 +772,7 @@ function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
       limits: normalized.limits
     });
     for (const periodName of PERIODS) {
+      if (isPeriodExpired(normalized, periodName, now)) continue;
       addPeriodInto(aggregate.periods[periodName], normalizePeriod(normalized.periods[periodName]));
     }
   }

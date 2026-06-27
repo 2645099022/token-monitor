@@ -134,6 +134,10 @@ Example payload:
     "clients": {},
     "clientCosts": {}
   },
+  "periodWindows": {
+    "today": { "key": "2026-05-18", "endsAt": "2026-05-19T00:00:00.000Z" },
+    "month": { "key": "2026-05", "endsAt": "2026-06-01T00:00:00.000Z" }
+  },
   "limits": {
     "updatedAt": "2026-05-18T00:00:00.000Z",
     "refreshMs": 300000,
@@ -166,6 +170,8 @@ Example payload:
 The hub normalizes records before storing them.
 
 `trackedClients` is optional but recommended for agents and widgets. When it is present, the hub treats omitted clients as intentionally not collected in this payload and preserves their previous usage for that device. This keeps "tracking" as "collect future data" rather than "hide existing history".
+
+`periodWindows` is optional. Agents and widgets stamp each snapshot with the UTC instant its `today`/`month` windows end, computed in the device's own local time (`endsAt` = next local midnight / next local month start; `key` is the device-local day/month for reference). The hub uses it to expire a device's `today`/`month` from the aggregate once `now >= endsAt`, so a device that goes offline before re-posting does not keep contributing a stale day/month snapshot (`allTime` never expires). Payloads without `periodWindows` fall back to a UTC day/month comparison against `updatedAt`.
 
 `limits` is optional. Agents and widgets include it when AI Tool Limits detection is enabled. Raw OAuth credentials, access tokens, refresh tokens, and provider response bodies must never be sent.
 

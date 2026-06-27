@@ -148,6 +148,20 @@ function localTodayKey(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
+// Stamp each posted snapshot with the UTC instant its today/month windows end
+// (next local midnight / next month start, in this device's timezone). The hub
+// uses these to expire a frozen snapshot once it goes offline past a day/month
+// boundary, instead of counting stale "today" data forever (issue #37).
+function computePeriodWindows(now = new Date()) {
+  const startOfNextDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0);
+  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  return {
+    today: { key: localTodayKey(now), endsAt: startOfNextDay.toISOString() },
+    month: { key: monthKey, endsAt: startOfNextMonth.toISOString() }
+  };
+}
+
 function isoFromDate(value) {
   const date = value instanceof Date ? value : new Date(value || '');
   return Number.isNaN(date.getTime()) ? '' : date.toISOString();
@@ -475,6 +489,7 @@ async function collectUsageOnce(options) {
     trackedClients: normalizedClients ? normalizedClients.split(',') : [],
     clientStatus: deriveClientStatus(normalizedClients, allTime),
     wslStatus,
+    periodWindows: computePeriodWindows(),
     today,
     month,
     allTime
@@ -908,6 +923,7 @@ module.exports = {
   collectHistoryOnce,
   collectUsageOnce,
   clientDataDirPresence,
+  computePeriodWindows,
   configFingerprint,
   deriveClientStatus,
   wslPeriodsForPreview,
