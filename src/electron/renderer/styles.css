@@ -188,7 +188,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 30px;
+  min-height: 62px;
 }
 .shell.desktop-mode .titlebar { -webkit-app-region: no-drag; }
 .titlebar > div:first-child { min-width: 0; flex: 1 1 auto; }
@@ -257,57 +257,39 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .status.error { display: block; }
 .title-controls {
   -webkit-app-region: no-drag;
-  position: relative;
-  flex: 0 1 148px;
-  min-width: 100px;
-  width: 148px;
-  height: 30px;
-}
-.actions-hotspot {
-  position: absolute;
-  top: -14px;
-  right: -12px;
-  width: 28px;
-  height: 22px;
-  z-index: 5;
+  display: grid;
+  grid-template-columns: minmax(150px, 160px);
+  grid-template-rows: 28px 30px;
+  align-items: start;
+  justify-items: stretch;
+  gap: 4px;
+  flex: 0 0 160px;
+  min-width: 0;
+  height: 62px;
 }
 .window-actions {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 154px;
-  height: 30px;
+  grid-row: 1;
+  justify-self: end;
+  width: max-content;
+  height: 28px;
   display: flex;
-  gap: 6px;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-2px);
-  transition: opacity 160ms ease 280ms, transform 160ms ease 280ms;
+  align-items: center;
+  gap: 4px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
   z-index: 4;
 }
 #titlebarActionSlot { display: contents; }
 #footerActionSlot { display: contents; }
 /* Size the swappable action button by its slot, not by its element identity,
    so Settings/Refresh look right in either location. */
-#titlebarActionSlot .icon-button, #titlebarActionSlot .refresh-button { width: 34px; height: 28px; font-size: 14px; }
+#titlebarActionSlot .icon-button, #titlebarActionSlot .refresh-button { width: 30px; height: 28px; font-size: 14px; }
 #footerActionSlot .icon-button, #footerActionSlot .refresh-button { width: 34px; height: 30px; font-size: 16px; }
-.actions-hotspot:hover ~ .window-actions, .window-actions:hover, .window-actions:focus-within, .shell.settings-open .window-actions {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
-  transition-delay: 0ms;
-}
 .title-controls .tabs {
-  position: absolute;
-  inset: 0;
+  grid-row: 2;
+  position: relative;
   width: 100%;
-  transition: opacity 160ms ease 280ms, transform 160ms ease 280ms;
-}
-.title-controls:has(.actions-hotspot:hover) .tabs, .title-controls:has(.window-actions:hover) .tabs, .title-controls:has(.window-actions:focus-within) .tabs, .shell.settings-open .title-controls .tabs {
-  opacity: 0;
-  transform: translateY(2px);
-  pointer-events: none;
-  transition-delay: 0ms;
 }
 .icon-button, .refresh-button, .settings-actions button, .shortcut-recorder button, .tab, .mode-button {
   border: 1px solid var(--line);
@@ -320,8 +302,24 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   backdrop-filter: blur(18px);
 }
 .icon-button { width: 34px; height: 28px; padding: 0; font-size: 14px; line-height: 1; }
+.window-actions .icon-button { width: 30px; }
 .icon-button:hover, .refresh-button:hover, .mode-button:hover, .settings-actions button:hover, .shortcut-recorder button:hover { border-color: var(--line-strong); background: rgba(var(--overlay-rgb), 0.072); }
 .icon-button.active { border-color: rgba(var(--accent-rgb), 0.58); color: var(--green); background: rgba(var(--accent-rgb), 0.08); }
+@media (max-width: 300px) {
+  .titlebar { gap: 6px; }
+  .title-controls {
+    grid-template-columns: minmax(136px, 1fr);
+    flex-basis: 142px;
+    gap: 3px;
+  }
+  .window-actions { gap: 2px; }
+  .window-actions .icon-button,
+  #titlebarActionSlot .icon-button,
+  #titlebarActionSlot .refresh-button {
+    width: 26px;
+  }
+  .tab { font-size: 8px; }
+}
 .settings-panel {
   position: relative;
   z-index: 1;
