@@ -3,6 +3,12 @@
 const PERIODS = ['today', 'month', 'allTime'];
 const { aggregateLimits, normalizeLimitsSummary } = require('./limits');
 const { coerceHistory, mergeHistories } = require('./history');
+// Local-only persistence layer (off by default until a writer is injected via
+// `options.persistence`). When a writer is supplied, every row that flows
+// through extractUsageFromTokscale is also stored to a local SQLite DB so
+// deleting the source session file does not destroy the audit trail.
+let persistenceWriter = null;
+function setPersistenceWriter(writer) { persistenceWriter = writer; }
 const TOKEN_KEYS = ['totalTokens', 'total_tokens', 'totalTokenCount', 'total_token_count', 'tokens', 'tokenCount', 'token_count'];
 // Additive components for a token total. `reasoning` is deliberately excluded: OpenAI/Codex report
 // reasoning_output_tokens WITHIN output_tokens (tokscale's `output` already includes it and exposes
@@ -454,6 +460,12 @@ function normalizePeriod(input) {
 function extractUsageFromTokscale(json) {
   const rows = [];
   collectUsageRows(json, rows);
+  // Best-effort persistence hook. Failures must never affect the in-memory
+  // aggregation result — the local DB is a convenience layer, not a source
+  // of truth for the UI.
+  if (persistenceWriter && rows.length > 0) {
+    try { persistenceWriter.ingestRows(rows); } catch (_) { /* swallow */ }
+  }
   if (rows.length === 0 && json && typeof json === 'object') {
     return {
       totalTokens: Math.max(0, Math.round(tokenValue(json))),
@@ -846,4 +858,4 @@ function deltaValue(base, fresh, anchor, key) {
   return base ?? fresh;
 }
 
-module.exports = { PERIODS, addPeriodInto, aggregateDevices, aggregateHistory, applyPeriodDelta, carryDeviceHistory, emptyPeriod, extractUsageFromTokscale, mergeDeviceRecord, mergePeriods, normalizeDeviceRecord, normalizePeriod };
+module.exports = { PERIODS, addPeriodInto, aggregateDevices, aggregateHistory, applyPeriodDelta, carryDeviceHistory, emptyPeriod, extractUsageFromTokscale, mergeDeviceRecord, mergePeriods, normalizeDeviceRecord, normalizePeriod, setPersistenceWriter };

@@ -56,7 +56,9 @@ const {
   normalizeArchivedClientUsage,
   pruneArchivedClientUsage
 } = require('../shared/clientUsageArchive');
-const { aggregateDevices, aggregateHistory, carryDeviceHistory } = require('../shared/usage');
+const { aggregateDevices, aggregateHistory, carryDeviceHistory, setPersistenceWriter: setUsageWriter } = require('../shared/usage');
+const { openDb: openUsageDb, defaultDbPath: defaultUsageDbPath } = require('../shared/persistence/db');
+const { createWriter: createUsageWriter } = require('../shared/persistence/recordWriter');
 const { syncLimits } = require('../shared/limits');
 const { historyPreview } = require('../shared/history');
 const { readSessionDetail } = require('../shared/sessionDetail');
@@ -131,6 +133,7 @@ let mainWindow = null;
 let dashboardWindow = null;
 let settingsPath = null;
 let settings = null;
+let usagePersistenceHandle = null;
 let rendererViewState = normalizeInitialRendererViewState();
 const serviceStatusClient = createServiceStatusClient();
 const STATUS_PAGE_HOSTS = new Set(SERVICE_STATUS_PROVIDERS.map((provider) => new URL(provider.pageUrl).hostname));
@@ -2356,6 +2359,20 @@ function rebuildWindow() {
 }
 
 app.whenReady().then(() => {
+  // Local-only persistence: open the usage history DB and register the writer
+  // so every extractUsageFromTokscale call also appends to SQLite. Failures
+  // here are logged but do not block app startup — the in-memory UI keeps
+  // working even if the DB is unreadable.
+  try {
+    const usageDbPath = path.join(app.getPath('userData'), 'usage-history.db');
+    const usageDb = openUsageDb(usageDbPath);
+    const usageWriter = createUsageWriter(usageDb);
+    setUsageWriter(usageWriter);
+    usagePersistenceHandle = { db: usageDb, writer: usageWriter, path: usageDbPath };
+    console.log('[persistence] usage history DB ready:', usageDbPath);
+  } catch (err) {
+    console.error('[persistence] failed to open usage history DB:', err.message);
+  }
   if (process.platform === 'darwin' && app.dock) app.dock.setIcon(APP_ICON_PATH);
   ensureSettingsLoaded();
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
@@ -2981,7 +2998,7 @@ app.whenReady().then(() => {
 
 app.on('second-instance', focusExistingWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { quitRequested = true; if (rateRefreshTimer) clearInterval(rateRefreshTimer); unregisterWindowToggleShortcut(); stopAll(); });
+app.on('before-quit', () => { quitRequested = true; if (rateRefreshTimer) clearInterval(rateRefreshTimer); unregisterWindowToggleShortcut(); stopAll(); if (usagePersistenceHandle) { try { usagePersistenceHandle.db.close(); } catch (_) {} usagePersistenceHandle = null; setUsageWriter(null); } });
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.once(signal, requestAppQuit);
 }
