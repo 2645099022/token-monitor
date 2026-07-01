@@ -57,7 +57,7 @@ const {
   pruneArchivedClientUsage
 } = require('../shared/clientUsageArchive');
 const { aggregateDevices, aggregateHistory, carryDeviceHistory, setPersistenceWriter: setUsageWriter } = require('../shared/usage');
-const { openDb: openUsageDb, defaultDbPath: defaultUsageDbPath } = require('../shared/persistence/db');
+const { openDb: openUsageDb } = require('../shared/persistence/db');
 const { createWriter: createUsageWriter } = require('../shared/persistence/recordWriter');
 const { syncLimits } = require('../shared/limits');
 const { historyPreview } = require('../shared/history');
