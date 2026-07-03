@@ -140,13 +140,15 @@ test('watchPathsForClients watches Pi (incl. Oh My Pi), Zed (incl. native macOS)
     path.join('.zcode', 'projects'),
     path.join('.kiro', 'sessions', 'cli'),
     path.join('Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
-    path.join('.local', 'share', 'kiro-cli')
+    path.join('.local', 'share', 'kiro-cli'),
+    path.join('.codebuddy', 'projects'),
+    path.join('.workbuddy', 'projects')
   ]);
   const originalHomedir = os.homedir;
   os.homedir = () => tmp;
   try {
     const { clientDataDirPresence, watchPathsForClients } = freshCollector();
-    const dirs = watchPathsForClients('pi,zed,kilocode,micode,zcode,kiro');
+    const dirs = watchPathsForClients('pi,zed,kilocode,micode,zcode,kiro,codebuddy,workbuddy');
     assert.ok(dirs.includes(path.join(tmp, '.pi', 'agent', 'sessions')));
     assert.ok(dirs.includes(path.join(tmp, '.omp', 'agent', 'sessions')));
     assert.ok(dirs.includes(path.join(tmp, '.local', 'share', 'zed', 'threads')));
@@ -163,8 +165,13 @@ test('watchPathsForClients watches Pi (incl. Oh My Pi), Zed (incl. native macOS)
     assert.ok(dirs.includes(path.join(tmp, '.kiro', 'sessions', 'cli')));
     assert.ok(dirs.includes(path.join(tmp, 'Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')));
     assert.ok(dirs.includes(path.join(tmp, '.local', 'share', 'kiro-cli')));
-    assert.deepEqual(clientDataDirPresence('pi,zed,kilocode,micode,zcode,kiro'), {
-      pi: true, zed: true, kilocode: true, micode: true, zcode: true, kiro: true
+    // CodeBuddy/WorkBuddy: assert the platform-agnostic roots. CodeBuddy's
+    // extension-log root is process.platform-specific, so it's covered by the
+    // collector code, not this cross-platform test.
+    assert.ok(dirs.includes(path.join(tmp, '.codebuddy', 'projects')));
+    assert.ok(dirs.includes(path.join(tmp, '.workbuddy', 'projects')));
+    assert.deepEqual(clientDataDirPresence('pi,zed,kilocode,micode,zcode,kiro,codebuddy,workbuddy'), {
+      pi: true, zed: true, kilocode: true, micode: true, zcode: true, kiro: true, codebuddy: true, workbuddy: true
     });
   } finally {
     os.homedir = originalHomedir;

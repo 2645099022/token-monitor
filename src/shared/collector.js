@@ -579,6 +579,25 @@ function clientWatchCandidates(clientsCsv) {
   );
   add('micode', path.join(home, '.local', 'share', 'mimocode'));
   add('zcode', path.join(home, '.zcode', 'projects'));
+  // CodeBuddy (Tencent): tokscale reads the home-relative CLI/WebUI JSONL dir on
+  // every platform, plus the IDE / VS Code extension logs under a platform-
+  // specific CodeBuddyExtension/Logs root (scanner.rs). Watch both so CLI and
+  // IDE usage each refresh in seconds; the shared Code/logs tree is deliberately
+  // not watched (too broad for polling — full ticks still scan it). No --home
+  // host-DB fallback, so every root is safe to watch cross-platform.
+  const codebuddyExtLogs = process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'CodeBuddyExtension', 'Logs')
+    : process.platform === 'darwin'
+      ? path.join(home, 'Library', 'Application Support', 'CodeBuddyExtension', 'Logs')
+      : path.join(home, '.local', 'share', 'CodeBuddyExtension', 'Logs');
+  add('codebuddy', path.join(home, '.codebuddy', 'projects'), codebuddyExtLogs);
+  // WorkBuddy (Tencent): watch only the detailed session dir (projects/*.jsonl,
+  // the preferred source) — not the whole ~/.workbuddy app home, whose config /
+  // auth churn would add polling load and spurious ticks with no usage change.
+  // A legacy install with only ~/.workbuddy/workbuddy.db (no projects/) still
+  // refreshes via the periodic full tick; the WSL marker stays the broader
+  // `.workbuddy` so a db-only WSL home is still scanned.
+  add('workbuddy', path.join(home, '.workbuddy', 'projects'));
   // Kiro (AWS): tokscale reads three home-relative roots — the CLI sessions dir,
   // the Kiro IDE globalStorage root (native macOS / Linux / Windows), and the
   // kiro-cli sqlite dir. None falls back to a host-absolute path under --home

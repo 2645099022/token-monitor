@@ -400,6 +400,16 @@ test('extractUsageFromTokscale normalizes Kiro client ids', () => {
   assert.equal(period.clients.kiro, 38);
 });
 
+test('extractUsageFromTokscale normalizes CodeBuddy and WorkBuddy client ids', () => {
+  const period = extractUsageFromTokscale([
+    { client: 'codebuddy', model: 'glm-5.2', totalTokens: 24 },
+    { client: 'WorkBuddy', model: 'deepseek-v4-pro', totalTokens: 12 }
+  ]);
+
+  assert.equal(period.clients.codebuddy, 24);
+  assert.equal(period.clients.workbuddy, 12);
+});
+
 test('normalizeClientName keeps kilo distinct from kilocode and maps Oh My Pi to pi', () => {
   const period = extractUsageFromTokscale([
     { client: 'kilo', model: 'x', totalTokens: 5 },

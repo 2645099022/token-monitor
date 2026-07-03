@@ -127,6 +127,8 @@ function normalizeClientName(value) {
   if (raw.includes('micode')) return 'micode';
   if (raw.includes('zcode')) return 'zcode';
   if (raw.includes('kiro')) return 'kiro';
+  if (raw.includes('codebuddy')) return 'codebuddy';
+  if (raw.includes('workbuddy')) return 'workbuddy';
   if (raw.includes('opencode')) return 'opencode';
   if (raw.includes('openclaw') || raw.includes('clawd') || raw.includes('moltbot') || raw.includes('moldbot')) return 'openclaw';
   return raw.replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || null;

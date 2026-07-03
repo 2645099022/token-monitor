@@ -60,7 +60,7 @@
   // synthetic "default" fallback is shown last.
   const VENDOR_ORDER = [
     'claude', 'codex', 'hermes', 'opencode', 'openclaw', 'cline', 'cursor',
-    'gemini', 'antigravity', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro', 'deepseek', 'xai', 'meta', 'mistral',
+    'gemini', 'antigravity', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro', 'codebuddy', 'workbuddy', 'deepseek', 'xai', 'meta', 'mistral',
     'moonshot', 'zai', 'cohere', 'xiaomi', 'minimax'
   ];
 
@@ -86,6 +86,8 @@
     micode: 'MiMo Code',
     zcode: 'ZCode',
     kiro: 'Kiro',
+    codebuddy: 'CodeBuddy',
+    workbuddy: 'WorkBuddy',
     deepseek: 'DeepSeek',
     xai: 'xAI',
     meta: 'Meta',
