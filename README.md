@@ -15,7 +15,7 @@
     <a href="https://github.com/Javis603/token-monitor/releases"><img src="https://img.shields.io/github/downloads/Javis603/token-monitor/total?style=flat-square&color=22c55e" alt="Total downloads" /></a>
     <img src="https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square" alt="Windows 10 or later" />
     <img src="https://img.shields.io/badge/macOS-14%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="macOS 14 or later" />
-    <img src="https://img.shields.io/badge/iOS-16%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="iOS 16 or later" />
+    <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square&logo=linux&logoColor=white" alt="Linux x64" />
     <a href="https://discord.gg/HmdNVVvw5P"><img src="https://img.shields.io/discord/1344259784219689031?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square" alt="Discord"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-A855F7?style=flat-square" alt="License: MIT" /></a>
 </p>
@@ -146,7 +146,7 @@ Paste the deployed URL into each device's widget at Settings → Multi-device Sy
 
 ## Desktop installer
 
-You can download the app from the [releases page](https://github.com/Javis603/token-monitor/releases). All releases are unsigned; release notes include first-launch unlock steps for macOS (arm64) and Windows (x64). Other platforms run from source via `npm start`.
+You can download the app from the [releases page](https://github.com/Javis603/token-monitor/releases). All releases are unsigned; release notes include first-launch steps for macOS (arm64), Windows (x64), and Linux x64 AppImage. Other platforms run from source via `npm start`.
 
 App state lives in the OS user-data dir — delete it along with the app to fully uninstall.
 
@@ -154,6 +154,7 @@ App state lives in the OS user-data dir — delete it along with the app to full
 |----------|------|
 | macOS | `~/Library/Application Support/Token Monitor/` |
 | Windows | `%APPDATA%/Token Monitor/` |
+| Linux | `~/.config/Token Monitor/` |
 
 ## Build from source
 
@@ -163,10 +164,11 @@ Releases are unsigned, so you may prefer to build your own installer — same co
 npm install
 npm run dist:mac   # macOS arm64 .dmg          → dist/
 npm run dist:win   # Windows x64 installer .exe → dist/
+npm run dist:linux # Linux x64 AppImage        → dist/
 npm run pack       # unpacked app dir (no installer), for quick local testing
 ```
 
-Output lands in `dist/`. Builds are unsigned, so the same first-launch unlock steps apply. Linux and Intel Macs have no packaging target — run directly with `npm start`.
+Output lands in `dist/`. Builds are unsigned, so the same first-launch steps apply. Other platforms have no packaging target — run directly with `npm start`.
 
 ## How it works
 
@@ -242,9 +244,19 @@ are gitignored.
 
 ## Requirements
 
-- macOS or Windows
+- macOS, Windows, or Linux x64
 - Node.js 22.13+
 - For sync mode only: network reachability from each agent/widget to the hub
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=Javis603%2Ftoken-monitor&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## Acknowledgments
 

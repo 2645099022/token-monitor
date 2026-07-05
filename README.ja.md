@@ -15,7 +15,7 @@
     <a href="https://github.com/Javis603/token-monitor/releases"><img src="https://img.shields.io/github/downloads/Javis603/token-monitor/total?style=flat-square&color=22c55e" alt="総ダウンロード数" /></a>
     <img src="https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square" alt="Windows 10 以降" />
     <img src="https://img.shields.io/badge/macOS-14%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="macOS 14 以降" />
-    <img src="https://img.shields.io/badge/iOS-16%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="iOS 16 以降" />
+    <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square&logo=linux&logoColor=white" alt="Linux x64" />
     <a href="https://discord.gg/HmdNVVvw5P"><img src="https://img.shields.io/discord/1344259784219689031?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square" alt="Discord"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-A855F7?style=flat-square" alt="ライセンス: MIT" /></a>
 </p>
@@ -146,7 +146,7 @@ npx wrangler deploy
 
 ## デスクトップインストーラー
 
-[releases ページ](https://github.com/Javis603/token-monitor/releases) からダウンロードできます。リリースは署名されていません。macOS (arm64) と Windows (x64) の初回起動手順はリリースノートに記載されています。その他のプラットフォームは `npm start` でソースから実行します。
+[releases ページ](https://github.com/Javis603/token-monitor/releases) からダウンロードできます。リリースは署名されていません。macOS (arm64)、Windows (x64)、Linux x64 AppImage の初回起動手順はリリースノートに記載されています。その他のプラットフォームは `npm start` でソースから実行します。
 
 アプリの状態は OS のユーザーデータディレクトリに保存されます。アプリと一緒にそのフォルダを削除すると完全にアンインストールできます。
 
@@ -154,6 +154,7 @@ npx wrangler deploy
 |--------|------|
 | macOS | `~/Library/Application Support/Token Monitor/` |
 | Windows | `%APPDATA%/Token Monitor/` |
+| Linux | `~/.config/Token Monitor/` |
 
 ## ソースからビルド
 
@@ -163,10 +164,11 @@ npx wrangler deploy
 npm install
 npm run dist:mac   # macOS arm64 .dmg          → dist/
 npm run dist:win   # Windows x64 installer .exe → dist/
+npm run dist:linux # Linux x64 AppImage        → dist/
 npm run pack       # インストーラーなしのアプリディレクトリ（ローカルテスト用）
 ```
 
-出力は `dist/` に生成されます。Linux と Intel Mac にはパッケージング対象がないため、`npm start` で実行してください。
+出力は `dist/` に生成されます。その他のプラットフォームにはパッケージング対象がないため、`npm start` で実行してください。
 
 ## 動作の仕組み
 
@@ -239,9 +241,19 @@ hub と agent はサマリーフィールドのみを送信します。
 
 ## 要件
 
-- macOS または Windows
+- macOS、Windows、または Linux x64
 - Node.js 22.13+
 - 同期モードのみ: agent/ウィジェットから hub へのネットワーク接続
+
+## Star 履歴
+
+<a href="https://www.star-history.com/?repos=Javis603%2Ftoken-monitor&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## 謝辞
 

@@ -15,7 +15,7 @@
     <a href="https://github.com/Javis603/token-monitor/releases"><img src="https://img.shields.io/github/downloads/Javis603/token-monitor/total?style=flat-square&color=22c55e" alt="총 다운로드" /></a>
     <img src="https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square" alt="Windows 10 이상" />
     <img src="https://img.shields.io/badge/macOS-14%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="macOS 14 or later" />
-    <img src="https://img.shields.io/badge/iOS-16%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="iOS 16 이상" />
+    <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square&logo=linux&logoColor=white" alt="Linux x64" />
     <a href="https://discord.gg/HmdNVVvw5P"><img src="https://img.shields.io/discord/1344259784219689031?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square" alt="Discord"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-A855F7?style=flat-square" alt="라이선스: MIT" /></a>
 </p>
@@ -146,7 +146,7 @@ npx wrangler deploy
 
 ## 데스크톱 설치 파일
 
-[releases 페이지](https://github.com/Javis603/token-monitor/releases)에서 다운로드할 수 있습니다. 릴리스는 서명되지 않았으며, macOS(arm64)와 Windows(x64) 최초 실행 안내가 릴리스 노트에 있습니다. 그 외 플랫폼은 `npm start`로 소스 실행.
+[releases 페이지](https://github.com/Javis603/token-monitor/releases)에서 다운로드할 수 있습니다. 릴리스는 서명되지 않았으며, macOS(arm64), Windows(x64), Linux x64 AppImage 최초 실행 안내가 릴리스 노트에 있습니다. 그 외 플랫폼은 `npm start`로 소스 실행하세요.
 
 앱 상태는 OS 사용자 데이터 디렉터리에 저장됩니다. 앱과 함께 해당 폴더를 삭제하면 완전히 제거됩니다.
 
@@ -154,6 +154,7 @@ npx wrangler deploy
 |--------|------|
 | macOS | `~/Library/Application Support/Token Monitor/` |
 | Windows | `%APPDATA%/Token Monitor/` |
+| Linux | `~/.config/Token Monitor/` |
 
 ## 소스에서 빌드
 
@@ -163,10 +164,11 @@ npx wrangler deploy
 npm install
 npm run dist:mac   # macOS arm64 .dmg          → dist/
 npm run dist:win   # Windows x64 installer .exe → dist/
+npm run dist:linux # Linux x64 AppImage        → dist/
 npm run pack       # 설치 없이 앱 디렉터리만 (로컬 테스트)
 ```
 
-결과물은 `dist/`에 생성됩니다. Linux와 Intel Mac은 패키징 대상이 없어 `npm start`로 실행하세요.
+결과물은 `dist/`에 생성됩니다. 그 외 플랫폼은 패키징 대상이 없어 `npm start`로 실행하세요.
 
 ## 동작 방식
 
@@ -239,9 +241,19 @@ hub와 agent는 요약 필드만 전송합니다.
 
 ## 요구 사항
 
-- macOS 또는 Windows
+- macOS, Windows 또는 Linux x64
 - Node.js 22.13+
 - 동기화 모드만: agent/위젯에서 hub까지 네트워크 연결
+
+## Star 기록
+
+<a href="https://www.star-history.com/?repos=Javis603%2Ftoken-monitor&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## 감사의 글
 
