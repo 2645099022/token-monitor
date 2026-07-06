@@ -5,12 +5,15 @@
 ## What's changed
 
 ### Added
-- **Data export:** Settings -> Collection -> Data export can now write CSV / JSON files once or auto-export them to a folder for Excel, Obsidian, scripts, and dashboards. (#61)
-- **CodeBuddy and WorkBuddy tracking:** Token Monitor now collects and displays usage from CodeBuddy and WorkBuddy alongside the existing tools.
-- **Trends active time:** Trends and history summaries now include Active time when tokscale provides session timing data.
+- **Japanese and Korean interface languages:** Settings -> General -> Interface language now includes 日本語 and 한국어, and Auto (system) recognizes Japanese and Korean system locales. (#57, #58)
+- **Linux AppImage downloads:** Linux x64 AppImage is now available alongside macOS and Windows builds. (#65)
 
 ### Improved
-- **AI Tool Limits bars:** Settings -> AI Tool Limits now lets quota bars show either Remaining or Used, and the Limits and Home surfaces use the same display mode.
+- **Dashboard stat cards:** Activity summary cards now balance their widths so longer localized labels and values fit more evenly.
+- **Bundled tokscale 4.0.11:** Includes Oh My Pi (OMP) usage tracking and ZCode parsing fixes. (#77)
+
+### Fixed
+- **App update prompts:** Dismissing one release no longer hides later releases for a full day; cached newer versions are refreshed more quickly.
 
 ## Which file should I download?
 
@@ -53,12 +56,15 @@ open-source: https://github.com/junhoyeo/tokscale
 ## 更新内容
 
 ### 新增
-- **数据导出：** 设置 -> 采集 -> 数据导出 现在可以一次性写出 CSV / JSON，也可以自动导出到文件夹，方便接入 Excel、Obsidian、自写脚本和仪表盘。（#61）
-- **CodeBuddy 和 WorkBuddy 追踪：** Token Monitor 现在会采集并显示 CodeBuddy 与 WorkBuddy 的用量，和现有工具一起统计。
-- **趋势活跃时间：** 当 tokscale 提供 session 时间数据时，趋势与历史摘要现在会显示活跃时间。
+- **日文和韩文界面：** 设置 -> 常规 -> 界面语言 现在包含 日本語 和 한국어，自动（跟随系统）也会识别日文、韩文系统语言。（#57、#58）
+- **Linux AppImage 下载：** 现在会和 macOS、Windows 一起提供 Linux x64 AppImage。（#65）
 
 ### 改进
-- **AI 工具额度条：** 设置 -> AI 工具额度 现在可以选择额度条显示“剩余”或“已用”，额度页和主页会使用同一显示方式。
+- **仪表盘统计卡片：** 活动摘要卡片现在会平衡宽度，较长的本地化标签和值也更容易排布整齐。
+- **内置 tokscale 4.0.11：** 包含 Oh My Pi (OMP) 用量追踪和 ZCode 解析修复。（#77）
+
+### 修复
+- **应用更新提示：** 忽略某个版本后，后续新版本不会再被整天隐藏；已缓存的新版本会更快刷新。
 
 ## 应该下载哪个文件？
 
