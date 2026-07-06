@@ -177,6 +177,39 @@ function addClientUsage(period, client, usage) {
   const normalizedSessions = normalizePeriod({ sessions: usage?.sessions }).sessions;
   for (const [key, session] of Object.entries(normalizedSessions)) {
     period.sessions[key] = session;
+    addSessionBreakdown(period, client, session);
+  }
+}
+
+// The archived period keeps only token/cost totals, but its sessions still carry
+// the full cache hit/write/output split. Rebuild the client- and model-level
+// breakdown dicts from them on apply, so an archived (untracked) client's rows
+// expand with a real cache split instead of dumping everything into "cache miss".
+function addSessionBreakdown(period, client, session) {
+  const cacheRead = Math.max(0, Math.round(numberValue(session?.cacheReadTokens)));
+  const cacheWrite = Math.max(0, Math.round(numberValue(session?.cacheWriteTokens)));
+  const output = Math.max(0, Math.round(numberValue(session?.outputTokens)));
+  if (cacheRead === 0 && cacheWrite === 0 && output === 0) return;
+
+  if (cacheRead > 0) period.clientCacheReads[client] = (period.clientCacheReads[client] || 0) + cacheRead;
+  if (cacheWrite > 0) period.clientCacheWrites[client] = (period.clientCacheWrites[client] || 0) + cacheWrite;
+  if (output > 0) period.clientOutputs[client] = (period.clientOutputs[client] || 0) + output;
+
+  const modelTokens = Object.entries(session?.models || {})
+    .map(([model, tokens]) => [model, numberValue(tokens)])
+    .filter(([, tokens]) => tokens > 0);
+  const totalModelTokens = modelTokens.reduce((sum, [, tokens]) => sum + tokens, 0);
+  if (totalModelTokens === 0) return;
+
+  // A session is almost always one model; split proportionally for the rare mix.
+  for (const [model, tokens] of modelTokens) {
+    const share = modelTokens.length === 1 ? 1 : tokens / totalModelTokens;
+    const cr = Math.round(cacheRead * share);
+    const cw = Math.round(cacheWrite * share);
+    const ou = Math.round(output * share);
+    if (cr > 0) period.modelCacheReads[model] = (period.modelCacheReads[model] || 0) + cr;
+    if (cw > 0) period.modelCacheWrites[model] = (period.modelCacheWrites[model] || 0) + cw;
+    if (ou > 0) period.modelOutputs[model] = (period.modelOutputs[model] || 0) + ou;
   }
 }
 

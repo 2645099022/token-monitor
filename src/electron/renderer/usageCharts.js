@@ -195,7 +195,7 @@
     { key: 'totalCost', kind: 'cost' },
     { key: 'activeDays', kind: 'days' },
     { key: 'currentStreak', kind: 'days' },
-    { key: 'longestStreak', kind: 'days' },
+    { key: 'activeTimeMs', kind: 'duration' },
     { key: 'peakDayTokens', kind: 'tokens' },
     { key: 'favoriteModel', kind: 'model' },
     { key: 'messages', kind: 'count' }
@@ -308,7 +308,7 @@
     claude: '#cc7c5e', codex: '#49a3b0', hermes: '#d4af37', gemini: '#4285f4',
     antigravity: '#4285f4', cline: '#323B43', kimi: '#16191e', grok: '#000000', copilot: '#000000', deepseek: '#4d6bfe', cursor: '#000000', opencode: '#000000',
     openclaw: '#ff4d4d', xai: '#000000', meta: '#1d65c1', mistral: '#fa520f', qwen: '#615ced',
-    pi: '#000', zed: '#4173e7', kilocode: '#F8F676', micode: '#000000', zcode: '#000000', kiro: '#9046FF',
+    pi: '#000', zed: '#4173e7', kilocode: '#F8F676', micode: '#000000', zcode: '#000000', kiro: '#9046FF', codebuddy: '#6C4DFF', workbuddy: '#0DC8A5',
     moonshot: '#16191e', zai: '#000000', cohere: '#39594d', xiaomi: '#ff6700', minimax: '#f23f5d',
     default: '#6ab4f0'
   };
@@ -469,11 +469,52 @@
     ).join('');
   }
 
+  function statCardColumnWidths(contentWidths, options) {
+    const widths = (Array.isArray(contentWidths) ? contentWidths : [])
+      .map((width) => Math.max(0, n(width)));
+    if (!widths.length) return [];
+    const totalWidth = Math.max(0, n(options && options.totalWidth));
+    if (totalWidth <= 0) return widths.map(() => 0);
+    const equalWidth = totalWidth / widths.length;
+    const minWidth = Math.max(0, n(options && options.minWidth) || equalWidth * 0.72);
+    const safety = Math.max(0, n(options && options.safety));
+    const required = widths.map((width) => width + safety);
+    const columns = widths.map(() => equalWidth);
+
+    for (let i = 0; i < required.length; i++) {
+      if (required[i] > equalWidth) columns[i] = required[i];
+    }
+
+    let overflow = columns.reduce((sum, width) => sum + width, 0) - totalWidth;
+    if (overflow > 0) {
+      const capacities = required.map((width, index) =>
+        Math.max(0, columns[index] - Math.max(width, minWidth))
+      );
+      const totalCapacity = capacities.reduce((sum, width) => sum + width, 0);
+      if (totalCapacity > 0) {
+        for (let i = 0; i < columns.length; i++) {
+          columns[i] -= Math.min(capacities[i], overflow * (capacities[i] / totalCapacity));
+        }
+      }
+    }
+
+    const sum = columns.reduce((total, width) => total + width, 0);
+    if (sum > totalWidth && sum > 0) {
+      const scale = totalWidth / sum;
+      for (let i = 0; i < columns.length; i++) columns[i] *= scale;
+    }
+
+    const rounded = columns.map((width) => Math.round(width * 10) / 10);
+    const delta = Math.round((totalWidth - rounded.reduce((sumWidth, width) => sumWidth + width, 0)) * 10) / 10;
+    rounded[rounded.length - 1] = Math.max(0, Math.round((rounded[rounded.length - 1] + delta) * 10) / 10);
+    return rounded;
+  }
+
   return {
     weekStartKey, dailyBarsChart, candleChart, contribHeatmap, rollingYearHeatmap, statsCards, sparklinePreview,
     areaLineChart, areaLineSvg,
     selectPreviewSeries, patchTodayBar, sparklineSvg,
     clientColors, fallbackModelColors, modelVendorFor, modelColor, clampDaily,
-    barsChartSvg, candleChartSvg, heatmapSvg, statsCardsHtml
+    barsChartSvg, candleChartSvg, heatmapSvg, statsCardsHtml, statCardColumnWidths
   };
 });

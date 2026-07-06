@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 
-const { claudeCommandCandidates, fetchClaudeLimits, mapClaudeCliUsageToProvider } = require('../../src/shared/limitCollector');
+const { claudeCommandCandidates, fetchClaudeLimits, mapClaudeCliUsageToProvider, mapClaudeUsageToProvider } = require('../../src/shared/limitCollector');
 
 function fakeSpawnForClaudeUsage(expectedCommand = 'claude.cmd') {
   return (command, args) => {
@@ -46,6 +46,7 @@ test('Claude limits fall back to direct CLI usage on Windows when OAuth usage is
       ok: false,
       status: 500
     }),
+    existsSync: () => false,
     spawn: fakeSpawnForClaudeUsage()
   });
 
@@ -338,4 +339,66 @@ test('Claude command candidates include common Windows CLI install paths before 
   assert.equal(candidates.includes(fnm), true);
   assert.ok(candidates.indexOf(roamingNpm) < candidates.indexOf('claude.cmd'));
   assert.ok(candidates.indexOf('claude.cmd') < candidates.indexOf('claude'));
+});
+
+test('Claude OAuth usage adds a Fable-only weekly window from the limits array', () => {
+  const provider = mapClaudeUsageToProvider({
+    five_hour: { utilization: 96, resets_at: '2026-07-02T14:00:00Z' },
+    seven_day: { utilization: 22, resets_at: '2026-07-03T10:00:00Z' },
+    limits: [
+      { kind: 'session', group: 'session', percent: 96, resets_at: '2026-07-02T14:00:00Z', scope: null },
+      { kind: 'weekly_all', group: 'weekly', percent: 22, resets_at: '2026-07-03T10:00:00Z', scope: null },
+      {
+        kind: 'weekly_scoped',
+        group: 'weekly',
+        percent: 1,
+        resets_at: '2026-07-03T09:59:59Z',
+        scope: { model: { id: null, display_name: 'Fable' }, surface: null }
+      }
+    ]
+  });
+
+  const weeklies = provider.windows.filter((window) => window.kind === 'weekly');
+  assert.equal(weeklies.length, 2);
+  // The unscoped "All models" weekly stays first so windowForKind() still resolves it.
+  assert.equal(weeklies[0].label, '');
+  assert.equal(weeklies[0].usedPercent, 22);
+  const fable = weeklies[1];
+  assert.equal(fable.label, 'Fable');
+  assert.equal(fable.usedPercent, 1);
+  assert.equal(fable.resetsAt, '2026-07-03T09:59:59.000Z');
+});
+
+test('Claude OAuth usage omits the Fable window when no scoped model limit is present', () => {
+  const provider = mapClaudeUsageToProvider({
+    five_hour: { utilization: 40, resets_at: '2026-07-02T14:00:00Z' },
+    seven_day: { utilization: 10, resets_at: '2026-07-03T10:00:00Z' },
+    limits: [
+      { kind: 'session', group: 'session', percent: 40, resets_at: '2026-07-02T14:00:00Z', scope: null },
+      { kind: 'weekly_all', group: 'weekly', percent: 10, resets_at: '2026-07-03T10:00:00Z', scope: null }
+    ]
+  });
+
+  const weeklies = provider.windows.filter((window) => window.kind === 'weekly');
+  assert.equal(weeklies.length, 1);
+  assert.equal(weeklies[0].label, '');
+});
+
+test('Claude OAuth usage ignores non-Fable scoped weekly limits', () => {
+  const provider = mapClaudeUsageToProvider({
+    seven_day: { utilization: 10, resets_at: '2026-07-03T10:00:00Z' },
+    limits: [
+      { kind: 'weekly_all', group: 'weekly', percent: 10, resets_at: '2026-07-03T10:00:00Z', scope: null },
+      {
+        kind: 'weekly_scoped',
+        group: 'weekly',
+        percent: 3,
+        resets_at: '2026-07-03T10:00:00Z',
+        scope: { model: { id: null, display_name: 'Opus' }, surface: null }
+      }
+    ]
+  });
+
+  const labels = provider.windows.filter((window) => window.kind === 'weekly').map((window) => window.label);
+  assert.deepEqual(labels, ['']);
 });

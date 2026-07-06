@@ -18,17 +18,24 @@ jobs:
           - os: windows-latest
             target: win
             artifact_path: dist/*.exe
+          - os: ubuntu-latest
+            target: linux
+            artifact_path: dist/*.AppImage
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
       - name: Platform evidence
         run: node -p "process.platform + '-' + process.arch"
       - run: npm ci
+      # APPIMAGE_EXTRACT_AND_RUN lets electron-builder's bundled appimagetool
+      # run without libfuse2 (absent on the runners); a no-op on mac/win.
       - run: npm run dist:${{ matrix.target }}
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
       - uses: actions/upload-artifact@v4
         with:
           name: token-monitor-${{ matrix.target }}
@@ -52,4 +59,5 @@ jobs:
             artifacts/*.dmg
             artifacts/*.zip
             artifacts/*.exe
+            artifacts/*.AppImage
           body_path: .github/RELEASE_TEMPLATE.md

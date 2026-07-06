@@ -12,6 +12,7 @@ const { normalizeClientsCsv } = require('./clientTracking');
 const { tokscalePackageNameForPlatform, tokscalePlatformKey } = require('./tokscalePlatform');
 const { applyPeriodDelta, emptyPeriod, extractUsageFromTokscale, mergePeriods } = require('./usage');
 const { collectWslUsage: collectWslUsageImpl, emptyWslBundle, probeWslState: probeWslStateImpl } = require('./wslUsage');
+const { hermesProfileWatchDirs, resolveHermesHome, tokscaleEnvFromSpawnArgs } = require('./hermesProfiles');
 const { parseGraphResult, normalizeHistory } = require('./history');
 const { collectLimitsOnce, createLimitsCollector } = require('./limitCollector');
 const cursorAuth = require('./cursorAuth');
@@ -109,10 +110,14 @@ function parseJsonOutput(stdout) {
   throw new Error(`Could not parse tokscale JSON output: ${text.slice(0, 300)}`);
 }
 
-function spawnTokscaleJson(userArgs, commandTimeoutMs) {
+function spawnTokscaleJson(userArgs, commandTimeoutMs, spawnOpts = {}) {
   const { bin, prefixArgs, env } = tokscaleCommand();
+  const childEnv = tokscaleEnvFromSpawnArgs(env, userArgs, {
+    env,
+    homeDir: spawnOpts.homeDir || os.homedir()
+  });
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, [...prefixArgs, ...userArgs], { env, windowsHide: true });
+    const child = spawn(bin, [...prefixArgs, ...userArgs], { env: childEnv, windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timeout = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`tokscale timed out after ${commandTimeoutMs}ms`)); }, commandTimeoutMs);
@@ -341,6 +346,13 @@ async function maybeSyncAntigravity(clientsCsv, logger, home = os.homedir()) {
 
 const HISTORY_CAP_DAYS = 370;
 const HISTORY_TIMEOUT_MS = 60000;
+const DEFAULT_HISTORY_INTERVAL_MS = 15 * 60 * 1000;
+const HISTORY_INTERVAL_VALUES = new Set([5, 10, 15, 30, 60].map((minutes) => minutes * 60 * 1000));
+
+function normalizeHistoryIntervalMs(value) {
+  const parsed = Number(value);
+  return HISTORY_INTERVAL_VALUES.has(parsed) ? parsed : DEFAULT_HISTORY_INTERVAL_MS;
+}
 
 async function collectHistoryOnce(options) {
   const clients = normalizeClientsCsv(options.clients);
@@ -534,7 +546,8 @@ function clientWatchCandidates(clientsCsv) {
   const add = (client, ...dirs) => { if (enabled.has(client)) byClient[client] = dirs; };
   add('claude', path.join(home, '.claude', 'projects'), path.join(home, '.claude', 'transcripts'));
   add('codex', path.join(home, '.codex', 'sessions'));
-  add('hermes', process.env.HERMES_HOME || path.join(home, '.hermes'));
+  const hermesHome = resolveHermesHome({ env: process.env, homeDir: home });
+  add('hermes', hermesHome, ...hermesProfileWatchDirs(hermesHome));
   add('opencode', path.join(home, '.local', 'share', 'opencode'));
   add('openclaw', path.join(home, '.openclaw', 'agents'));
   add('cursor', path.join(home, '.config', 'tokscale', 'cursor-cache'));
@@ -566,6 +579,25 @@ function clientWatchCandidates(clientsCsv) {
   );
   add('micode', path.join(home, '.local', 'share', 'mimocode'));
   add('zcode', path.join(home, '.zcode', 'projects'));
+  // CodeBuddy (Tencent): tokscale reads the home-relative CLI/WebUI JSONL dir on
+  // every platform, plus the IDE / VS Code extension logs under a platform-
+  // specific CodeBuddyExtension/Logs root (scanner.rs). Watch both so CLI and
+  // IDE usage each refresh in seconds; the shared Code/logs tree is deliberately
+  // not watched (too broad for polling — full ticks still scan it). No --home
+  // host-DB fallback, so every root is safe to watch cross-platform.
+  const codebuddyExtLogs = process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'CodeBuddyExtension', 'Logs')
+    : process.platform === 'darwin'
+      ? path.join(home, 'Library', 'Application Support', 'CodeBuddyExtension', 'Logs')
+      : path.join(home, '.local', 'share', 'CodeBuddyExtension', 'Logs');
+  add('codebuddy', path.join(home, '.codebuddy', 'projects'), codebuddyExtLogs);
+  // WorkBuddy (Tencent): watch only the detailed session dir (projects/*.jsonl,
+  // the preferred source) — not the whole ~/.workbuddy app home, whose config /
+  // auth churn would add polling load and spurious ticks with no usage change.
+  // A legacy install with only ~/.workbuddy/workbuddy.db (no projects/) still
+  // refreshes via the periodic full tick; the WSL marker stays the broader
+  // `.workbuddy` so a db-only WSL home is still scanned.
+  add('workbuddy', path.join(home, '.workbuddy', 'projects'));
   // Kiro (AWS): tokscale reads three home-relative roots — the CLI sessions dir,
   // the Kiro IDE globalStorage root (native macOS / Linux / Windows), and the
   // kiro-cli sqlite dir. None falls back to a host-absolute path under --home
@@ -634,10 +666,15 @@ const HERMES_DB_FILES = new Set(['state.db', 'state.db-wal', 'state.db-shm']);
 function watchIgnoreMatcher(clientsCsv) {
   const roots = (clientWatchCandidates(clientsCsv).hermes || []).map((dir) => path.resolve(dir));
   if (roots.length === 0) return undefined;
+  const rootSet = new Set(roots);
   return (target) => {
     const resolved = path.resolve(target);
+    // Every explicit watch root stays watched — the home dir AND each profile
+    // dir. A profile dir lives under the home root, so the child-prune below
+    // would otherwise ignore it (basename isn't a db file) before we recognise
+    // it as a watch root in its own right, silencing profile-db change events.
+    if (rootSet.has(resolved)) return false;
     for (const root of roots) {
-      if (resolved === root) return false; // the watch root itself must stay watched
       if (resolved.startsWith(root + path.sep)) return !HERMES_DB_FILES.has(path.basename(resolved));
     }
     return false; // non-Hermes paths are never ignored
@@ -965,7 +1002,10 @@ module.exports = {
   wslPeriodsForPreview,
   statusFromSignals,
   decideResolver,
+  DEFAULT_HISTORY_INTERVAL_MS,
+  HISTORY_INTERVAL_VALUES,
   localTodayKey,
+  normalizeHistoryIntervalMs,
   sessionTimestampMap,
   locateBundledBinary,
   lookupModelPricing,

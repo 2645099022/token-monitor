@@ -35,6 +35,7 @@ const REASONING_TOKEN_KEYS = ['reasoning', 'reasoningTokens', 'reasoning_tokens'
 const STARTED_AT_KEYS = ['startedAt', 'started_at', 'createdAt', 'created_at'];
 const LAST_USED_AT_KEYS = ['lastUsedAt', 'last_used_at', 'updatedAt', 'updated_at', 'lastActivityAt', 'last_activity_at', 'timestamp'];
 const GUI_SECRET_LIMIT_PROVIDERS = new Set(['copilot', 'deepseek', 'minimax']);
+const CACHE_INCLUSIVE_CLIENTS = new Set(['zcode']);
 
 function asNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -133,6 +134,8 @@ function normalizeClientName(value) {
   if (raw.includes('micode')) return 'micode';
   if (raw.includes('zcode')) return 'zcode';
   if (raw.includes('kiro')) return 'kiro';
+  if (raw.includes('codebuddy')) return 'codebuddy';
+  if (raw.includes('workbuddy')) return 'workbuddy';
   if (raw.includes('opencode')) return 'opencode';
   if (raw.includes('openclaw') || raw.includes('clawd') || raw.includes('moltbot') || raw.includes('moldbot')) return 'openclaw';
   return raw.replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || null;
@@ -242,6 +245,18 @@ function looksLikeUsageRow(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
   if (tokenValue(obj) === 0 && costValue(obj) === 0) return false;
   return Boolean(obj.client || obj.clients || obj.source || obj.platform || obj.agent || obj.tool || obj.model || obj.provider || obj.date || obj.name || detectSessionId(obj));
+}
+
+function freshInputRow(row, clientName) {
+  if (!CACHE_INCLUSIVE_CLIENTS.has(clientName)) return row;
+  const cacheRead = firstNumber(row, CACHE_READ_TOKEN_KEYS);
+  const cacheWrite = firstNumber(row, CACHE_WRITE_TOKEN_KEYS);
+  if (!cacheRead && !cacheWrite) return row;
+  const inputKey = INPUT_TOKEN_KEYS.find((key) => Object.prototype.hasOwnProperty.call(row, key));
+  if (!inputKey) return row;
+  const input = asNumber(row[inputKey]);
+  if (!input) return row;
+  return { ...row, [inputKey]: Math.max(0, input - cacheRead - cacheWrite) };
 }
 
 function collectUsageRows(node, rows) {
@@ -480,13 +495,14 @@ function extractUsageFromTokscale(json) {
     };
   }
   const period = emptyPeriod();
-  for (const row of rows) {
+  for (const rawRow of rows) {
+    const client = detectClient(rawRow);
+    const row = client ? freshInputRow(rawRow, client) : rawRow;
     const tokens = tokenValue(row);
     const cost = costValue(row);
     const cacheRead = Math.max(0, Math.round(firstNumber(row, CACHE_READ_TOKEN_KEYS)));
     const cacheWrite = Math.max(0, Math.round(firstNumber(row, CACHE_WRITE_TOKEN_KEYS)));
     const output = Math.max(0, Math.round(firstNumber(row, OUTPUT_TOKEN_KEYS)));
-    const client = detectClient(row);
     let model = detectModel(row);
     if (client === 'cursor' && model === 'auto') model = 'cursor-auto';
     period.totalTokens += Math.max(0, Math.round(tokens));

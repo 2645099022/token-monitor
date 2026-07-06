@@ -45,18 +45,18 @@ test('getDashboardHistory reads local history directly without a blocking collec
 
 test('dashboard history is gated by the historyEnabled setting', () => {
   const main = read('src', 'electron', 'main.js');
-  assert.match(main, /historyEnabled:\s*false/);
+  assert.match(main, /historyEnabled:\s*true/);
   assert.match(main, /historyEnabled:\s*parseBoolean\(patch\.historyEnabled[\s\S]*?,\s*false\)/);
   assert.match(main, /if \(settings\?\.historyEnabled === false\) return aggregateHistory\(\[\], 0\)/);
   assert.match(main, /historyEnabled:\s*settings\.historyEnabled !== false/);
 });
 
-test('agent history collection is opt-in by default', () => {
+test('agent history collection defaults to enabled, matching the widget', () => {
   const agent = read('src', 'agent', 'agent.js');
   const envExample = read('.env.example');
   const readme = read('README.md');
-  assert.match(agent, /TOKEN_MONITOR_HISTORY_ENABLED,\s*false\)/);
-  assert.match(envExample, /TOKEN_MONITOR_HISTORY_ENABLED=0/);
+  assert.match(agent, /TOKEN_MONITOR_HISTORY_ENABLED,\s*true\)/);
+  assert.doesNotMatch(envExample, /TOKEN_MONITOR_HISTORY_ENABLED=0/);
   assert.match(readme, /TOKEN_MONITOR_HISTORY_ENABLED=/);
 });
 

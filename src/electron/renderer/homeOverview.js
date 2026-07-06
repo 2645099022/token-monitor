@@ -152,9 +152,9 @@
         };
       })
       .filter((row) => row.value > 0)
-      .sort((a, b) => Number(b.isLocal) - Number(a.isLocal)
+      .sort((a, b) => b.value - a.value
+        || Number(b.isLocal) - Number(a.isLocal)
         || Number(a.isStale) - Number(b.isStale)
-        || b.value - a.value
         || a.index - b.index)
       .slice(0, Math.max(0, Number(limit) || 0))
       .map(({ index: _index, ...row }) => row);

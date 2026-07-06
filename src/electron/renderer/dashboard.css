@@ -97,8 +97,8 @@ body.flat { background: rgb(var(--glass-rgb)); }
 .heat.lvl-3 { fill: rgba(150, 210, 255, 0.8); }
 .heat.lvl-4 { fill: rgba(180, 230, 255, 1); }
 
-.dash-cards { flex: none; display: flex; overflow: hidden; border: 1px solid rgba(var(--overlay-rgb), 0.08); border-radius: 12px; background: rgba(var(--overlay-rgb), 0.03); }
-.dash-card { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 5px; padding: 14px 18px; border-right: 1px solid rgba(var(--overlay-rgb), 0.06); }
+.dash-cards { flex: none; display: grid; grid-template-columns: repeat(var(--stat-count, 8), minmax(0, 1fr)); overflow: hidden; border: 1px solid rgba(var(--overlay-rgb), 0.08); border-radius: 12px; background: rgba(var(--overlay-rgb), 0.03); }
+.dash-card { min-width: 0; display: flex; flex-direction: column; gap: 5px; padding: 14px clamp(12px, 1.35vw, 18px); border-right: 1px solid rgba(var(--overlay-rgb), 0.06); }
 .dash-card:last-child { border-right: none; }
 .dash-card-v { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dash-card-k { font-size: 10px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

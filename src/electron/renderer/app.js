@@ -1,9 +1,9 @@
 'use strict';
 
-const clientLabels = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes', gemini: 'Gemini', cursor: 'Cursor', opencode: 'OpenCode', openclaw: 'OpenClaw', antigravity: 'Antigravity', cline: 'Cline', kimi: 'Kimi', qwen: 'Qwen', grok: 'Grok Build', copilot: 'GitHub Copilot', pi: 'Pi', zed: 'Zed', kilocode: 'Kilo Code', micode: 'MiMo Code', zcode: 'ZCode', kiro: 'Kiro' };
+const clientLabels = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes', gemini: 'Gemini', cursor: 'Cursor', opencode: 'OpenCode', openclaw: 'OpenClaw', antigravity: 'Antigravity', cline: 'Cline', kimi: 'Kimi', qwen: 'Qwen', grok: 'Grok Build', copilot: 'GitHub Copilot', pi: 'Pi', zed: 'Zed', kilocode: 'Kilo Code', micode: 'MiMo Code', zcode: 'ZCode', kiro: 'Kiro', codebuddy: 'CodeBuddy', workbuddy: 'WorkBuddy' };
 const { clientColors, fallbackModelColors, modelVendorFor, modelColor } = window.TokenMonitorUsageCharts;
 const clientsWithIcon = new Set([
-  'claude', 'codex', 'gemini', 'cursor', 'opencode', 'openclaw', 'hermes', 'antigravity', 'cline', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro',
+  'claude', 'codex', 'gemini', 'cursor', 'opencode', 'openclaw', 'hermes', 'antigravity', 'cline', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro', 'codebuddy', 'workbuddy',
   'xai', 'deepseek', 'meta', 'mistral', 'qwen', 'moonshot', 'zai', 'cohere', 'xiaomi', 'minimax'
 ]);
 
@@ -55,7 +55,9 @@ const KNOWN_CLIENTS = [
   { id: 'kilocode', label: 'Kilo Code' },
   { id: 'micode', label: 'MiMo Code' },
   { id: 'zcode', label: 'ZCode' },
-  { id: 'kiro', label: 'Kiro' }
+  { id: 'kiro', label: 'Kiro' },
+  { id: 'codebuddy', label: 'CodeBuddy' },
+  { id: 'workbuddy', label: 'WorkBuddy' }
 ];
 const LIMIT_PROVIDERS = [
   { id: 'claude', label: 'Claude', settingsLabel: 'Claude Code' },
@@ -80,6 +82,7 @@ const viewDisplayPreferencesApi = window.TokenMonitorViewDisplayPreferences;
 const preferenceDragSortApi = window.TokenMonitorPreferenceDragSort;
 const homeOverviewApi = window.TokenMonitorHomeOverview;
 const homeModulePreferencesApi = window.TokenMonitorHomeModulePreferences;
+const { limitFillPercent, limitModeSuffix } = window.TokenMonitorLimitDisplayMode;
 const i18n = window.TokenMonitorI18n;
 const currencyApi = window.TokenMonitorCurrency;
 const sessionRowsApi = window.TokenMonitorSessionRows;
@@ -178,7 +181,7 @@ function normalizeInitialViewValue(value, allowed, fallback) {
   return allowed.has(raw) ? raw : fallback;
 }
 
-const state = { period: normalizeInitialViewValue(initialViewState.period, viewPeriodValues, 'today'), appUpdate: null, breakdown: normalizeInitialViewValue(initialViewState.breakdown, viewBreakdownValues, 'home'), viewSwitcherOpen: false, viewSwitcherHasOpened: false, resetCreditsTooltipHasOpened: false, resetCreditsTooltipActive: false, resetCreditsTooltipRenderPending: false, settings: null, stats: null, homeHistory: null, homeHistoryBusy: false, homeHistoryRequested: false, homeHistoryPreviewKey: '', homeActivityScrollLeft: null, homeActivityFollowEnd: true, homeActivityResizeObserver: null, serviceStatus: null, serviceStatusBusy: false, serviceProvidersExpanded: false, trendSettingsExpanded: false, homeSettingsExpanded: false, homeLimitSettingsExpanded: false, serviceStatusTicker: null, refreshTimer: null, refreshBusy: false, refreshFeedbackTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, streamFailure: null, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null, cursorAccount: { status: null, error: '' }, cursorAccountExpanded: false, codexAccountExpanded: false, codexAccountError: '', customPricingExpanded: false, opencodeProfileCount: 0, opencodeCookieExpanded: false, deepseekAccountExpanded: false, deepseekPendingCheckSince: 0, minimaxAccountExpanded: false, minimaxPendingCheckSince: 0, copilotAccountExpanded: false, copilotManualExpanded: false, copilotPendingCheckSince: 0, copilotSignInBusy: false, copilotSignInCancelable: false, copilotSignInFlowId: '', copilotAuthorizeMessage: '', copilotLoginStatus: '', copilotErrorMessage: '', floatingBubble: initialFloatingBubble, suppressInitialNumberAnimation: window.__TOKEN_MONITOR_SUPPRESS_INITIAL_NUMBER_ANIMATION__ === true, openSession: null, detailSort: 'time', recordingWindowShortcut: false, windowShortcutInvalid: false };
+const state = { period: normalizeInitialViewValue(initialViewState.period, viewPeriodValues, 'today'), appUpdate: null, breakdown: normalizeInitialViewValue(initialViewState.breakdown, viewBreakdownValues, 'home'), viewSwitcherOpen: false, viewSwitcherHasOpened: false, resetCreditsTooltipHasOpened: false, resetCreditsTooltipActive: false, resetCreditsTooltipRenderPending: false, settings: null, stats: null, homeHistory: null, homeHistoryBusy: false, homeHistoryRequested: false, homeHistoryPreviewKey: '', homeActivityScrollLeft: null, homeActivityFollowEnd: true, homeActivityResizeObserver: null, serviceStatus: null, serviceStatusBusy: false, serviceProvidersExpanded: false, trendSettingsExpanded: false, trendsActivating: false, homeSettingsExpanded: false, homeLimitSettingsExpanded: false, serviceStatusTicker: null, refreshTimer: null, refreshBusy: false, refreshFeedbackTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, streamFailure: null, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null, cursorAccount: { status: null, error: '' }, cursorAccountExpanded: false, codexAccountExpanded: false, codexAccountError: '', customPricingExpanded: false, opencodeProfileCount: 0, opencodeCookieExpanded: false, deepseekAccountExpanded: false, deepseekPendingCheckSince: 0, minimaxAccountExpanded: false, minimaxPendingCheckSince: 0, copilotAccountExpanded: false, copilotManualExpanded: false, copilotPendingCheckSince: 0, copilotSignInBusy: false, copilotSignInCancelable: false, copilotSignInFlowId: '', copilotAuthorizeMessage: '', copilotLoginStatus: '', copilotErrorMessage: '', floatingBubble: initialFloatingBubble, suppressInitialNumberAnimation: window.__TOKEN_MONITOR_SUPPRESS_INITIAL_NUMBER_ANIMATION__ === true, openSession: null, detailSort: 'time', recordingWindowShortcut: false, windowShortcutInvalid: false };
 state.settingsSections = Object.fromEntries(SETTINGS_SECTION_IDS.map((id) => [id, false]));
 const defaultAppearance = { glassOpacity: 68, glassBlur: 32, zoomFactor: 1, systemGlass: true, showLiveDot: true, showToolIcons: true, titleIconOnly: false, settingsInTitlebar: false };
 let preferenceDrag = null;
@@ -186,7 +189,7 @@ let viewSwitcherLongPressTimer = null;
 let viewSwitcherLongPressTriggered = false;
 let viewSwitcherHoverCloseTimer = null;
 const els = {
-  shell: document.querySelector('.shell'), status: document.getElementById('status'), liveDot: document.getElementById('liveDot'), totalTokens: document.getElementById('totalTokens'), cost: document.getElementById('cost'), homePanel: document.getElementById('homePanel'), breakdown: document.getElementById('breakdown'), serviceStatusPanel: document.getElementById('serviceStatusPanel'), limitsPanel: document.getElementById('limitsPanel'), trendsPanel: document.getElementById('trendsPanel'), viewSwitcher: document.getElementById('viewSwitcher'), pinButton: document.getElementById('pinButton'), settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'), languageInput: document.getElementById('languageInput'), currencyInput: document.getElementById('currencyInput'), currencyRateRow: document.getElementById('currencyRateRow'), currencyRateModeAuto: document.getElementById('currencyRateModeAuto'), currencyRateModeManual: document.getElementById('currencyRateModeManual'), currencyRateManualField: document.getElementById('currencyRateManualField'), currencyRateOverrideInput: document.getElementById('currencyRateOverrideInput'), currencyRateStatus: document.getElementById('currencyRateStatus'), hubUrlInput: document.getElementById('hubUrlInput'), secretInput: document.getElementById('secretInput'), deviceIdInput: document.getElementById('deviceIdInput'), limitProviderCheckboxes: document.getElementById('limitProviderCheckboxes'), limitsRefreshInput: document.getElementById('limitsRefreshInput'), showLimitSourceInput: document.getElementById('showLimitSourceInput'), showActiveAccountInput: document.getElementById('showActiveAccountInput'), systemGlassInput: document.getElementById('systemGlassInput'), liveDotInput: document.getElementById('liveDotInput'), toolIconsInput: document.getElementById('toolIconsInput'), floatingBubbleInput: document.getElementById('floatingBubbleInput'), floatingBubbleTriggerInput: document.getElementById('floatingBubbleTriggerInput'), floatingBubbleTriggerRow: document.getElementById('floatingBubbleTriggerRow'), floatingBubbleContentInput: document.getElementById('floatingBubbleContentInput'), floatingBubbleContentRow: document.getElementById('floatingBubbleContentRow'), floatingBubbleContent: document.getElementById('floatingBubbleContent'), discordRpcInput: document.getElementById('discordRpcInput'), windowBehaviorInput: document.getElementById('windowBehaviorInput'), showTrayIconInput: document.getElementById('showTrayIconInput'), trayModeInput: document.getElementById('trayModeInput'), trayContentInput: document.getElementById('trayContentInput'), windowToggleShortcutValue: document.getElementById('windowToggleShortcutValue'), windowToggleShortcutRecordButton: document.getElementById('windowToggleShortcutRecordButton'), windowToggleShortcutClearButton: document.getElementById('windowToggleShortcutClearButton'), windowToggleShortcutNote: document.getElementById('windowToggleShortcutNote'), glassInput: document.getElementById('glassInput'), blurInput: document.getElementById('blurInput'), zoomInput: document.getElementById('zoomInput'), resetGlassButton: document.getElementById('resetGlassButton'), resetDepthButton: document.getElementById('resetDepthButton'), resetZoomButton: document.getElementById('resetZoomButton'), saveSettingsButton: document.getElementById('saveSettingsButton'), clientDisplayList: document.getElementById('clientDisplayList'), wslScanInput: document.getElementById('wslScanInput'), wslScanRow: document.getElementById('wslScanRow'), wslPanel: document.getElementById('wslPanel'), openConfigButton: document.getElementById('openConfigButton'), refreshButton: document.getElementById('refreshButton'), minButton: document.getElementById('minButton'), closeButton: document.getElementById('closeButton'), floatingBubbleTab: document.getElementById('floatingBubbleTab')
+  shell: document.querySelector('.shell'), status: document.getElementById('status'), liveDot: document.getElementById('liveDot'), totalTokens: document.getElementById('totalTokens'), cost: document.getElementById('cost'), homePanel: document.getElementById('homePanel'), breakdown: document.getElementById('breakdown'), serviceStatusPanel: document.getElementById('serviceStatusPanel'), limitsPanel: document.getElementById('limitsPanel'), trendsPanel: document.getElementById('trendsPanel'), viewSwitcher: document.getElementById('viewSwitcher'), pinButton: document.getElementById('pinButton'), settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'), languageInput: document.getElementById('languageInput'), currencyInput: document.getElementById('currencyInput'), currencyRateRow: document.getElementById('currencyRateRow'), currencyRateModeAuto: document.getElementById('currencyRateModeAuto'), currencyRateModeManual: document.getElementById('currencyRateModeManual'), currencyRateManualField: document.getElementById('currencyRateManualField'), currencyRateOverrideInput: document.getElementById('currencyRateOverrideInput'), currencyRateStatus: document.getElementById('currencyRateStatus'), hubUrlInput: document.getElementById('hubUrlInput'), secretInput: document.getElementById('secretInput'), deviceIdInput: document.getElementById('deviceIdInput'), limitProviderCheckboxes: document.getElementById('limitProviderCheckboxes'), limitsRefreshInput: document.getElementById('limitsRefreshInput'), showLimitSourceInput: document.getElementById('showLimitSourceInput'), showActiveAccountInput: document.getElementById('showActiveAccountInput'), showLimitUsedInput: document.getElementById('showLimitUsedInput'), systemGlassInput: document.getElementById('systemGlassInput'), liveDotInput: document.getElementById('liveDotInput'), toolIconsInput: document.getElementById('toolIconsInput'), floatingBubbleInput: document.getElementById('floatingBubbleInput'), floatingBubbleTriggerInput: document.getElementById('floatingBubbleTriggerInput'), floatingBubbleTriggerRow: document.getElementById('floatingBubbleTriggerRow'), floatingBubbleContentInput: document.getElementById('floatingBubbleContentInput'), floatingBubbleContentRow: document.getElementById('floatingBubbleContentRow'), floatingBubbleContent: document.getElementById('floatingBubbleContent'), discordRpcInput: document.getElementById('discordRpcInput'), windowBehaviorInput: document.getElementById('windowBehaviorInput'), showTrayIconInput: document.getElementById('showTrayIconInput'), trayModeInput: document.getElementById('trayModeInput'), trayContentInput: document.getElementById('trayContentInput'), windowToggleShortcutValue: document.getElementById('windowToggleShortcutValue'), windowToggleShortcutRecordButton: document.getElementById('windowToggleShortcutRecordButton'), windowToggleShortcutClearButton: document.getElementById('windowToggleShortcutClearButton'), windowToggleShortcutNote: document.getElementById('windowToggleShortcutNote'), glassInput: document.getElementById('glassInput'), blurInput: document.getElementById('blurInput'), zoomInput: document.getElementById('zoomInput'), resetGlassButton: document.getElementById('resetGlassButton'), resetDepthButton: document.getElementById('resetDepthButton'), resetZoomButton: document.getElementById('resetZoomButton'), saveSettingsButton: document.getElementById('saveSettingsButton'), clientDisplayList: document.getElementById('clientDisplayList'), wslScanInput: document.getElementById('wslScanInput'), wslScanRow: document.getElementById('wslScanRow'), wslPanel: document.getElementById('wslPanel'), openConfigButton: document.getElementById('openConfigButton'), exportAutoInput: document.getElementById('exportAutoInput'), exportAutoDetails: document.getElementById('exportAutoDetails'), exportAutoStatus: document.getElementById('exportAutoStatus'), exportDirLabel: document.getElementById('exportDirLabel'), exportPickDirButton: document.getElementById('exportPickDirButton'), exportIntervalInput: document.getElementById('exportIntervalInput'), exportNowButton: document.getElementById('exportNowButton'), refreshButton: document.getElementById('refreshButton'), minButton: document.getElementById('minButton'), closeButton: document.getElementById('closeButton'), floatingBubbleTab: document.getElementById('floatingBubbleTab')
 };
 Object.assign(els, {
   floatingBubbleOptions: document.getElementById('floatingBubbleOptions'),
@@ -493,6 +496,14 @@ function formatDuration(ms) {
   if (hours > 0) return `${hours}h ${minutes}m`;
   if (minutes > 0) return `${minutes}m`;
   return '<1m';
+}
+function formatActiveDuration(ms) {
+  const totalMinutes = Math.max(0, Math.round(Number(ms || 0) / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return '0m';
 }
 function formatUpdatedAge(value) {
   const date = value ? new Date(value) : null;
@@ -1182,8 +1193,8 @@ function formatMoney(value, currency) {
   return `${symbol}${number.toFixed(2)}`;
 }
 
-function formatLimitWindowValue(window, fillPercent, hasPercent) {
-  if (hasPercent) return `${formatPercent(fillPercent)} left`;
+function formatLimitWindowValue(window, fillPercent, hasPercent, showUsed) {
+  if (hasPercent) return `${formatPercent(fillPercent)} ${limitModeSuffix(showUsed)}`;
   if (!window) return '--';
   const remaining = Number(window?.remaining);
   if (Number.isFinite(remaining)) {
@@ -1194,11 +1205,12 @@ function formatLimitWindowValue(window, fillPercent, hasPercent) {
   return '';
 }
 
-function formatHomeLimitWindowValue(window) {
+function formatHomeLimitWindowValue(window, showUsed) {
   if (window?.kind === 'balance') {
     return `${formatMoney(window.amount, window.currency)} left`;
   }
-  return `${formatPercent(window.remainingPercent)} left`;
+  const percent = limitFillPercent(window?.remainingPercent, window?.usedPercent, showUsed);
+  return `${formatPercent(percent)} ${limitModeSuffix(showUsed)}`;
 }
 
 function balanceRemainingWindow(balance) {
@@ -1214,11 +1226,11 @@ function limitWindowNode(label, window, color, tone = 1, valueOverride = null, d
   const used = Number(window?.usedPercent);
   const showMeter = window?.showMeter !== false;
   const hasPercent = showMeter && (Number.isFinite(remaining) || Number.isFinite(used));
-  const fillPercent = Number.isFinite(remaining)
-    ? remaining
-    : Number.isFinite(used)
-      ? 100 - used
-      : 0;
+  // valueOverride windows carry a fixed (money/amount) label — keep their meter
+  // on "remaining" so bar and label stay consistent; only percent-labelled
+  // windows honour the used-mode flip.
+  const showUsed = Boolean(state.settings?.showLimitUsed) && valueOverride == null;
+  const fillPercent = limitFillPercent(remaining, used, showUsed);
   const safePercent = Math.max(0, Math.min(100, fillPercent));
   const item = document.createElement('div');
   item.className = 'limit-window';
@@ -1227,7 +1239,7 @@ function limitWindowNode(label, window, color, tone = 1, valueOverride = null, d
   const name = document.createElement('span');
   name.textContent = window?.label || label;
   const value = document.createElement('span');
-  value.textContent = valueOverride != null ? valueOverride : formatLimitWindowValue(window, fillPercent, hasPercent);
+  value.textContent = valueOverride != null ? valueOverride : formatLimitWindowValue(window, fillPercent, hasPercent, showUsed);
   text.append(name, value);
   const meter = document.createElement('div');
   meter.className = 'limit-meter';
@@ -1447,6 +1459,21 @@ function renderProviderWindows(provider, color) {
         node.classList.add('limit-window-wide');
         windows.append(node);
       }
+    }
+  } else if (provider.provider === 'claude') {
+    // Claude usually shows session + one all-models weekly, but can carry a second
+    // model-scoped weekly (the temporary "Fable only" promo cap). Render every
+    // weekly the response actually has, and nothing when a bucket is absent — no
+    // empty placeholder — so the scoped bar appears only while the promo is live.
+    const session = windowForKind(provider, 'session');
+    if (session) windows.append(limitWindowNode(session.label || 'Session', session, color, 0.95));
+    for (const weekly of windowsForKind(provider, 'weekly')) {
+      const node = limitWindowNode(weekly.label || 'Weekly', weekly, color, 0.68);
+      // The all-models weekly pairs with Session in the two-column grid; a
+      // model-scoped weekly (the "Fable only" promo cap) has no partner, so span
+      // the full row instead of leaving a half-empty cell.
+      if (weekly.label) node.classList.add('limit-window-wide');
+      windows.append(node);
     }
   } else {
     // Default: render only the windows the provider actually has. Providers
@@ -1901,7 +1928,7 @@ function renderTrends() {
   const stats = [
     [t('trends.activeDays'), formatNumber(summary.activeDays)],
     [t('trends.currentStreak'), formatNumber(summary.currentStreak)],
-    [t('trends.longestStreak'), formatNumber(summary.longestStreak)],
+    [t('trends.activeTime'), formatActiveDuration(summary.activeTimeMs)],
     [t('trends.peakDay'), formatCompact(summary.peakDayTokens)]
   ];
   const statsHtml = stats
@@ -1930,6 +1957,19 @@ function openHomeSettings() {
   syncSettingsForm();
   requestAnimationFrame(() => {
     document.getElementById('homeSettingsContainer')?.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function openTrendSettings() {
+  if (!els.settingsPanel) return;
+  els.settingsPanel.classList.remove('hidden');
+  els.shell.classList.add('settings-open');
+  els.shell.style.transform = 'translateZ(0)';
+  setSettingsSectionExpanded('main', true);
+  state.trendSettingsExpanded = true;
+  syncSettingsForm();
+  requestAnimationFrame(() => {
+    document.getElementById('trendSettingsContainer')?.scrollIntoView({ block: 'nearest' });
   });
 }
 
@@ -2149,6 +2189,7 @@ function homeModuleShell(kind, title, viewId, meta = '') {
     if (setBreakdown(viewId)) render();
   });
   module.addEventListener('keydown', (event) => {
+    if (event.target !== module) return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
     if (setBreakdown(viewId)) render();
@@ -2250,7 +2291,7 @@ function renderHomeLimitModule() {
       label.textContent = homeLimitWindowLabel(window);
       const value = document.createElement('span');
       value.className = 'home-list-value';
-      value.textContent = window.value || formatHomeLimitWindowValue(window);
+      value.textContent = window.value || formatHomeLimitWindowValue(window, Boolean(state.settings?.showLimitUsed));
       line.append(label, value);
       const resetAt = formatReset(window.resetsAt);
       const resetText = document.createElement('span');
@@ -2453,14 +2494,29 @@ function setupHomeActivityScroller(scroller) {
 
 function renderHomeTrendsModule() {
   const charts = window.TokenMonitorUsageCharts;
+  const historyEnabled = state.settings?.historyEnabled !== false;
   const preview = state.stats?.historyPreview || { daily: [] };
   const history = homeOverviewApi.pickHomeHistory(state.homeHistory, preview);
   const points = history.daily || [];
-  if (points.length === 0) {
+  if (!historyEnabled || points.length === 0) {
     const { module, body } = homeModuleShell('trends', t('home.activity'), 'trends');
     const empty = document.createElement('div');
     empty.className = 'home-module-empty';
-    empty.textContent = t('home.noHistory');
+    if (historyEnabled) {
+      empty.textContent = state.trendsActivating ? t('home.historyLoading') : t('home.noHistory');
+    } else {
+      const text = document.createElement('span');
+      text.textContent = t('home.historyDisabled');
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.className = 'home-module-empty-action';
+      action.textContent = t('home.enableHistory');
+      action.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openTrendSettings();
+      });
+      empty.append(text, action);
+    }
     body.append(empty);
     return module;
   }
@@ -3535,6 +3591,7 @@ function syncSettingsForm() {
   els.limitsRefreshInput.value = String(LIMIT_REFRESH_OPTIONS.includes(Number(state.settings.limitsRefreshMs)) ? state.settings.limitsRefreshMs : 300000);
   els.showLimitSourceInput.checked = Boolean(state.settings.showLimitSource);
   els.showActiveAccountInput.checked = Boolean(state.settings.showActiveAccount);
+  els.showLimitUsedInput.value = state.settings.showLimitUsed ? 'used' : 'remaining';
   if (els.collectionCadenceInput) {
     const value = Number(state.settings.collectionIntervalMs);
     const allowed = [300000, 900000, 1800000];
@@ -3546,6 +3603,20 @@ function syncSettingsForm() {
     }
   }
   if (els.wslScanInput) els.wslScanInput.checked = state.settings.wslScanEnabled !== false;
+  const exportAutoOn = Boolean(state.settings.exportAutoEnabled);
+  const exportDir = state.settings.exportDir || '';
+  if (els.exportAutoInput) els.exportAutoInput.checked = exportAutoOn;
+  if (els.exportAutoDetails) els.exportAutoDetails.classList.toggle('hidden', !exportAutoOn);
+  if (els.exportIntervalInput) els.exportIntervalInput.value = String(state.settings.exportIntervalMs || 60000);
+  if (els.exportDirLabel) els.exportDirLabel.textContent = exportDir || t('settings.export.noFolder');
+  if (els.exportAutoStatus) {
+    const exportActive = exportAutoOn && Boolean(exportDir);
+    els.exportAutoStatus.classList.toggle('hidden', !exportAutoOn);
+    els.exportAutoStatus.classList.toggle('is-active', exportActive);
+    els.exportAutoStatus.textContent = exportActive
+      ? t('settings.export.statusActive')
+      : t('settings.export.statusNeedsFolder');
+  }
   renderWslPanel();
   els.systemGlassInput.checked = state.settings.systemGlass !== false;
   els.liveDotInput.checked = state.settings.showLiveDot !== false;
@@ -4120,14 +4191,39 @@ function renderTrendSettingsList() {
   const input = document.createElement('input');
   input.type = 'checkbox';
   input.checked = state.settings?.historyEnabled !== false;
-  input.addEventListener('change', async () => {
-    await setTrendEnabled(input.checked);
-    await refreshStats({ force: true });
-  });
   const text = document.createElement('span');
   text.textContent = t('settings.views.enableTrend');
   label.append(input, text);
   wrap.append(label);
+
+  const HISTORY_INTERVAL_OPTIONS = [300000, 600000, 900000, 1800000, 3600000];
+  const intervalRow = document.createElement('label');
+  intervalRow.className = 'status-provider-interval';
+  intervalRow.classList.toggle('hidden', !input.checked);
+  const intervalLabel = document.createElement('span');
+  intervalLabel.textContent = t('settings.views.trendInterval');
+  const select = document.createElement('select');
+  select.id = 'trendIntervalSelect';
+  const currentMs = HISTORY_INTERVAL_OPTIONS.includes(Number(state.settings?.historyIntervalMs)) ? Number(state.settings.historyIntervalMs) : 900000;
+  for (const ms of HISTORY_INTERVAL_OPTIONS) {
+    const option = document.createElement('option');
+    option.value = String(ms);
+    option.textContent = t('settings.views.trendIntervalMinutes', { n: ms / 60000 });
+    if (ms === currentMs) option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener('change', () => void saveSettings({ historyIntervalMs: Number(select.value) }));
+  intervalRow.append(intervalLabel, select);
+  wrap.append(intervalRow);
+
+  input.addEventListener('change', async () => {
+    const enabling = input.checked;
+    intervalRow.classList.toggle('hidden', !enabling);
+    await setTrendEnabled(enabling);
+    state.trendsActivating = enabling;
+    renderHomeIfVisible();
+  });
+
   return wrap;
 }
 
@@ -4903,6 +4999,9 @@ els.showLimitSourceInput.addEventListener('change', async () => {
 els.showActiveAccountInput.addEventListener('change', async () => {
   await saveSettings({ showActiveAccount: els.showActiveAccountInput.checked });
 });
+els.showLimitUsedInput.addEventListener('change', async () => {
+  await saveSettings({ showLimitUsed: els.showLimitUsedInput.value === 'used' });
+});
 els.collectionCadenceInput?.addEventListener('change', async () => {
   const value = els.collectionCadenceInput.value;
   await saveSettings({
@@ -4912,6 +5011,31 @@ els.collectionCadenceInput?.addEventListener('change', async () => {
 });
 els.wslScanInput?.addEventListener('change', async () => {
   await saveSettings({ wslScanEnabled: els.wslScanInput.checked });
+});
+els.exportAutoInput?.addEventListener('change', async () => {
+  await saveSettings({ exportAutoEnabled: els.exportAutoInput.checked });
+});
+els.exportPickDirButton?.addEventListener('click', async () => {
+  const result = await window.tokenMonitor.pickExportDir();
+  if (result?.ok) await saveSettings({ exportDir: result.dir });
+});
+els.exportIntervalInput?.addEventListener('change', async () => {
+  await saveSettings({ exportIntervalMs: Number(els.exportIntervalInput.value) });
+});
+els.exportNowButton?.addEventListener('click', async () => {
+  els.exportNowButton.disabled = true;
+  try {
+    const result = await window.tokenMonitor.exportNow();
+    if (result?.ok) {
+      els.exportNowButton.textContent = t('settings.export.manualDone');
+      setTimeout(() => { els.exportNowButton.textContent = t('settings.export.manualNow'); }, 1600);
+    } else if (result && !result.canceled) {
+      els.exportNowButton.textContent = t('settings.export.manualFailed');
+      setTimeout(() => { els.exportNowButton.textContent = t('settings.export.manualNow'); }, 1600);
+    }
+  } finally {
+    els.exportNowButton.disabled = false;
+  }
 });
 els.resetClientDisplayOrderButton?.addEventListener('click', resetClientDisplayOrder);
 els.showAllClientsButton?.addEventListener('click', showAllClients);
@@ -5075,6 +5199,10 @@ window.tokenMonitor.onStatsPush?.((payload) => {
     state.streamFailure = null;
     if (payload.data?.mode) state.mode = payload.data.mode;
     state.stats = payload.data.stats;
+    // Progressive mid-tick pushes never carry a fresh history scan (see
+    // AGENTS.md collector notes), so only the final push can retire the
+    // "just turned trends on" loading state without a flash back to empty.
+    if (payload.data?.reason !== 'progress') state.trendsActivating = false;
   } else {
     return;
   }
@@ -5160,7 +5288,7 @@ function renderBarsIcon(stats, height = 44, picker = pickWorstProvider, colors =
     roundedRectPath(ctx, layout.barsX, y, layout.barsWidth, layout.barHeight, layout.radius);
     ctx.fillStyle = trackColor;
     ctx.fill();
-    const fillW = trayBarFillWidth(percent, layout.barsWidth);
+    const fillW = trayBarFillWidth(limitFillPercent(percent, undefined, Boolean(state.settings?.showLimitUsed)), layout.barsWidth);
     if (!fillW) return;
     // Clip-to-track + flat fillRect: a rounded rect's tiny corners get lost when the icon is downscaled into the menubar.
     ctx.save();
@@ -5226,7 +5354,7 @@ function renderAllSessionsIcon(stats, height = 44, configOrder, colors = {}, opt
     roundedRectPath(ctx, layout.barsX, y, layout.barsWidth, layout.barHeight, layout.radius);
     ctx.fillStyle = trackColor;
     ctx.fill();
-    const fillW = trayBarFillWidth(percent, layout.barsWidth);
+    const fillW = trayBarFillWidth(limitFillPercent(percent, undefined, Boolean(state.settings?.showLimitUsed)), layout.barsWidth);
     if (!fillW) return;
     ctx.save();
     roundedRectPath(ctx, layout.barsX, y, layout.barsWidth, layout.barHeight, layout.radius);

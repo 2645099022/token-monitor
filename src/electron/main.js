@@ -4,17 +4,18 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
-const { app, BrowserWindow, clipboard, globalShortcut, ipcMain, nativeImage, screen, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, screen, session, shell } = require('electron');
 const { defaultDeviceId, generateHubSecret, lanIpv4Addresses, loadDotEnv, pidFilePath, sharedDataDir } = require('../shared/config');
 const { installSafeStdout } = require('../shared/safeStdio');
 const { appVersion } = require('../shared/appVersion');
+const { exportFileSet, exportSignature, EXPORT_FILENAMES } = require('../shared/exporter');
 
 // Install EPIPE suppression before anything that might log. Without this,
 // a closed parent pipe turns the next log call into an unhandled 'error'
 // event and Electron pops a "JavaScript error in the main process" dialog.
 installSafeStdout();
 const { DEFAULT_CLIENTS, KNOWN_CLIENTS, clientsCsvForSetting } = require('../shared/clientTracking');
-const { startCollector, lookupModelPricing } = require('../shared/collector');
+const { startCollector, lookupModelPricing, normalizeHistoryIntervalMs } = require('../shared/collector');
 const { customPricingPath } = require('../shared/tokscaleConfig');
 const { applyCustomPricing, normalizeCustomPricingSetting } = require('../shared/tokscaleCustomPricing');
 const { createHub } = require('../hub/server');
@@ -26,6 +27,7 @@ const {
   normalizeHiddenClients,
   normalizePinnedClients
 } = require('./renderer/clientDisplayPreferences');
+const { LANGUAGE_OPTIONS } = require('./renderer/i18n');
 const {
   defaultViewDisplayPreferences,
   normalizeHiddenViews,
@@ -43,7 +45,7 @@ const {
   getTokscaleStatus,
   resetToBundled
 } = require('../shared/tokscaleUpdater');
-const { checkLatestRelease } = require('../shared/appUpdater');
+const { checkLatestRelease, shouldSkipAppUpdateCheck } = require('../shared/appUpdater');
 const cursorAuth = require('../shared/cursorAuth');
 const cursorProbe = require('../shared/cursorProbe');
 const opencodeWeb = require('../shared/opencodeWeb');
@@ -120,7 +122,7 @@ const CSP_HEADER = [
 ].join('; ');
 const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon']);
 const HUB_MODE_VALUES = new Set(['local', 'client', 'host']);
-const LANGUAGE_VALUES = new Set(['auto', 'en', 'zh-TW', 'zh-CN']);
+const LANGUAGE_VALUES = new Set(LANGUAGE_OPTIONS.map((option) => option.value));
 const COLLECTION_MODE_VALUES = new Set(['live', 'interval']);
 const COLLECTION_INTERVAL_OPTIONS = [5 * 60 * 1000, 15 * 60 * 1000, 30 * 60 * 1000];
 const DEFAULT_COLLECTION_INTERVAL_MS = 5 * 60 * 1000;
@@ -184,8 +186,12 @@ function defaultSettings() {
     hiddenViews: defaultViewDisplayPreferences().hiddenViews,
     homeModuleOrder: defaultHomeModulePreferences().homeModuleOrder,
     hiddenHomeModules: defaultHomeModulePreferences().hiddenHomeModules,
-    historyEnabled: false,
+    historyEnabled: true,
+    historyIntervalMs: normalizeHistoryIntervalMs(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS),
     wslScanEnabled: parseBoolean(process.env.TOKEN_MONITOR_WSL_SCAN, true),
+    exportAutoEnabled: false,
+    exportDir: '',
+    exportIntervalMs: 60 * 1000,
     collectionMode: 'live',
     collectionIntervalMs: 5 * 60 * 1000,
     serviceProviderDisplayOrder: '',
@@ -201,6 +207,7 @@ function defaultSettings() {
     hiddenHomeLimitProviders: '',
     limitsRefreshMs: normalizeLimitsRefreshMs(process.env.TOKEN_MONITOR_LIMITS_REFRESH_MS),
     showLimitSource: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_SOURCE, false),
+    showLimitUsed: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_USED, false),
     showActiveAccount: parseBoolean(process.env.TOKEN_MONITOR_SHOW_ACTIVE_ACCOUNT, false),
     windowBounds: null,
     zoomFactor: 1,
@@ -1089,6 +1096,15 @@ let syncCollectorHandle = null;
 let lastCollectedDevice = null;
 let tray = null;
 let latestStats = null;
+const DEFAULT_EXPORT_INTERVAL_MS = 60 * 1000;
+let lastExportAt = 0;
+let lastAutoExport = { dir: null, signature: null };
+
+// User-chosen auto-export throttle (Settings), clamped to a sane floor.
+function exportIntervalMs() {
+  const v = Number(settings.exportIntervalMs);
+  return Number.isFinite(v) && v >= 1000 ? v : DEFAULT_EXPORT_INTERVAL_MS;
+}
 let suppressNextBlurHide = false;
 const providerTrayIcons = {};
 let registeredWindowToggleShortcut = '';
@@ -1240,7 +1256,7 @@ function startSyncCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
-    historyIntervalMs: Number(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS || 15 * 60 * 1000),
+    historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
     watchDebounceMs: 1500,
     limitsEnabled: settings.limitsEnabled !== false,
@@ -1283,7 +1299,7 @@ function startHostCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
-    historyIntervalMs: Number(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS || 15 * 60 * 1000),
+    historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
     watchDebounceMs: 1500,
     limitsEnabled: settings.limitsEnabled !== false,
@@ -1363,6 +1379,11 @@ function sendPush(payload) {
     injectLocalDeviceStatus(payload.data.stats);
     latestStats = payload.data.stats;
     updateTrayDisplay();
+    if (settings.exportAutoEnabled && settings.exportDir && Date.now() - lastExportAt >= exportIntervalMs()) {
+      lastExportAt = Date.now();
+      writeExportTo(settings.exportDir, payload.data.stats.periods, { skipUnchanged: true })
+        .catch((err) => console.warn(`[export] auto-export failed: ${err.message}`));
+    }
   }
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('stats:push', payload); } catch (_) {}
@@ -1454,7 +1475,7 @@ function startLocalCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
-    historyIntervalMs: Number(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS || 15 * 60 * 1000),
+    historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
     watchDebounceMs: 1500,
     limitsEnabled: settings.limitsEnabled !== false,
@@ -1881,6 +1902,55 @@ function requestAppQuit() {
   else app.exit(0);
 }
 
+// Write the export file set (JSON + CSVs) into `dir`, atomically (temp + rename)
+// so a synced vault / iCloud never reads a half-written file. Pulls history
+// itself; callers pass only `periods` (privacy: devices/limits never enter).
+async function writeExportTo(dir, periods, options = {}) {
+  if (!dir) return { ok: false, reason: 'no-dir' };
+  const history = await getDashboardHistory().catch(() => null);
+  // History unavailable (e.g. a transient hub fetch failure) is NOT the same as
+  // "no history": writing a snapshot-only set would emit empty time-series JSON
+  // AND the orphan cleanup below would delete an existing daily.csv. Never write a
+  // destructive partial — skip and report, so auto-export retries next tick and
+  // manual export can surface the failure instead of silently losing data.
+  if (!history) return { ok: false, reason: 'history-unavailable' };
+  // Auto-export skips rewriting a synced folder when the data is unchanged
+  // (keyed by dir so pointing at a fresh folder always writes). Manual export
+  // never skips. Signature compares inputs, not files, to ignore the volatile
+  // generatedAt in the JSON.
+  let signature = null;
+  if (options.skipUnchanged) {
+    signature = exportSignature(periods || {}, history);
+    if (dir === lastAutoExport.dir && signature === lastAutoExport.signature) return { ok: true, skipped: true };
+  }
+  const files = exportFileSet({
+    periods: periods || {},
+    history,
+    meta: { generatedAt: new Date().toISOString(), app: { name: 'token-monitor', version: appVersion() } }
+  });
+  await fs.promises.mkdir(dir, { recursive: true });
+  // Per-call token so a concurrent auto + manual export to the same folder never
+  // share a temp filename (which would break one side's rename or write half an update).
+  const runToken = crypto.randomUUID();
+  const written = new Set();
+  for (const file of files) {
+    const dest = path.join(dir, file.name);
+    const tmp = `${dest}.tmp-${process.pid}-${runToken}`;
+    await fs.promises.writeFile(tmp, file.contents);
+    await fs.promises.rename(tmp, dest);
+    written.add(file.name);
+  }
+  // Remove orphaned generated files (e.g. a stale daily.csv once history empties)
+  // so consumers never read outdated data.
+  for (const name of EXPORT_FILENAMES) {
+    if (!written.has(name)) await fs.promises.rm(path.join(dir, name), { force: true });
+  }
+  // Record the signature only after a fully successful write, so a failed write
+  // retries next tick instead of being skipped forever.
+  if (options.skipUnchanged) lastAutoExport = { dir, signature };
+  return { ok: true };
+}
+
 async function fetchStats(options = {}) {
   const force = Boolean(options?.force);
   const tickOptions = force ? { forceLimits: true } : {};
@@ -1980,9 +2050,9 @@ async function downloadTokscaleFromNpm() {
   }
 }
 
-const APP_UPDATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 let appUpdateCheckInFlight = false;
 let appUpdateLastError = null;
+let appUpdateBackgroundTimer = null;
 
 function deriveAppUpdateState() {
   const block = settings?.appUpdate || {};
@@ -2012,11 +2082,14 @@ function sendAppUpdatePush() {
 async function runAppUpdateCheck({ force = false } = {}) {
   if (appUpdateCheckInFlight) return deriveAppUpdateState();
   const block = settings?.appUpdate || {};
-  if (!force && block.lastCheckedAt) {
-    const last = Date.parse(block.lastCheckedAt);
-    if (Number.isFinite(last) && Date.now() - last < APP_UPDATE_COOLDOWN_MS) {
-      return deriveAppUpdateState();
-    }
+  if (shouldSkipAppUpdateCheck({
+    force,
+    lastCheckedAt: block.lastCheckedAt,
+    latest: block.lastKnownLatest,
+    dismissedVersion: block.dismissedVersion,
+    currentVersion: app.getVersion()
+  })) {
+    return deriveAppUpdateState();
   }
   appUpdateCheckInFlight = true;
   appUpdateLastError = null;
@@ -2047,6 +2120,12 @@ async function runAppUpdateCheck({ force = false } = {}) {
 
 function maybeRunBackgroundUpdateCheck() {
   runAppUpdateCheck({ force: false }).catch(() => {});
+}
+
+function startAppUpdateBackgroundChecks() {
+  if (appUpdateBackgroundTimer) return;
+  appUpdateBackgroundTimer = setInterval(maybeRunBackgroundUpdateCheck, 60 * 60 * 1000);
+  appUpdateBackgroundTimer.unref?.();
 }
 
 function dismissAppUpdateVersion(version) {
@@ -2419,6 +2498,7 @@ app.whenReady().then(() => {
     const previousLimitProviders = settings.limitProviders;
     const previousLimitsRefreshMs = settings.limitsRefreshMs;
     const previousHistoryEnabled = settings.historyEnabled;
+    const previousHistoryIntervalMs = settings.historyIntervalMs;
     const previousWslScanEnabled = settings.wslScanEnabled;
     const previousCollectionMode = settings.collectionMode;
     const previousCollectionIntervalMs = settings.collectionIntervalMs;
@@ -2474,6 +2554,7 @@ app.whenReady().then(() => {
       homeLimitProviderOrder: patch.homeLimitProviderOrder !== undefined ? migrateHomeLimitProviderOrder(patch.homeLimitProviderOrder) : (settings.homeLimitProviderOrder || ''),
       hiddenHomeLimitProviders: patch.hiddenHomeLimitProviders !== undefined ? normalizeHiddenLimitProviders(patch.hiddenHomeLimitProviders) : normalizeHiddenLimitProviders(settings.hiddenHomeLimitProviders),
       historyEnabled: parseBoolean(patch.historyEnabled ?? settings.historyEnabled, false),
+      historyIntervalMs: normalizeHistoryIntervalMs(patch.historyIntervalMs ?? settings.historyIntervalMs),
       wslScanEnabled: parseBoolean(patch.wslScanEnabled ?? settings.wslScanEnabled, true),
       collectionMode: normalizeCollectionMode(patch.collectionMode ?? settings.collectionMode),
       collectionIntervalMs: normalizeCollectionIntervalMs(patch.collectionIntervalMs ?? settings.collectionIntervalMs),
@@ -2482,6 +2563,7 @@ app.whenReady().then(() => {
       serviceStatusRefreshMs: normalizeServiceStatusRefreshMs(patch.serviceStatusRefreshMs ?? settings.serviceStatusRefreshMs),
       limitsRefreshMs: normalizeLimitsRefreshMs(patch.limitsRefreshMs ?? settings.limitsRefreshMs),
       showLimitSource: parseBoolean(patch.showLimitSource ?? settings.showLimitSource, false),
+      showLimitUsed: parseBoolean(patch.showLimitUsed ?? settings.showLimitUsed, false),
       showActiveAccount: parseBoolean(patch.showActiveAccount ?? settings.showActiveAccount, false),
       zoomFactor: clampZoom(patch.zoomFactor ?? settings.zoomFactor),
       ...normalizeTrayModeSettings({
@@ -2543,6 +2625,7 @@ app.whenReady().then(() => {
       settings.limitProviders !== previousLimitProviders ||
       settings.limitsRefreshMs !== previousLimitsRefreshMs ||
       settings.historyEnabled !== previousHistoryEnabled ||
+      settings.historyIntervalMs !== previousHistoryIntervalMs ||
       settings.wslScanEnabled !== previousWslScanEnabled ||
       settings.collectionMode !== previousCollectionMode ||
       settings.collectionIntervalMs !== previousCollectionIntervalMs ||
@@ -2674,6 +2757,25 @@ app.whenReady().then(() => {
     return true;
   });
   ipcMain.handle('stats:get', (_event, options) => fetchStats(options));
+  ipcMain.handle('export:now', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: settings.exportDir || app.getPath('home')
+    });
+    if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+    const stats = await fetchStats();
+    const written = await writeExportTo(result.filePaths[0], stats.periods);
+    if (!written.ok) return { ok: false, dir: result.filePaths[0], reason: written.reason || 'write-failed' };
+    return { ok: true, dir: result.filePaths[0] };
+  });
+  ipcMain.handle('export:pickAutoDir', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: settings.exportDir || app.getPath('home')
+    });
+    if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+    return { ok: true, dir: result.filePaths[0] };
+  });
   ipcMain.handle('session:getDetail', (_event, args) => {
     const { client, sessionId, period, sessionCost } = args || {};
     return readSessionDetail({ client, sessionId, period, sessionCost, home: os.homedir() });
@@ -2994,11 +3096,12 @@ app.whenReady().then(() => {
   ipcMain.on('dashboard:close', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   maybeRunBackgroundUpdateCheck();
+  startAppUpdateBackgroundChecks();
 });
 
 app.on('second-instance', focusExistingWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { quitRequested = true; if (rateRefreshTimer) clearInterval(rateRefreshTimer); unregisterWindowToggleShortcut(); stopAll(); if (usagePersistenceHandle) { try { usagePersistenceHandle.db.close(); } catch (_) {} usagePersistenceHandle = null; setUsageWriter(null); } });
+app.on('before-quit', () => { quitRequested = true; if (rateRefreshTimer) clearInterval(rateRefreshTimer); if (appUpdateBackgroundTimer) clearInterval(appUpdateBackgroundTimer); unregisterWindowToggleShortcut(); stopAll(); if (usagePersistenceHandle) { try { usagePersistenceHandle.db.close(); } catch (_) {} usagePersistenceHandle = null; setUsageWriter(null); } });
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.once(signal, requestAppQuit);
 }

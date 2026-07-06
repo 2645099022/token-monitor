@@ -540,6 +540,27 @@ function claudeUsageWindowUsedPercent(window) {
   return utilization;
 }
 
+// Temporary: the "Fable only" weekly cap is a limited-time promo (through ~2026-07-07)
+// that only appears in the structured `limits[]` array as a `weekly_scoped` entry —
+// never as a named top-level field like `seven_day`. Surface just that one scoped
+// window; once the promo ends it drops out of `limits[]` and this returns null, so
+// the bar self-removes. Safe to delete this helper (and its call site) afterwards.
+function claudeFableWeeklyWindow(usage) {
+  const limits = Array.isArray(usage?.limits) ? usage.limits : [];
+  for (const entry of limits) {
+    if (!entry || entry.kind !== 'weekly_scoped') continue;
+    const displayName = String(entry.scope?.model?.display_name || '').trim();
+    if (!/^fable$/i.test(displayName)) continue;
+    return {
+      kind: 'weekly',
+      label: displayName,
+      usedPercent: claudeUsageWindowUsedPercent(entry),
+      resetsAt: valueFromAliases(entry, ['resets_at', 'resetsAt'])
+    };
+  }
+  return null;
+}
+
 function mapClaudeUsageToProvider(usage, meta = {}) {
   const windows = [];
   const session = valueFromAliases(usage, ['five_hour', 'fiveHour']);
@@ -558,6 +579,8 @@ function mapClaudeUsageToProvider(usage, meta = {}) {
       resetsAt: valueFromAliases(weekly, ['resets_at', 'resetsAt'])
     });
   }
+  const fableWeekly = claudeFableWeeklyWindow(usage);
+  if (fableWeekly) windows.push(fableWeekly);
   return normalizeLimitProvider({
     provider: 'claude',
     accountKey: meta.accountKey || '',

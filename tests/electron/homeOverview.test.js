@@ -185,7 +185,7 @@ test('homeToolRows returns top current-period tools with shares', () => {
   ]);
 });
 
-test('homeDeviceRows uses display names, skips empty devices, and prefers local/fresh rows', () => {
+test('homeDeviceRows uses display names, skips empty devices, and sorts by usage', () => {
   const rows = homeDeviceRows([
     { deviceId: 'remote-stale', hostname: 'Old PC', stale: true, periods: { today: { totalTokens: 900 } } },
     { deviceId: 'empty', displayName: 'Empty Device', stale: false, periods: { today: { totalTokens: 0 } } },
@@ -194,9 +194,9 @@ test('homeDeviceRows uses display names, skips empty devices, and prefers local/
   ], { localDeviceId: 'local', period: 'today', limit: 3 });
 
   assert.deepEqual(rows.map((row) => [row.key, row.name, row.value, row.isLocal, row.isStale]), [
-    ['local', 'macbook-m5', 100, true, false],
+    ['remote-stale', 'remote-stale', 900, false, true],
     ['remote-fresh', 'studio', 500, false, false],
-    ['remote-stale', 'remote-stale', 900, false, true]
+    ['local', 'macbook-m5', 100, true, false]
   ]);
 });
 

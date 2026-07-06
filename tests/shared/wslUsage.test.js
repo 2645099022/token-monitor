@@ -144,6 +144,8 @@ test('wslUsageHomes keeps a home whose only tracked-client data is pi, zed, kilo
   assert.deepEqual(homesFor('.config/Kiro/User/globalStorage/kiro.kiroagent'), ['\\\\wsl$\\Ubuntu\\home\\alice']);
   // WSL is case-sensitive, so the lowercase Kiro IDE root must be matched too.
   assert.deepEqual(homesFor('.config/kiro/User/globalStorage/kiro.kiroagent'), ['\\\\wsl$\\Ubuntu\\home\\alice']);
+  assert.deepEqual(homesFor('.codebuddy/projects'), ['\\\\wsl$\\Ubuntu\\home\\alice']);
+  assert.deepEqual(homesFor('.workbuddy'), ['\\\\wsl$\\Ubuntu\\home\\alice']);
 });
 
 // A home holding only an alternate-root client (Claude transcripts, Kimi Code,

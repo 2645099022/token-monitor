@@ -22,7 +22,7 @@
           </nav>
           <div class="window-actions">
             <button id="pinButton" class="icon-button" title="Cycle window behavior">⇧</button>
-            <span id="titlebarActionSlot"><button id="refreshButton" class="refresh-button" title="Refresh" aria-label="Refresh"><span class="refresh-button-icon" aria-hidden="true">↻</span><svg class="refresh-button-spinner" aria-hidden="true" viewBox="0 0 24 24"><rect class="refresh-button-spinner-bar" x="10.5" y="1.2" width="3" height="5.6" rx="1.5" opacity=".14"/><rect class="refresh-button-spinner-bar" x="10.5" y="1.2" width="3" height="5.6" rx="1.5" transform="rotate(30 12 12)" opacity=".29"/><rect class="refresh-button-spinner-bar" x="10.5" y="1.2" width="3" height="5.6" rx="1.5" transform="rotate(60 12 12)" opacity=".43"/><rect class="refresh-button-spinner-bar" x="10.5" y="1.2" width="3" height="5.6" rx="1.5" transform="rotate(90 12 12)" opacity=".57"/><rect class="refresh-button-spinner-bar" x="10.5" y="1.2" width="3" height="5.6" rx="1.5" transform="rotate(120 12 12)" opacity=".71"/><rect class="refresh-button-spinner-bar" x="10.5" y="1.2" width="3" height="5.6" rx="1.5" transform="rotate(150 12 12)" opacity=".86"/></svg></button></span>
+            <span id="titlebarActionSlot"><button id="refreshButton" class="refresh-button" title="Refresh" aria-label="Refresh"><span class="refresh-button-icon" aria-hidden="true">↻</span><span class="refresh-button-spinner" aria-hidden="true"></span></button></span>
             <button id="minButton" class="icon-button" title="Minimize">−</button>
             <button id="closeButton" class="icon-button" title="Close">×</button>
           </div>
@@ -43,6 +43,8 @@
                   <option value="en" data-i18n="settings.language.english">English</option>
                   <option value="zh-TW" data-i18n="settings.language.zhTW">繁體中文</option>
                   <option value="zh-CN" data-i18n="settings.language.zhCN">简体中文</option>
+                  <option value="ko" data-i18n="settings.language.korean">한국어</option>
+                  <option value="ja" data-i18n="settings.language.japanese">日本語</option>
                 </select>
               </label>
             </div>
@@ -283,6 +285,38 @@
               <p class="settings-note" data-i18n="settings.collection.wslScanDesc">When off, Windows no longer scans WSL tools over \\wsl$.</p>
               <div id="wslPanel" class="wsl-panel"></div>
             </div>
+            <div class="settings-subgroup settings-export-block">
+              <div class="settings-group-header"><span data-i18n="settings.export.title">Data export</span></div>
+              <p class="settings-note" data-i18n="settings.export.desc">Export your usage as CSV + JSON for spreadsheets, Obsidian, Grafana, or scripts.</p>
+              <div class="export-auto-head">
+                <label class="checkbox-label export-auto-toggle"><input id="exportAutoInput" type="checkbox" /><span data-i18n="settings.export.autoLabel">Auto-export to a folder</span></label>
+                <span id="exportAutoStatus" class="cursor-status-pill export-status-pill hidden"></span>
+              </div>
+              <div id="exportAutoDetails" class="export-auto-details hidden">
+                <div class="export-dir-row">
+                  <span id="exportDirLabel" class="export-dir-path"></span>
+                  <div class="settings-actions export-dir-actions">
+                    <button id="exportPickDirButton" type="button" data-i18n="settings.export.pickDir">Choose folder…</button>
+                  </div>
+                </div>
+                <label class="export-interval-row"><span data-i18n="settings.export.interval">Auto-export frequency</span>
+                  <select id="exportIntervalInput">
+                    <option value="30000" data-i18n="settings.export.interval.30s">Every 30 seconds</option>
+                    <option value="60000" data-i18n="settings.export.interval.1m">Every minute</option>
+                    <option value="300000" data-i18n="settings.export.interval.5m">Every 5 minutes</option>
+                    <option value="900000" data-i18n="settings.export.interval.15m">Every 15 minutes</option>
+                    <option value="1800000" data-i18n="settings.export.interval.30m">Every 30 minutes</option>
+                    <option value="3600000" data-i18n="settings.export.interval.60m">Every 60 minutes</option>
+                  </select>
+                </label>
+              </div>
+              <div class="export-manual-row">
+                <span class="settings-note export-manual-note" data-i18n="settings.export.manualDesc">Or export once to a folder you pick:</span>
+                <div class="settings-actions">
+                  <button id="exportNowButton" type="button" data-i18n="settings.export.manualNow">Manual export…</button>
+                </div>
+              </div>
+            </div>
             <div id="customPricingAccountGroup" class="settings-group cursor-account-group">
               <button id="customPricingSettingsToggle" class="settings-group-header cursor-settings-toggle" type="button" aria-expanded="false" aria-controls="customPricingSettingsDetails">
                 <span data-i18n="settings.customPricing.title">Custom model pricing</span>
@@ -342,6 +376,12 @@
             </label>
             <label class="checkbox-label"><input id="showLimitSourceInput" type="checkbox" /><span data-i18n="settings.limits.showSource">Show Source</span></label>
             <label class="checkbox-label"><input id="showActiveAccountInput" type="checkbox" /><span data-i18n="settings.limits.showActiveAccount">Show active account</span></label>
+            <label><span data-i18n="settings.limits.barsShow">Bars show</span>
+              <select id="showLimitUsedInput">
+                <option value="remaining" data-i18n="settings.limits.barsRemaining">Remaining</option>
+                <option value="used" data-i18n="settings.limits.barsUsed">Used</option>
+              </select>
+            </label>
           </div>
         </div>
 
@@ -613,6 +653,7 @@
     <script src="trayProviderIcons.js"></script>
     <script src="limitProviderOrder.js"></script>
     <script src="limitProviderPresentation.js"></script>
+    <script src="limitDisplayMode.js"></script>
     <script src="clientStatusPresentation.js"></script>
     <script src="serviceStatusPresentation.js"></script>
     <script src="serviceStatusProviderPreferences.js"></script>

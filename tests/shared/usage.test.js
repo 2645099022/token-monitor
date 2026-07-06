@@ -391,6 +391,75 @@ test('extractUsageFromTokscale normalizes MiMo Code and ZCode client ids', () =>
   assert.equal(period.clients.zcode, 29);
 });
 
+test('extractUsageFromTokscale does not double-count zcode cacheRead because input is cache-inclusive', () => {
+  const period = extractUsageFromTokscale({
+    groupBy: 'client,session,model',
+    entries: [
+      {
+        client: 'ZCode',
+        sessionId: 'sess-z1',
+        model: 'glm-5.2',
+        provider: 'zhipu',
+        input: 1000,
+        output: 50,
+        cacheRead: 800,
+        cacheWrite: 0,
+        reasoning: 10,
+        messageCount: 1,
+        cost: 0.1,
+        timestamp: '2026-07-05T00:00:00.000Z'
+      }
+    ]
+  });
+
+  assert.equal(period.clients.zcode, 1050);
+  assert.equal(period.totalTokens, 1050);
+  assert.equal(period.cacheReadTokens, 800);
+  assert.equal(period.clientCacheReads.zcode, 800);
+  assert.equal(period.clientOutputs.zcode, 50);
+
+  const session = period.sessions['zcode:sess-z1'];
+  assert.equal(session.totalTokens, 1050);
+  assert.equal(session.inputTokens, 200);
+  assert.equal(session.cacheReadTokens, 800);
+  assert.equal(session.outputTokens, 50);
+  assert.equal(session.reasoningTokens, 10);
+  assert.equal(session.models['glm-5.2'], 1050);
+});
+
+test('extractUsageFromTokscale strips both cache reads and writes from cache-inclusive zcode input', () => {
+  const period = extractUsageFromTokscale({
+    groupBy: 'client,session,model',
+    entries: [
+      {
+        client: 'ZCode',
+        sessionId: 'sess-z2',
+        model: 'claude-sonnet-5',
+        provider: 'anthropic',
+        input: 1000,
+        output: 50,
+        cacheRead: 600,
+        cacheWrite: 200,
+        messageCount: 1,
+        cost: 0.2,
+        timestamp: '2026-07-05T00:00:00.000Z'
+      }
+    ]
+  });
+
+  assert.equal(period.clients.zcode, 1050);
+  assert.equal(period.totalTokens, 1050);
+  assert.equal(period.cacheReadTokens, 600);
+  assert.equal(period.cacheWriteTokens, 200);
+
+  const session = period.sessions['zcode:sess-z2'];
+  assert.equal(session.totalTokens, 1050);
+  assert.equal(session.inputTokens, 200);
+  assert.equal(session.cacheReadTokens, 600);
+  assert.equal(session.cacheWriteTokens, 200);
+  assert.equal(session.outputTokens, 50);
+});
+
 test('extractUsageFromTokscale normalizes Kiro client ids', () => {
   const period = extractUsageFromTokscale([
     { client: 'kiro', model: 'claude-sonnet-4', totalTokens: 31 },
@@ -398,6 +467,16 @@ test('extractUsageFromTokscale normalizes Kiro client ids', () => {
   ]);
 
   assert.equal(period.clients.kiro, 38);
+});
+
+test('extractUsageFromTokscale normalizes CodeBuddy and WorkBuddy client ids', () => {
+  const period = extractUsageFromTokscale([
+    { client: 'codebuddy', model: 'glm-5.2', totalTokens: 24 },
+    { client: 'WorkBuddy', model: 'deepseek-v4-pro', totalTokens: 12 }
+  ]);
+
+  assert.equal(period.clients.codebuddy, 24);
+  assert.equal(period.clients.workbuddy, 12);
 });
 
 test('normalizeClientName keeps kilo distinct from kilocode and maps Oh My Pi to pi', () => {

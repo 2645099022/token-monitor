@@ -1,5 +1,5 @@
 <p align="right">
-   <strong>EN</strong> | <a href="./README.zh-CN.md">简</a> | <a href="./README.zh-TW.md">繁</a>
+   <strong>EN</strong> | <a href="./README.zh-CN.md">简</a> | <a href="./README.zh-TW.md">繁</a> | <a href="./README.ko.md">KO</a> | <a href="./README.ja.md">JA</a>
 </p>
 <div align="center">
     <img src=".github/assets/app.png" alt="Token Monitor logo" width="120">
@@ -15,7 +15,7 @@
     <a href="https://github.com/Javis603/token-monitor/releases"><img src="https://img.shields.io/github/downloads/Javis603/token-monitor/total?style=flat-square&color=22c55e" alt="Total downloads" /></a>
     <img src="https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square" alt="Windows 10 or later" />
     <img src="https://img.shields.io/badge/macOS-14%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="macOS 14 or later" />
-    <img src="https://img.shields.io/badge/iOS-16%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="iOS 16 or later" />
+    <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square&logo=linux&logoColor=white" alt="Linux x64" />
     <a href="https://discord.gg/HmdNVVvw5P"><img src="https://img.shields.io/discord/1344259784219689031?color=5865F2&label=Discord&logo=discord&logoColor=white&style=flat-square" alt="Discord"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-A855F7?style=flat-square" alt="License: MIT" /></a>
 </p>
@@ -52,6 +52,8 @@ Token Monitor supports token usage, account-limit checks, and session details se
 | <img src=".github/assets/tools-icon/mimo-code.png" width="28" alt="MiMo Code" /> | MiMo Code | `~/.local/share/mimocode/mimocode.db` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/zcode.png" width="28" alt="ZCode" /> | ZCode | `~/.zcode/projects/` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/kiro.png" width="28" alt="Kiro" /> | Kiro | `~/.kiro/sessions/cli/`, Kiro IDE globalStorage & `kiro-cli` DB | ✅ | ✅ | — |
+| <img src=".github/assets/tools-icon/codebuddy.png" width="28" alt="CodeBuddy" /> | CodeBuddy | `~/.codebuddy/projects/` + IDE / VS Code extension logs | ✅ | — | — |
+| <img src=".github/assets/tools-icon/workbuddy.png" width="28" alt="WorkBuddy" /> | WorkBuddy | `~/.workbuddy/projects/`, `~/.workbuddy/workbuddy.db` | ✅ | — | — |
 | <img src=".github/assets/tools-icon/deepseek.png" width="28" alt="DeepSeek" /> | DeepSeek | DeepSeek API key (balance via DeepSeek API) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/minimax.png" width="28" alt="Minimax" /> | Minimax | Minimax API key (Token Plan quota via Minimax API) | — | ✅ | — |
 
@@ -61,7 +63,7 @@ Most usage monitors are useful on the machine they run on. Token Monitor is buil
 
 ## Features
 
-- **Live token tracking** for Claude Code, Codex, Hermes Agent, OpenCode, OpenClaw, Cursor, Antigravity, Cline, Kimi, Qwen, Grok Build, GitHub Copilot CLI, Pi, Zed, Kilo Code, MiMo Code, ZCode, and Kiro (UI updates within seconds of each turn)
+- **Live token tracking** for Claude Code, Codex, Hermes Agent, OpenCode, OpenClaw, Cursor, Antigravity, Cline, Kimi, Qwen, Grok Build, GitHub Copilot CLI, Pi, Zed, Kilo Code, MiMo Code, ZCode, Kiro, CodeBuddy, and WorkBuddy (UI updates within seconds of each turn)
 - **WSL usage (Windows)** — usage from AI tools running inside a running WSL distro is detected automatically and merged into your totals (refreshed on the periodic scan, about every 5 minutes)
 - **Real-time multi-device sync** over Server-Sent Events
 - **Breakdown views** grouped by tool, device, model, session, or account limits
@@ -69,7 +71,8 @@ Most usage monitors are useful on the machine they run on. Token Monitor is buil
 - **Cache hit statistics** — click on any tool or model to expand a detailed breakdown of input tokens (cache hit vs miss), output tokens, and hit rate percentages
 - **Cost breakdown** alongside token counts
 - **Cost in your currency** — show costs in USD, TWD, HKD, or CNY; exchange rates auto-update daily and can be manually overridden in Settings
-- **Usage Trends & Dashboard** (opt-in) — a dedicated dashboard window with a GitHub-style activity heatmap, streaks, and stacked per-tool/per-model usage history (bar and K-line views) across all your devices
+- **Usage Trends & Dashboard** — a home-screen activity heatmap and trend chart, plus a dedicated dashboard window with streaks and stacked per-tool/per-model usage history (bar and K-line views) across all your devices
+- **Data export** — export your usage as tool-agnostic CSV + JSON, manually or auto-written to a folder, for spreadsheets, Obsidian, Grafana, or scripts; see [docs/export.md](docs/export.md)
 - **AI Tool Limits detection** for Claude Code, Codex, Cursor, Antigravity, OpenCode, Grok, Minimax, GitHub Copilot, and Kiro with session, weekly, billing, and credits windows, plus DeepSeek prepaid balance and today/month spend
 - **Optional Status view** for Claude, OpenAI, Cursor, and DeepSeek status pages, with manual or interval re-checks
 - **Customizable tool list** to hide, pin, and reorder tools in the main dashboard without changing what gets tracked
@@ -143,7 +146,7 @@ Paste the deployed URL into each device's widget at Settings → Multi-device Sy
 
 ## Desktop installer
 
-You can download the app from the [releases page](https://github.com/Javis603/token-monitor/releases). All releases are unsigned; release notes include first-launch unlock steps for macOS (arm64) and Windows (x64). Other platforms run from source via `npm start`.
+You can download the app from the [releases page](https://github.com/Javis603/token-monitor/releases). All releases are unsigned; release notes include first-launch steps for macOS (arm64), Windows (x64), and Linux x64 AppImage. Other platforms run from source via `npm start`.
 
 App state lives in the OS user-data dir — delete it along with the app to fully uninstall.
 
@@ -151,6 +154,7 @@ App state lives in the OS user-data dir — delete it along with the app to full
 |----------|------|
 | macOS | `~/Library/Application Support/Token Monitor/` |
 | Windows | `%APPDATA%/Token Monitor/` |
+| Linux | `~/.config/Token Monitor/` |
 
 ## Build from source
 
@@ -160,10 +164,11 @@ Releases are unsigned, so you may prefer to build your own installer — same co
 npm install
 npm run dist:mac   # macOS arm64 .dmg          → dist/
 npm run dist:win   # Windows x64 installer .exe → dist/
+npm run dist:linux # Linux x64 AppImage        → dist/
 npm run pack       # unpacked app dir (no installer), for quick local testing
 ```
 
-Output lands in `dist/`. Builds are unsigned, so the same first-launch unlock steps apply. Linux and Intel Macs have no packaging target — run directly with `npm start`.
+Output lands in `dist/`. Builds are unsigned, so the same first-launch steps apply. Other platforms have no packaging target — run directly with `npm start`.
 
 ## How it works
 
@@ -188,7 +193,7 @@ Click the `⚙` button in the widget header to open the Settings panel.
 - **Multi-device Sync** — three modes: **Local only** (this device, no hub), **Connect to a hub** (paste another machine's Hub URL + secret), or **Host hub on this device** (open a hub here so other devices can connect; LAN/Tailscale/ZeroTier addresses are listed for you).
 - **Tracked Tools** — choose which AI tools are collected, and independently hide, pin, or reorder tools in the main list.
 - **AI Tool Limits** — choose Claude Code, Codex, Cursor, Antigravity, OpenCode, DeepSeek, Grok, Minimax, GitHub Copilot, and Kiro limit detection and refresh frequency.
-- **Trends** — opt-in usage history; turn it on to collect daily history and open the Usage Dashboard (activity heatmap, streaks, and stacked per-tool/per-model bar and K-line charts).
+- **Trends** — choose the scan interval for daily usage history, or turn it off; open the Usage Dashboard for the activity heatmap, streaks, and stacked per-tool/per-model bar and K-line charts.
 - **Window behavior** — choose floating above apps, a normal window, or desktop pinned mode.
 - **Tray Mode** — switch to a menu bar (macOS) or system tray (Windows) popover and choose what shows next to the icon: cost, today's tokens, total tokens, cost + tokens, the closest Claude/Codex/Cursor/Antigravity/OpenCode/Grok/Minimax/GitHub Copilot/Kiro limit % left, or icon-only.
 - **Floating Bubble** — collapse the widget into a draggable mini-window, reopen it by click or hover preview, and choose bubble content from icon, tokens, cost, or AI Tool Limit bars.
@@ -207,7 +212,7 @@ TOKEN_MONITOR_HUB_URL=               # required for sync mode — Worker URL or 
 TOKEN_MONITOR_SECRET=                # shared secret, must match the hub
 TOKEN_MONITOR_DEVICE_ID=             # optional — defaults to hostname
 TOKEN_MONITOR_CLIENTS=               # optional — defaults to all supported tools; set empty to disable tracking
-TOKEN_MONITOR_HISTORY_ENABLED=       # optional — defaults to disabled; set to 1 to collect Trends history
+TOKEN_MONITOR_HISTORY_ENABLED=       # optional — defaults to enabled; set to 0 to skip collecting Trends history
 TOKEN_MONITOR_LIMITS_ENABLED=        # optional — defaults to enabled; set to 0 to skip CLI probing
 TOKEN_MONITOR_LIMIT_PROVIDERS=       # optional — defaults to all supported (claude, codex, cursor, antigravity, opencode, deepseek, minimax, grok, copilot, kiro)
 ```
@@ -239,9 +244,23 @@ are gitignored.
 
 ## Requirements
 
-- macOS or Windows
+- macOS, Windows, or Linux x64
 - Node.js 22.13+
 - For sync mode only: network reachability from each agent/widget to the hub
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=Javis603%2Ftoken-monitor&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Javis603/token-monitor&type=date&legend=top-left" />
+ </picture>
+</a>
+
+## Contributing
+
+Issues and PRs are welcome. Project conventions, architecture notes, and the command reference live in [AGENTS.md](AGENTS.md) — written for coding agents, but it doubles as the contributor guide.
 
 ## Acknowledgments
 

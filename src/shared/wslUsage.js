@@ -39,7 +39,9 @@ const WSL_DATA_MARKERS = [
   '.kiro/sessions/cli',
   '.local/share/kiro-cli/data.sqlite3',
   '.config/Kiro/User/globalStorage/kiro.kiroagent',
-  '.config/kiro/User/globalStorage/kiro.kiroagent'
+  '.config/kiro/User/globalStorage/kiro.kiroagent',
+  '.codebuddy/projects',
+  '.workbuddy'
 ];
 
 // Maps every WSL_DATA_MARKERS entry to the tracked-client id that owns it, so a
@@ -73,7 +75,9 @@ const MARKER_CLIENTS = {
   '.kiro/sessions/cli': 'kiro',
   '.local/share/kiro-cli/data.sqlite3': 'kiro',
   '.config/Kiro/User/globalStorage/kiro.kiroagent': 'kiro',
-  '.config/kiro/User/globalStorage/kiro.kiroagent': 'kiro'
+  '.config/kiro/User/globalStorage/kiro.kiroagent': 'kiro',
+  '.codebuddy/projects': 'codebuddy',
+  '.workbuddy': 'workbuddy'
 };
 
 // Clients whose tokscale `--home` scan can fall back to a HOST-native database

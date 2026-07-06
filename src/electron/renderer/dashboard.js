@@ -71,6 +71,14 @@ function formatCompact(value) {
   if (abs >= 1e3) return `${(num / 1e3).toFixed(1).replace(/\.0$/, '')}K`;
   return String(num);
 }
+function formatDurationCompact(ms) {
+  const totalMinutes = Math.max(0, Math.round(Number(ms || 0) / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return '0m';
+}
 function formatCost(usd) { return currencyApi.formatCurrencyFromUsd(usd, currencyApi.normalizeCurrency(state.currency)); }
 function formatCostCompact(usd) {
   const code = currencyApi.normalizeCurrency(state.currency);
@@ -223,6 +231,47 @@ function renderBreakdown() {
   applySwatchColors(elsBreakdown);
 }
 
+let statCardMeasureCanvas = null;
+
+function canvasFontFor(node) {
+  const style = window.getComputedStyle(node);
+  return `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+}
+
+function transformedText(node) {
+  const text = node?.textContent || '';
+  return window.getComputedStyle(node).textTransform === 'uppercase' ? text.toUpperCase() : text;
+}
+
+function measureTextWidth(node) {
+  if (!node) return 0;
+  statCardMeasureCanvas ||= document.createElement('canvas');
+  const ctx = statCardMeasureCanvas.getContext('2d');
+  ctx.font = canvasFontFor(node);
+  return ctx.measureText(transformedText(node)).width;
+}
+
+function statCardContentWidth(card) {
+  const style = window.getComputedStyle(card);
+  const padding = Number.parseFloat(style.paddingLeft || '0') + Number.parseFloat(style.paddingRight || '0');
+  return Math.max(
+    measureTextWidth(card.querySelector('.dash-card-v')),
+    measureTextWidth(card.querySelector('.dash-card-k'))
+  ) + padding;
+}
+
+function balanceStatCards() {
+  const cards = Array.from(els.cards.querySelectorAll('.dash-card'));
+  if (!cards.length) return;
+  els.cards.style.setProperty('--stat-count', String(cards.length));
+  const columns = charts.statCardColumnWidths(cards.map(statCardContentWidth), {
+    totalWidth: els.cards.clientWidth || 0,
+    minWidth: 92,
+    safety: 10
+  });
+  if (columns.length) els.cards.style.gridTemplateColumns = columns.map((width) => `${width}px`).join(' ');
+}
+
 function renderActivity() {
   const daily = state.history?.daily || [];
   const end = todayKey();
@@ -246,13 +295,16 @@ function renderActivity() {
   const LABELS = {
     totalTokens: 'dashboard.stat.totalTokens', totalCost: 'dashboard.stat.totalCost',
     activeDays: 'trends.activeDays', currentStreak: 'trends.currentStreak',
-    longestStreak: 'trends.longestStreak', peakDayTokens: 'trends.peakDay',
+    activeTimeMs: 'trends.activeTime', peakDayTokens: 'trends.peakDay',
     favoriteModel: 'dashboard.stat.favoriteModel', messages: 'dashboard.stat.messages'
   };
   els.cards.innerHTML = charts.statsCardsHtml(cards, {
     label: (k) => t(LABELS[k] || k),
-    format: (c) => (c.kind === 'cost' ? formatCostCompact(c.value) : c.kind === 'model' ? (c.value || '—') : formatCompact(c.value))
+    format: (c) => (c.kind === 'cost' ? formatCostCompact(c.value)
+      : c.kind === 'duration' ? formatDurationCompact(c.value)
+        : c.kind === 'model' ? (c.value || '—') : formatCompact(c.value))
   });
+  balanceStatCards();
   renderBreakdown();
 }
 

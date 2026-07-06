@@ -179,6 +179,30 @@ test('archived day and month usage follow calendar boundaries', () => {
   assert.equal(nextMonth.allTime.models['claude-3-5-sonnet'], 900);
 });
 
+test('archived client usage restores the cache/output breakdown from its sessions', () => {
+  const record = deviceRecord();
+  // Give the archived client's all-time session a real hit/write/output split.
+  record.allTime.sessions['hermes:h1'].cacheReadTokens = 700;
+  record.allTime.sessions['hermes:h1'].cacheWriteTokens = 110;
+  record.allTime.sessions['hermes:h1'].outputTokens = 90;
+
+  const archive = captureArchivedClientUsage({}, record, ['hermes'], new Date('2026-05-30T12:00:00.000Z'));
+  const summary = applyArchivedClientUsage(liveSummaryWithoutHermes(), archive, {
+    activeClients: 'codex',
+    now: new Date('2026-05-30T13:00:00.000Z')
+  });
+
+  // Client-level breakdown restored so the tool row expands correctly.
+  assert.equal(summary.allTime.clientCacheReads.hermes, 700);
+  assert.equal(summary.allTime.clientCacheWrites.hermes, 110);
+  assert.equal(summary.allTime.clientOutputs.hermes, 90);
+  // Model-level breakdown restored (single-model session attributes fully) so
+  // the model row expands correctly instead of showing everything as miss.
+  assert.equal(summary.allTime.modelCacheReads['claude-3-5-sonnet'], 700);
+  assert.equal(summary.allTime.modelCacheWrites['claude-3-5-sonnet'], 110);
+  assert.equal(summary.allTime.modelOutputs['claude-3-5-sonnet'], 90);
+});
+
 test('archived client usage is ignored and pruned once the client is tracked again', () => {
   assert.equal(typeof pruneArchivedClientUsage, 'function');
 

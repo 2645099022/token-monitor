@@ -9,7 +9,7 @@ const charts = require('../../src/electron/renderer/usageCharts');
 const {
   clientColors, modelVendorFor, modelColor, clampDaily,
   dailyBarsChart, candleChart, contribHeatmap, statsCards,
-  barsChartSvg, candleChartSvg, heatmapSvg, statsCardsHtml
+  barsChartSvg, candleChartSvg, heatmapSvg, statsCardsHtml, statCardColumnWidths
 } = charts;
 
 test('usageCharts exports every symbol app.js destructures from it', () => {
@@ -118,4 +118,19 @@ test('statsCardsHtml renders a card per descriptor with label + formatted value'
   assert.match(html, /TOTALTOKENS/);
   assert.match(html, /class="dash-card"/);
   assert.equal((html.match(/dash-card"/g) || []).length, cards.length);
+});
+
+test('statCardColumnWidths keeps stat cards equal when content fits', () => {
+  assert.deepEqual(statCardColumnWidths([90, 110, 120, 95], { totalWidth: 800 }), [200, 200, 200, 200]);
+});
+
+test('statCardColumnWidths borrows width only when content exceeds the average column', () => {
+  const widths = statCardColumnWidths([120, 220, 104, 96], { totalWidth: 800, minWidth: 120 });
+  assert.equal(widths.length, 4);
+  assert.equal(Math.round(widths.reduce((sum, width) => sum + width, 0)), 800);
+  assert.ok(widths[1] >= 220);
+  assert.ok(widths[1] > widths[0]);
+  assert.ok(widths[0] >= 190);
+  assert.ok(widths[2] >= 190);
+  assert.ok(widths[3] >= 190);
 });

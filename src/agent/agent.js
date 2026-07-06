@@ -5,7 +5,7 @@ const path = require('node:path');
 const { defaultDeviceId, loadDotEnv, parseArgs, pidFilePath } = require('../shared/config');
 const { appVersion } = require('../shared/appVersion');
 const { clientsCsvForSetting } = require('../shared/clientTracking');
-const { collectUsageOnce, startCollector } = require('../shared/collector');
+const { collectUsageOnce, normalizeHistoryIntervalMs, startCollector } = require('../shared/collector');
 const { normalizeLimitsRefreshMs, parseBoolean, parseLimitProviders } = require('../shared/limitCollector');
 const { syncLimits } = require('../shared/limits');
 
@@ -23,13 +23,13 @@ const commandTimeoutMs = Number(args.timeoutMs || process.env.TOKEN_MONITOR_TOKS
 const limitsEnabled = parseBoolean(args.limits ?? args.limitsEnabled ?? process.env.TOKEN_MONITOR_LIMITS_ENABLED, true);
 const limitProviders = parseLimitProviders(args.limitProviders ?? process.env.TOKEN_MONITOR_LIMIT_PROVIDERS).join(',');
 const limitsRefreshMs = normalizeLimitsRefreshMs(args.limitsRefreshMs || process.env.TOKEN_MONITOR_LIMITS_REFRESH_MS);
-const historyEnabled = parseBoolean(args.history ?? args.historyEnabled ?? process.env.TOKEN_MONITOR_HISTORY_ENABLED, false);
+const historyEnabled = parseBoolean(args.history ?? args.historyEnabled ?? process.env.TOKEN_MONITOR_HISTORY_ENABLED, true);
 const wslScanEnabled = parseBoolean(args.wslScan ?? args.wslScanEnabled ?? process.env.TOKEN_MONITOR_WSL_SCAN, true);
 const opencodeCookie = String(process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '').trim();
 const once = Boolean(args.once);
 const dryRun = Boolean(args['dry-run'] || args.dryRun);
 
-const collectorOptions = { clients, allTimeSince, commandTimeoutMs, deviceId, agentVersion: appVersion(), agentRuntime: 'headless-agent', historyEnabled, historyIntervalMs: Number(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS || 15 * 60 * 1000), limitsEnabled, limitProviders, limitsRefreshMs, wslScanEnabled, opencodeCookie };
+const collectorOptions = { clients, allTimeSince, commandTimeoutMs, deviceId, agentVersion: appVersion(), agentRuntime: 'headless-agent', historyEnabled, historyIntervalMs: normalizeHistoryIntervalMs(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS), limitsEnabled, limitProviders, limitsRefreshMs, wslScanEnabled, opencodeCookie };
 
 async function postUsage(summary) {
   const payload = { ...summary, limits: syncLimits(summary.limits) };

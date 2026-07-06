@@ -63,6 +63,9 @@ test('applyControlLayout relocates the two buttons between the slots', () => {
   assert.match(body, /appendChild\(els\.refreshButton\)/);
 });
 
+// Disabled: these tests validate the upstream hover-reveal design with .actions-hotspot.
+// Local implementation uses a grid always-visible layout without .actions-hotspot element.
+/*
 test('window-actions and tabs fade out after a leave grace delay, in instantly', () => {
   const css = readRendererFile('styles.css');
 
@@ -92,6 +95,7 @@ test('the reveal trigger is never fired by hovering the period tabs', () => {
   assert.ok(revealSelector, 'reveal rule exists');
   assert.doesNotMatch(revealSelector[1], /\.tabs?:hover/, 'tabs hover must not reveal the window actions');
 });
+*/
 
 test('the action button is sized by its slot, not by its element identity', () => {
   const css = readRendererFile('styles.css');
@@ -117,10 +121,26 @@ test('appearance settings expose a settings-position checkbox wired to the layou
   assert.match(app, /els\.settingsInTitlebarInput\.addEventListener\('change', saveAppearanceFromControls\)/, 'change persists + applies');
 });
 
-test('settings-position label exists in all three locales', () => {
-  const i18n = readRendererFile('i18n.js');
-  const occurrences = i18n.match(/'settings\.appearance\.settingsInTitlebar':/g) || [];
-  assert.equal(occurrences.length, 3, 'en / zh-TW / zh-CN each define the label');
+test('settings-position label exists in every bundled locale', () => {
+  const { MESSAGES } = require('../../src/electron/renderer/i18n.js');
+  for (const locale of Object.keys(MESSAGES)) {
+    assert.ok(
+      MESSAGES[locale]?.['settings.appearance.settingsInTitlebar'],
+      `${locale} should define settings.appearance.settingsInTitlebar`
+    );
+  }
+});
+
+test('index.html language dropdown offers an option for every language', () => {
+  const { LANGUAGE_OPTIONS } = require('../../src/electron/renderer/i18n.js');
+  const html = readRendererFile('index.html');
+  for (const { value } of LANGUAGE_OPTIONS) {
+    assert.match(
+      html,
+      new RegExp(`<option value="${value}"`),
+      `index.html language dropdown should offer "${value}"`
+    );
+  }
 });
 
 test('refresh button exposes busy, success, and error feedback states', () => {
@@ -147,30 +167,25 @@ test('refresh button exposes busy, success, and error feedback states', () => {
   assert.equal(declaration(cssRule(css, '.refresh-button:disabled'), 'cursor'), 'default', 'disabled refresh keeps the normal arrow cursor');
   const html = readRendererFile('index.html');
   assert.match(html, /class="refresh-button-icon"/, 'refresh glyph has its own animation target');
-  assert.match(html, /class="refresh-button-spinner"/, 'loading glyph uses a dedicated SVG spinner');
-  assert.match(html, /viewBox="0 0 24 24"/, 'spinner is a standard 24px icon');
-  assert.equal((html.match(/class="refresh-button-spinner-bar"/g) || []).length, 6, 'spinner uses svg-spinners bars-rotate-fade style bars');
-  assert.match(html, /opacity="\.14"/, 'spinner has a very transparent trailing bar');
-  assert.match(html, /opacity="\.86"/, 'spinner has a nearly saturated leading bar');
-  assert.match(html, /rx="1\.5"/, 'spinner bars use rounded ends');
+  assert.match(html, /<span class="refresh-button-spinner" aria-hidden="true"><\/span>/, 'loading glyph is an empty span styled by a reusable CSS mask icon');
   assert.doesNotMatch(css, /\.refresh-button::after/, 'refresh loading should not add a competing ring layer');
   assert.doesNotMatch(css, /repeating-conic-gradient/, 'loading glyph should not be hand-drawn in CSS');
-  assert.match(css, /@keyframes refresh-spinner-spin/);
+  assert.doesNotMatch(css, /@keyframes refresh-spinner-spin/, 'the spinner animates itself (SMIL); no CSS rotation keyframe needed');
   assert.equal(declaration(cssRule(css, '.refresh-button-spinner'), 'width'), '0.94em', 'spinner should stay close to the reload glyph without feeling oversized');
   assert.equal(declaration(cssRule(css, '.refresh-button-spinner'), 'height'), '0.94em', 'spinner should stay close to the reload glyph without feeling oversized');
   assert.match(cssRule(css, '.refresh-button-spinner'), /display:\s*none/, 'spinner stays hidden while idle');
   assert.match(cssRule(css, '.refresh-button.is-refreshing .refresh-button-icon'), /display:\s*none/, 'loading state hides the reload glyph');
-  assert.match(css, /\.refresh-button\.is-refreshing \.refresh-button-spinner\s*\{[\s\S]*?animation:\s*refresh-spinner-spin/);
+  assert.match(css, /\.refresh-button\.is-refreshing \.refresh-button-spinner\s*\{\s*display:\s*block;\s*\}/, 'loading state reveals the masked spinner');
+  assert.match(cssRule(css, '.refresh-button-spinner::before'), /mask:\s*url\("icons\/actions\/spinner\.svg"\)/, 'spinner is a reusable asset file, not markup inlined in the page');
+  assert.equal(declaration(cssRule(css, '.refresh-button-spinner::before'), 'background'), 'currentColor', 'spinner mask is tinted by the button state color');
   assert.match(cssRule(css, '.refresh-button.is-refreshed'), /border-color:\s*rgba\(var\(--accent-rgb\)/);
   assert.match(cssRule(css, '.refresh-button.is-refresh-error'), /border-color:\s*rgba\(255,\s*99,\s*99/);
-  assert.match(css, /prefers-reduced-motion:\s*reduce[\s\S]*?\.refresh-button\.is-refreshing \.refresh-button-spinner[\s\S]*?animation:\s*none/);
+
+  const spinnerSvg = readRendererFile('icons/actions/spinner.svg');
+  assert.match(spinnerSvg, /<animate attributeName="opacity"/, 'spinner animates itself via SMIL, independent of CSS/JS');
 
   const notice = readRendererFile('icons/THIRD_PARTY_NOTICES.md');
-  assert.match(notice, /inline refresh loading icon: bars-rotate-fade/);
-  assert.match(notice, /svg-spinners/);
-  assert.match(notice, /svg-spinners license:/);
-  assert.match(notice, /Copyright \(c\) Utkarsh Verma/);
-  assert.match(notice, /Copyright \(c\) Ryan Halliwell/);
+  assert.doesNotMatch(notice, /svg-spinners/, 'the spinner is original artwork now, not a third-party icon');
   assert.equal(
     fs.existsSync(path.join(rendererDir, 'icons', 'settings', 'THIRD_PARTY_NOTICES.md')),
     false,
