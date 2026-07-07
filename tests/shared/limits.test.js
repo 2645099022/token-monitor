@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { aggregateLimits, publicLimits, syncLimits } = require('../../src/shared/limits');
+const { aggregateLimits, mergeCodexTransientWindows, publicLimits, syncLimits } = require('../../src/shared/limits');
 const { collectLimitsOnce } = require('../../src/shared/limitCollector');
 
 function codexProvider(accountKey, accountEmail, remainingPercent, updatedAt) {
@@ -117,6 +117,51 @@ test('aggregateLimits keeps Codex quota windows over a newer empty transient sna
   assert.equal(accountA.sourceDeviceId, 'macbook');
   assert.equal(accountA.windows.length, 1);
   assert.equal(accountA.windows[0].remainingPercent, 50);
+});
+
+test('mergeCodexTransientWindows keeps recent Codex windows when the same account reads empty', () => {
+  const previous = {
+    updatedAt: '2026-06-14T10:00:00.000Z',
+    providers: [codexProvider('sha256:codex-a', 'a@example.com', 50, '2026-06-14T10:00:00.000Z')]
+  };
+  const current = {
+    updatedAt: '2026-06-14T10:05:00.000Z',
+    providers: [
+      {
+        ...codexProvider('sha256:codex-a', 'a@example.com', 0, '2026-06-14T10:05:00.000Z'),
+        windows: []
+      }
+    ]
+  };
+
+  const merged = mergeCodexTransientWindows(previous, current, Date.parse('2026-06-14T10:05:00.000Z'));
+
+  assert.equal(merged.updatedAt, '2026-06-14T10:05:00.000Z');
+  assert.equal(merged.providers.length, 1);
+  assert.equal(merged.providers[0].windows.length, 1);
+  assert.equal(merged.providers[0].windows[0].remainingPercent, 50);
+  assert.equal(merged.providers[0].updatedAt, '2026-06-14T10:00:00.000Z');
+});
+
+test('mergeCodexTransientWindows stops keeping old Codex windows after retention expires', () => {
+  const previous = {
+    updatedAt: '2026-06-14T10:00:00.000Z',
+    providers: [codexProvider('sha256:codex-a', 'a@example.com', 50, '2026-06-14T10:00:00.000Z')]
+  };
+  const current = {
+    updatedAt: '2026-06-14T10:12:00.000Z',
+    providers: [
+      {
+        ...codexProvider('sha256:codex-a', 'a@example.com', 0, '2026-06-14T10:12:00.000Z'),
+        windows: []
+      }
+    ]
+  };
+
+  const merged = mergeCodexTransientWindows(previous, current, Date.parse('2026-06-14T10:12:00.000Z'), 10 * 60 * 1000);
+
+  assert.equal(merged.providers[0].windows.length, 0);
+  assert.equal(merged.providers[0].updatedAt, '2026-06-14T10:12:00.000Z');
 });
 
 test('syncLimits carries Codex account key, email and plan label to the authenticated hub', () => {

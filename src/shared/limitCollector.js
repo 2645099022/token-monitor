@@ -6,7 +6,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { appVersion } = require('./appVersion');
-const { DEFAULT_LIMITS_REFRESH_MS, normalizeLimitProvider, normalizeLimitsSummary } = require('./limits');
+const {
+  DEFAULT_LIMITS_REFRESH_MS,
+  mergeCodexTransientWindows,
+  normalizeLimitProvider,
+  normalizeLimitsSummary
+} = require('./limits');
 const cursorAuth = require('./cursorAuth');
 const cursorProbe = require('./cursorProbe');
 const antigravityProbe = require('./antigravityProbe');
@@ -2335,9 +2340,9 @@ function createLimitsCollector(options = {}, deps = {}) {
     if (inFlight) return inFlight;
     inFlight = collectLimitsOnce({ ...options, limitsRefreshMs: refreshMs }, deps)
       .then((summary) => {
-        cached = summary;
+        cached = mergeCodexTransientWindows(cached, summary, current);
         cachedAt = current;
-        return summary;
+        return cached;
       })
       .finally(() => { inFlight = null; });
     return inFlight;

@@ -9,6 +9,7 @@ const VALID_STATUSES = new Set(['ok', 'disabled', 'notConfigured', 'unauthorized
 const VALID_SOURCES = new Set(['oauth', 'cli', 'web', 'rpc', 'local', 'api']);
 const VALID_SOURCE_DETAILS = new Set(['app', 'cli', 'managed', 'unknown']);
 const WINDOW_ORDER = ['session', 'weekly', 'billing'];
+const CODEX_TRANSIENT_WINDOW_RETENTION_MS = 10 * 60 * 1000;
 
 function asNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -281,6 +282,52 @@ function providerWindowRank(provider) {
   return Array.isArray(provider.windows) && provider.windows.length > 0 ? 1 : 0;
 }
 
+function codexProviderIdentityKeys(provider) {
+  if (provider?.provider !== 'codex') return [];
+  const keys = [];
+  if (provider.accountKey) keys.push(`key:${provider.accountKey}`);
+  if (provider.accountEmail) keys.push(`email:${provider.accountEmail}`);
+  return keys;
+}
+
+function hasProviderWindows(provider) {
+  return Array.isArray(provider?.windows) && provider.windows.length > 0;
+}
+
+function mergeCodexTransientWindows(previousInput, currentInput, nowMs = Date.now(), retentionMs = CODEX_TRANSIENT_WINDOW_RETENTION_MS) {
+  const current = normalizeLimitsSummary(currentInput);
+  if (!previousInput || !Number.isFinite(Number(retentionMs)) || Number(retentionMs) <= 0) return current;
+  const previous = normalizeLimitsSummary(previousInput);
+  const currentMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const previousByIdentity = new Map();
+
+  for (const provider of previous.providers) {
+    if (provider.provider !== 'codex' || provider.status !== 'ok' || !hasProviderWindows(provider)) continue;
+    const providerUpdatedAt = timestampMs(provider.updatedAt || previous.updatedAt);
+    if (!providerUpdatedAt || currentMs - providerUpdatedAt < 0 || currentMs - providerUpdatedAt > Number(retentionMs)) continue;
+    for (const key of codexProviderIdentityKeys(provider)) {
+      const existing = previousByIdentity.get(key);
+      if (!existing || timestampMs(provider.updatedAt) >= timestampMs(existing.updatedAt)) previousByIdentity.set(key, provider);
+    }
+  }
+
+  return {
+    ...current,
+    providers: current.providers.map((provider) => {
+      if (provider.provider !== 'codex' || provider.status !== 'ok' || hasProviderWindows(provider)) return provider;
+      const previousProvider = codexProviderIdentityKeys(provider)
+        .map((key) => previousByIdentity.get(key))
+        .find(Boolean);
+      if (!previousProvider) return provider;
+      return {
+        ...provider,
+        updatedAt: previousProvider.updatedAt || provider.updatedAt,
+        windows: previousProvider.windows.map((window) => ({ ...window }))
+      };
+    })
+  };
+}
+
 function pickBetterProvider(current, candidate) {
   if (!current) return candidate;
   if (current.stale !== candidate.stale) return current.stale ? candidate : current;
@@ -356,6 +403,7 @@ function syncLimits(limits) {
 module.exports = {
   DEFAULT_LIMITS_REFRESH_MS,
   aggregateLimits,
+  mergeCodexTransientWindows,
   normalizeLimitProvider,
   normalizeLimitsSummary,
   normalizeLimitWindow,

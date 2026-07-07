@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
 
-const { codexCommandCandidates, codexCommandSourceDetail, fetchCodexLimits, mapCodexRateLimitsToProvider } = require('../../src/shared/limitCollector');
+const { codexCommandCandidates, codexCommandSourceDetail, createLimitsCollector, fetchCodexLimits, mapCodexRateLimitsToProvider } = require('../../src/shared/limitCollector');
 const { hashAccountKey } = require('../../src/shared/codexAuth');
 
 function dirent(name, directory = true) {
@@ -201,6 +201,28 @@ function codexPayload(email, sourceDetail) {
   };
 }
 
+function codexProvider(accountKey, accountEmail, remainingPercent, updatedAt) {
+  return {
+    provider: 'codex',
+    accountKey,
+    accountEmail,
+    accountLabel: 'Plus',
+    status: 'ok',
+    source: 'rpc',
+    sourceDetail: 'managed',
+    updatedAt,
+    windows: [
+      {
+        kind: 'session',
+        usedPercent: 100 - remainingPercent,
+        remainingPercent,
+        resetsAt: '2026-06-01T05:00:00Z',
+        windowMinutes: 300
+      }
+    ]
+  };
+}
+
 function makeIdToken(payload) {
   const seg = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
   return `${seg({ alg: 'none' })}.${seg(payload)}.`;
@@ -232,6 +254,33 @@ test('fetchCodexLimits returns one provider per managed Codex account', async ()
   assert.equal(providers.length, 2);
   assert.deepEqual(providers.map((provider) => provider.accountEmail), ['one@example.com', 'two@example.com']);
   assert.deepEqual(providers.map((provider) => provider.sourceDetail), ['managed', 'managed']);
+});
+
+test('createLimitsCollector retains recent Codex quota windows across one empty refresh', async () => {
+  let now = Date.parse('2026-06-01T00:00:00Z');
+  let calls = 0;
+  const collector = createLimitsCollector({
+    limitProviders: 'codex',
+    limitsRefreshMs: 60_000
+  }, {
+    now: () => now,
+    providerFetchers: {
+      codex: async () => {
+        calls += 1;
+        const provider = codexProvider('sha256:codex-a', 'a@example.com', 80, new Date(now).toISOString());
+        return calls === 1 ? provider : { ...provider, windows: [] };
+      }
+    }
+  });
+
+  const first = await collector.snapshot(true);
+  now = Date.parse('2026-06-01T00:05:00Z');
+  const second = await collector.snapshot(true);
+
+  assert.equal(first.providers[0].windows.length, 1);
+  assert.equal(second.providers[0].windows.length, 1);
+  assert.equal(second.providers[0].windows[0].remainingPercent, 80);
+  assert.equal(second.providers[0].updatedAt, '2026-06-01T00:00:00.000Z');
 });
 
 test('fetchCodexLimits skips disabled managed Codex accounts', async () => {
