@@ -148,6 +148,7 @@
   function contribHeatmap(daily, options) {
     const o = Object.assign({ cell: 11, gap: 2, startDate: null, endDate: null }, options || {});
     const intensities = new Map();
+    const values = new Map();
     // startDate/endDate, when given, fix the window (e.g. a rolling year) so the grid
     // spans the whole range even where there are no records; otherwise it hugs the data.
     let minDate = o.startDate ? String(o.startDate).slice(0, 10) : null;
@@ -155,6 +156,7 @@
     for (const d of (Array.isArray(daily) ? daily : [])) {
       const key = String(d.date).slice(0, 10);
       intensities.set(key, n(d.intensity));
+      values.set(key, { tokens: n(d.tokens), cost: n(d.cost) });
       if (!o.startDate && (!minDate || key < minDate)) minDate = key;
       if (!o.endDate && (!maxDate || key > maxDate)) maxDate = key;
     }
@@ -172,7 +174,8 @@
       // Label the column that contains the 1st of a month — this puts the first
       // month flush at the left edge (the leading week always spans a month's 1st).
       if (key.slice(8, 10) === '01') monthLabels.push({ col, label: key.slice(0, 7) });
-      cells.push({ date: key, intensity: intensities.get(key) || 0, col, row, x: col * (o.cell + o.gap), y: row * (o.cell + o.gap), size: o.cell });
+      const value = values.get(key) || { tokens: 0, cost: 0 };
+      cells.push({ date: key, intensity: intensities.get(key) || 0, tokens: value.tokens, cost: value.cost, col, row, x: col * (o.cell + o.gap), y: row * (o.cell + o.gap), size: o.cell });
     }
     const weeks = cells.length ? cells[cells.length - 1].col + 1 : 0;
     return {
@@ -446,12 +449,34 @@
   }
 
   function heatmapSvg(model, options) {
-    const o = Object.assign({ titleOf: () => '', monthLabel: (m) => m.label, radius: 3 }, options || {});
+    const o = Object.assign({ titleOf: () => '', monthLabel: (m) => m.label, radius: 3, glowFilterId: '', spotlightId: '', spotlightRadius: 86 }, options || {});
     const botPad = 16;
     const pitch = (model.cell || 11) + (model.gap || 2);
+    const glowFilterId = String(o.glowFilterId || '');
+    const spotlightId = String(o.spotlightId || '');
+    const spotlightGradientId = spotlightId ? `${spotlightId}Gradient` : '';
+    const spotlightMaskId = spotlightId ? `${spotlightId}Mask` : '';
+    const radius = svgRound(Math.max(1, Number(o.spotlightRadius) || 86));
+    const defsParts = [];
+    if (glowFilterId) {
+      defsParts.push(`<filter id="${escapeXml(glowFilterId)}" x="-80%" y="-80%" width="260%" height="260%" color-interpolation-filters="sRGB"><feDropShadow dx="0" dy="0" stdDeviation="2.1" flood-color="rgb(120, 190, 255)" flood-opacity="0.95"></feDropShadow><feDropShadow dx="0" dy="0" stdDeviation="4.2" flood-color="rgb(120, 190, 255)" flood-opacity="0.42"></feDropShadow></filter>`);
+    }
+    if (spotlightId) {
+      defsParts.push(`<radialGradient id="${escapeXml(spotlightGradientId)}" gradientUnits="userSpaceOnUse" cx="-200" cy="-200" r="${radius}"><stop offset="0" stop-color="white" stop-opacity="1"></stop><stop offset="0.35" stop-color="white" stop-opacity="0.62"></stop><stop offset="0.75" stop-color="white" stop-opacity="0"></stop></radialGradient><mask id="${escapeXml(spotlightMaskId)}"><rect x="0" y="0" width="${svgRound(model.width)}" height="${svgRound(model.height)}" fill="url(#${escapeXml(spotlightGradientId)})"></rect></mask>`);
+    }
+    const defs = defsParts.length ? `<defs>${defsParts.join('')}</defs>` : '';
+    const cellAttrs = (c) => `class="heat lvl-${c.intensity}" data-d="${escapeXml(c.date)}" data-t="${svgRound(c.tokens || 0)}" data-cost="${svgRound(c.cost || 0)}" x="${svgRound(c.x)}" y="${svgRound(c.y)}" width="${svgRound(c.size)}" height="${svgRound(c.size)}" rx="${svgRound(Math.max(0, Number(o.radius) || 0))}"`;
     const cells = (model.cells || []).map((c) =>
-      `<rect class="heat lvl-${c.intensity}" data-d="${c.date}" x="${svgRound(c.x)}" y="${svgRound(c.y)}" width="${svgRound(c.size)}" height="${svgRound(c.size)}" rx="${svgRound(Math.max(0, Number(o.radius) || 0))}">${o.titleOf(c) ? `<title>${escapeXml(o.titleOf(c))}</title>` : ''}</rect>`
+      `<rect ${cellAttrs(c)}>${o.titleOf(c) ? `<title>${escapeXml(o.titleOf(c))}</title>` : ''}</rect>`
     ).join('');
+    const brightCells = spotlightId
+      ? (model.cells || []).map((c) =>
+        `<rect class="heat heat-bright lvl-${c.intensity}" x="${svgRound(c.x)}" y="${svgRound(c.y)}" width="${svgRound(c.size)}" height="${svgRound(c.size)}" rx="${svgRound(Math.max(0, Number(o.radius) || 0))}"></rect>`
+      ).join('')
+      : '';
+    const brightLayer = spotlightId
+      ? `<g class="heat-bright-layer" mask="url(#${escapeXml(spotlightMaskId)})" aria-hidden="true">${brightCells}</g>`
+      : '';
     // Month labels sit BELOW the grid, left-anchored at the column where each month
     // starts — so the current month naturally lands on whichever column its 1st falls in
     // (no special-casing), and the first month sits flush at the left edge.
@@ -459,7 +484,7 @@
     const months = (model.monthLabels || []).map((m) =>
       `<text class="heat-month" x="${svgRound(m.col * pitch)}" y="${svgRound(labelY)}" text-anchor="start">${escapeXml(o.monthLabel(m))}</text>`
     ).join('');
-    return `<svg class="dash-heatmap" viewBox="0 0 ${model.width} ${model.height + botPad}" width="${model.width}" height="${model.height + botPad}">${cells}${months}</svg>`;
+    return `<svg class="dash-heatmap" viewBox="0 0 ${model.width} ${model.height + botPad}" width="${model.width}" height="${model.height + botPad}">${defs}<g class="heat-base-layer">${cells}</g>${brightLayer}${months}</svg>`;
   }
 
   function statsCardsHtml(cards, options) {
