@@ -167,7 +167,7 @@ function defaultSettings() {
     systemGlass: true,
     showLiveDot: true,
     showToolIcons: true,
-    titleIconOnly: false,
+    titleIconOnly: true,
     themeColors: {},
     vendorColors: {},
     floatingBubbleEnabled: false,
