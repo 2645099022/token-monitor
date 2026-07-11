@@ -81,7 +81,7 @@ const {
   fetchMimoLimits,
   normalizeMimoCookieHeader
 } = require('../shared/mimoLimits');
-const { historyPreview } = require('../shared/history');
+const { historyPreview, historyRevision } = require('../shared/history');
 const { readSessionDetail } = require('../shared/sessionDetail');
 const { startDiscordRpc, stopDiscordRpc, updateDiscordRpc } = require('./discordRpc');
 const linuxAutostart = require('./linuxAutostart');
@@ -1493,8 +1493,9 @@ function applyNativeMaterial(source = settings) {
 }
 
 function withHistoryPreview(stats, devices) {
-  const history = settings?.historyEnabled === false ? aggregateHistory([], 0) : aggregateHistory(devices, 0);
+  const history = settings?.historyEnabled === false ? aggregateHistory([]) : aggregateHistory(devices);
   stats.historyPreview = historyPreview(history);
+  stats.historyRevision = historyRevision(history);
   return stats;
 }
 
@@ -1813,6 +1814,7 @@ function injectLocalDeviceStatus(stats) {
 }
 
 function sendPush(payload) {
+  const previousHistoryRevision = statsHistoryRevision(latestStats);
   if (payload?.data?.stats) {
     injectLocalDeviceStatus(payload.data.stats);
     latestStats = payload.data.stats;
@@ -1826,6 +1828,19 @@ function sendPush(payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('stats:push', payload); } catch (_) {}
   }
+  if (payload?.data?.stats) {
+    const nextHistoryRevision = statsHistoryRevision(payload.data.stats);
+    if (nextHistoryRevision !== previousHistoryRevision && dashboardWindow && !dashboardWindow.isDestroyed()) {
+      try { dashboardWindow.webContents.send('dashboard:historyChanged'); } catch (_) {}
+    }
+  }
+}
+
+function statsHistoryRevision(stats) {
+  const revision = String(stats?.historyRevision || '').trim();
+  if (revision) return revision;
+  // Compatibility with an older remote hub that has not shipped revisions yet.
+  return JSON.stringify(stats?.historyPreview || null);
 }
 
 let rateCache = null;            // { rates, date, source, fetchedAt }
@@ -3029,14 +3044,14 @@ function createDashboardWindow() {
 }
 
 async function getDashboardHistory() {
-  if (settings?.historyEnabled === false) return aggregateHistory([], 0);
+  if (settings?.historyEnabled === false) return aggregateHistory([]);
   if (mode === 'local') {
     // The local collector keeps localDevice.history current (watch + interval
     // ticks, with carry-forward), so read it directly — exactly as the hub
     // branch reads /api/history. Forcing a full collection tick here made the
     // fetch take seconds; on a quick close/reopen the response outlived the
     // renderer and was dropped, stranding the dashboard on its empty state.
-    return aggregateHistory(localDevice ? [localDevice] : [], 0);
+    return aggregateHistory(localDevice ? [localDevice] : []);
   }
   if (settings.hubMode === 'host' && embeddedHub) {
     // Host mode reads its own hub store in-process, so the dashboard history
@@ -3044,7 +3059,7 @@ async function getDashboardHistory() {
     return embeddedHub.hub.getHistory();
   }
   const { url: hubUrl, secret } = effectiveHubConfig();
-  if (!hubUrl) return aggregateHistory([], 0);
+  if (!hubUrl) return aggregateHistory([]);
   const url = `${hubUrl.replace(/\/$/, '')}/api/history`;
   const response = await fetch(url, { headers: secret ? { authorization: `Bearer ${secret}` } : {} });
   if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);

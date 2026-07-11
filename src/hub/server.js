@@ -4,7 +4,7 @@ const http = require('node:http');
 const path = require('node:path');
 const { URL } = require('node:url');
 const { aggregateDevices, mergeDeviceRecord, aggregateHistory } = require('../shared/usage');
-const { historyPreview } = require('../shared/history');
+const { historyPreview, historyRevision } = require('../shared/history');
 const { isAuthorized, readJsonBody, sendJson, sendText } = require('../shared/http');
 const { loadDotEnv, parseArgs, projectRoot, readJson, writeJsonAtomic } = require('../shared/config');
 
@@ -40,12 +40,14 @@ function createHub({
 
   function getStats() {
     const stats = aggregateDevices(Object.values(store.devices), staleAfterMs);
-    stats.historyPreview = historyPreview(aggregateHistory(Object.values(store.devices), staleAfterMs));
+    const history = aggregateHistory(Object.values(store.devices));
+    stats.historyPreview = historyPreview(history);
+    stats.historyRevision = historyRevision(history);
     return stats;
   }
 
   function getHistory() {
-    return aggregateHistory(Object.values(store.devices), staleAfterMs);
+    return aggregateHistory(Object.values(store.devices));
   }
 
   const sseClients = new Set();
