@@ -74,6 +74,15 @@ const {
   normalizeArchivedClientUsage,
   pruneArchivedClientUsage
 } = require('../shared/clientUsageArchive');
+const {
+  applySessionUsageArchive,
+  captureSessionUsageArchive,
+  clearSessionUsageArchive,
+  normalizeSessionUsageArchive,
+  readSessionUsageArchive,
+  sessionUsageArchiveDate,
+  writeSessionUsageArchive
+} = require('../shared/sessionUsageArchive');
 const { aggregateDevices, aggregateHistory, carryDeviceHistory } = require('../shared/usage');
 const { syncPayload } = require('../shared/syncPayload');
 const {
@@ -156,6 +165,7 @@ let mainWindow = null;
 let dashboardWindow = null;
 let settingsPath = null;
 let settings = null;
+let sessionUsageArchive = null;
 let rendererViewState = normalizeInitialRendererViewState();
 const serviceStatusClient = createServiceStatusClient();
 const STATUS_PAGE_HOSTS = new Set(SERVICE_STATUS_PROVIDERS.map((provider) => new URL(provider.pageUrl).hostname));
@@ -209,6 +219,7 @@ function defaultSettings() {
     hiddenHomeModules: defaultHomeModulePreferences().hiddenHomeModules,
     historyEnabled: true,
     historyIntervalMs: normalizeHistoryIntervalMs(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS),
+    sessionUsageArchiveEnabled: parseBoolean(process.env.TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED, true),
     wslScanEnabled: parseBoolean(process.env.TOKEN_MONITOR_WSL_SCAN, true),
     exportAutoEnabled: false,
     exportDir: '',
@@ -1326,6 +1337,9 @@ function readSettings() {
     if (saved.historyEnabled !== undefined) {
       merged.historyEnabled = parseBoolean(saved.historyEnabled, false);
     }
+    if (saved.sessionUsageArchiveEnabled !== undefined) {
+      merged.sessionUsageArchiveEnabled = parseBoolean(saved.sessionUsageArchiveEnabled, true);
+    }
     if (saved.wslScanEnabled !== undefined) {
       merged.wslScanEnabled = parseBoolean(saved.wslScanEnabled, true);
     }
@@ -1435,11 +1449,43 @@ function updateArchivedClientUsage(previousClients, nextClients) {
   settings.archivedClientUsage = archive;
 }
 
+function ensureSessionUsageArchiveLoaded() {
+  if (sessionUsageArchive) return sessionUsageArchive;
+  try {
+    sessionUsageArchive = readSessionUsageArchive();
+  } catch (error) {
+    console.log(`[session-archive] read failed: ${error.message}`);
+    sessionUsageArchive = normalizeSessionUsageArchive({});
+  }
+  return sessionUsageArchive;
+}
+
+function updateSessionUsageArchive(summary, now) {
+  const previous = ensureSessionUsageArchiveLoaded();
+  const next = captureSessionUsageArchive(previous, summary, now);
+  if (JSON.stringify(next) === JSON.stringify(previous)) return previous;
+  try {
+    writeSessionUsageArchive(next);
+    sessionUsageArchive = next;
+  } catch (error) {
+    console.log(`[session-archive] write failed: ${error.message}`);
+  }
+  return next;
+}
+
 function summaryWithArchivedClientUsage(summary) {
-  return applyArchivedClientUsage(summary, settings?.archivedClientUsage, {
+  const now = sessionUsageArchiveDate(summary);
+  const withArchivedClients = applyArchivedClientUsage(summary, settings?.archivedClientUsage, {
     activeClients: settings?.clients,
-    now: new Date()
+    now
   });
+  if (settings?.sessionUsageArchiveEnabled === false) return withArchivedClients;
+  if (isExternalAgentActive()) {
+    sessionUsageArchive = null;
+    return applySessionUsageArchive(withArchivedClients, ensureSessionUsageArchiveLoaded(), { now });
+  }
+  const sessionArchive = updateSessionUsageArchive(summary, now);
+  return applySessionUsageArchive(withArchivedClients, sessionArchive, { now });
 }
 
 function applyMacActivationPolicy(state = {}) {
@@ -1710,9 +1756,9 @@ function startSyncCollector() {
     codexManagedAccounts: codexManagedAccountsForCollector(),
     mimoManagedAccounts: mimoManagedAccountsForCollector(),
     onUpdate: async (summary) => {
+      if (isExternalAgentActive()) { sessionUsageArchive = null; return; }
       const visibleSummary = summaryWithArchivedClientUsage(summary);
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
-      if (isExternalAgentActive()) return;
       try {
         await postToHub(visibleSummary);
       } catch (error) {
@@ -1767,9 +1813,9 @@ function startHostCollector() {
     codexManagedAccounts: codexManagedAccountsForCollector(),
     mimoManagedAccounts: mimoManagedAccountsForCollector(),
     onUpdate: (summary) => {
+      if (isExternalAgentActive()) { sessionUsageArchive = null; return; }
       const visibleSummary = summaryWithArchivedClientUsage(summary);
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
-      if (isExternalAgentActive()) return;
       if (!embeddedHub) return;
       try {
         const stale = settings.lastPostedDeviceId;
@@ -3157,6 +3203,19 @@ app.whenReady().then(() => {
   rateRefreshTimer = setInterval(() => { refreshExchangeRates(); }, 6 * 60 * 60 * 1000);
   setTimeout(() => { checkTokscaleNpm({ silent: true }); }, 2000);
   ipcMain.handle('settings:get', () => settingsForRenderer());
+  ipcMain.handle('sessionUsageArchive:clear', () => {
+    if (isExternalAgentActive()) return { ok: false, error: 'agentActive' };
+    try {
+      clearSessionUsageArchive();
+      sessionUsageArchive = normalizeSessionUsageArchive({});
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    } finally {
+      startMode();
+      pushSettingsToRenderer();
+    }
+  });
   ipcMain.handle('pricing:lookup', async (_event, modelId) => {
     try {
       return { ok: true, result: await lookupModelPricing(modelId) };
@@ -3177,6 +3236,7 @@ app.whenReady().then(() => {
     const previousLimitProviders = settings.limitProviders;
     const previousLimitsRefreshMs = settings.limitsRefreshMs;
     const previousHistoryEnabled = settings.historyEnabled;
+    const previousSessionUsageArchiveEnabled = settings.sessionUsageArchiveEnabled;
     const previousHistoryIntervalMs = settings.historyIntervalMs;
     const previousWslScanEnabled = settings.wslScanEnabled;
     const previousCollectionMode = settings.collectionMode;
@@ -3260,6 +3320,7 @@ app.whenReady().then(() => {
       hiddenHomeLimitProviders: patch.hiddenHomeLimitProviders !== undefined ? normalizeHiddenLimitProviders(patch.hiddenHomeLimitProviders) : normalizeHiddenLimitProviders(settings.hiddenHomeLimitProviders),
       historyEnabled: parseBoolean(patch.historyEnabled ?? settings.historyEnabled, false),
       historyIntervalMs: normalizeHistoryIntervalMs(patch.historyIntervalMs ?? settings.historyIntervalMs),
+      sessionUsageArchiveEnabled: parseBoolean(patch.sessionUsageArchiveEnabled ?? settings.sessionUsageArchiveEnabled, true),
       wslScanEnabled: parseBoolean(patch.wslScanEnabled ?? settings.wslScanEnabled, true),
       collectionMode: normalizeCollectionMode(patch.collectionMode ?? settings.collectionMode),
       collectionIntervalMs: normalizeCollectionIntervalMs(patch.collectionIntervalMs ?? settings.collectionIntervalMs),
@@ -3341,6 +3402,7 @@ app.whenReady().then(() => {
       settings.limitProviders !== previousLimitProviders ||
       settings.limitsRefreshMs !== previousLimitsRefreshMs ||
       settings.historyEnabled !== previousHistoryEnabled ||
+      settings.sessionUsageArchiveEnabled !== previousSessionUsageArchiveEnabled ||
       settings.historyIntervalMs !== previousHistoryIntervalMs ||
       settings.wslScanEnabled !== previousWslScanEnabled ||
       settings.collectionMode !== previousCollectionMode ||

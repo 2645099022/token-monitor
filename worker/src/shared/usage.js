@@ -290,6 +290,8 @@ function emptySession(client, id) {
   };
 }
 
+const sessionsWithLiveSource = new WeakSet();
+
 function mergeSession(target, source) {
   target.totalTokens += Math.max(0, Math.round(asNumber(source.totalTokens)));
   target.costUsd += asNumber(source.costUsd);
@@ -316,6 +318,13 @@ function mergeSession(target, source) {
   for (const [provider, tokens] of Object.entries(source.providers || {})) {
     const key = normalizeProviderName(provider);
     if (key) target.providers[key] = (target.providers[key] || 0) + Math.max(0, Math.round(asNumber(tokens)));
+  }
+  const sourceArchived = source.archived === true || source.deleted === true || source.sourceDeleted === true;
+  if (!sourceArchived) {
+    sessionsWithLiveSource.add(target);
+    delete target.archived;
+  } else if (!sessionsWithLiveSource.has(target)) {
+    target.archived = true;
   }
   return target;
 }
@@ -379,6 +388,7 @@ function normalizeSession(input, fallbackKey) {
       if (key) session.providers[key] = (session.providers[key] || 0) + Math.max(0, Math.round(asNumber(value)));
     }
   }
+  if (input.archived === true || input.deleted === true || input.sourceDeleted === true) session.archived = true;
   return session;
 }
 

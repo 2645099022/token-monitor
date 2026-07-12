@@ -218,6 +218,9 @@ Object.assign(els, {
   hubAddressList: document.getElementById('hubAddressList'),
   collectionCadenceInput: document.getElementById('collectionCadenceInput'),
   collectionCadenceNote: document.getElementById('collectionCadenceNote'),
+  sessionUsageArchiveInput: document.getElementById('sessionUsageArchiveInput'),
+  sessionUsageArchiveStatus: document.getElementById('sessionUsageArchiveStatus'),
+  clearSessionUsageArchiveButton: document.getElementById('clearSessionUsageArchiveButton'),
   startupGroup: document.getElementById('startupGroup'),
   startAtLoginInput: document.getElementById('startAtLoginInput'),
   startupNote: document.getElementById('startupNote'),
@@ -1015,7 +1018,8 @@ function sessionRowsForPeriod(period) {
     clientColors,
     modelColor,
     stableColor,
-    fallbackColors: fallbackModelColors
+    fallbackColors: fallbackModelColors,
+    archivedLabel: t('session.archived')
   });
   if (rows.length > 0) return rows.sort((a, b) => b.sortTime - a.sortTime || b.value - a.value || b.cost - a.cost || a.name.localeCompare(b.name));
   if (Number(period?.totalTokens || 0) === 0) return [];
@@ -3332,6 +3336,7 @@ function renderHome() {
 
 function render() {
   if (!state.stats) return;
+  renderSessionUsageArchiveStatus();
   ensureBreakdownVisible();
   renderViewSwitcher();
   if (state.openSession && state.breakdown !== 'session') { state.openSession = null; els.sessionDetail.classList.add('hidden'); els.sessionDetail.replaceChildren(); els.sessionDetailHead.classList.add('hidden'); els.sessionDetailHead.replaceChildren(); }
@@ -4323,6 +4328,18 @@ function applyInitialBreakdownPreference() {
   if (next !== state.breakdown) setBreakdown(next);
 }
 
+function renderSessionUsageArchiveStatus() {
+  if (!els.sessionUsageArchiveStatus) return;
+  if (state.settings?.sessionUsageArchiveEnabled === false) {
+    els.sessionUsageArchiveStatus.textContent = t('settings.collection.sessionArchivePaused');
+    return;
+  }
+  const count = sessionRowsApi.archivedSessionCount(state.stats);
+  els.sessionUsageArchiveStatus.textContent = count > 0
+    ? t('settings.collection.sessionArchiveActiveCount', { count })
+    : t('settings.collection.sessionArchiveEmpty');
+}
+
 function syncSettingsForm() {
   applySettingsTranslations();
   applyInitialBreakdownPreference();
@@ -4349,6 +4366,8 @@ function syncSettingsForm() {
     }
   }
   if (els.wslScanInput) els.wslScanInput.checked = state.settings.wslScanEnabled !== false;
+  if (els.sessionUsageArchiveInput) els.sessionUsageArchiveInput.checked = state.settings.sessionUsageArchiveEnabled !== false;
+  renderSessionUsageArchiveStatus();
   const exportAutoOn = Boolean(state.settings.exportAutoEnabled);
   const exportDir = state.settings.exportDir || '';
   if (els.exportAutoInput) els.exportAutoInput.checked = exportAutoOn;
@@ -5766,6 +5785,25 @@ els.collectionCadenceInput?.addEventListener('change', async () => {
     collectionMode: value === 'live' ? 'live' : 'interval',
     collectionIntervalMs: value === 'live' ? Number(state.settings.collectionIntervalMs || 300000) : Number(value)
   });
+});
+els.sessionUsageArchiveInput?.addEventListener('change', async () => {
+  await saveSettings({ sessionUsageArchiveEnabled: els.sessionUsageArchiveInput.checked });
+});
+els.clearSessionUsageArchiveButton?.addEventListener('click', async () => {
+  if (!window.confirm(t('settings.collection.sessionArchiveConfirm'))) return;
+  els.clearSessionUsageArchiveButton.disabled = true;
+  try {
+    const result = await window.tokenMonitor.clearSessionUsageArchive();
+    if (!result?.ok) {
+      window.alert(t(result?.error === 'agentActive'
+        ? 'settings.collection.sessionArchiveAgentActive'
+        : 'settings.collection.sessionArchiveFailed'));
+      return;
+    }
+    await refreshStats();
+  } finally {
+    els.clearSessionUsageArchiveButton.disabled = false;
+  }
 });
 els.wslScanInput?.addEventListener('change', async () => {
   await saveSettings({ wslScanEnabled: els.wslScanInput.checked });

@@ -8,6 +8,13 @@ const { clientsCsvForSetting } = require('../shared/clientTracking');
 const { collectUsageOnce, normalizeHistoryIntervalMs, startCollector } = require('../shared/collector');
 const { normalizeLimitsRefreshMs, parseBoolean, parseLimitProviders } = require('../shared/limitCollector');
 const { syncPayload } = require('../shared/syncPayload');
+const {
+  applySessionUsageArchive,
+  captureSessionUsageArchive,
+  readSessionUsageArchive,
+  sessionUsageArchiveDate,
+  writeSessionUsageArchive
+} = require('../shared/sessionUsageArchive');
 
 loadDotEnv();
 const args = parseArgs(process.argv.slice(2));
@@ -24,12 +31,32 @@ const limitsEnabled = parseBoolean(args.limits ?? args.limitsEnabled ?? process.
 const limitProviders = parseLimitProviders(args.limitProviders ?? process.env.TOKEN_MONITOR_LIMIT_PROVIDERS).join(',');
 const limitsRefreshMs = normalizeLimitsRefreshMs(args.limitsRefreshMs || process.env.TOKEN_MONITOR_LIMITS_REFRESH_MS);
 const historyEnabled = parseBoolean(args.history ?? args.historyEnabled ?? process.env.TOKEN_MONITOR_HISTORY_ENABLED, true);
+const sessionUsageArchiveEnabled = parseBoolean(args.sessionArchive ?? args.sessionUsageArchiveEnabled ?? process.env.TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED, true);
 const wslScanEnabled = parseBoolean(args.wslScan ?? args.wslScanEnabled ?? process.env.TOKEN_MONITOR_WSL_SCAN, true);
 const opencodeCookie = String(process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '').trim();
 const once = Boolean(args.once);
 const dryRun = Boolean(args['dry-run'] || args.dryRun);
 
 const collectorOptions = { clients, allTimeSince, commandTimeoutMs, deviceId, agentVersion: appVersion(), agentRuntime: 'headless-agent', historyEnabled, historyIntervalMs: normalizeHistoryIntervalMs(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS), limitsEnabled, limitProviders, limitsRefreshMs, wslScanEnabled, opencodeCookie };
+let sessionUsageArchive;
+
+function summaryWithSessionUsageArchive(summary, now = new Date()) {
+  if (!sessionUsageArchiveEnabled) return summary;
+  const archiveDate = sessionUsageArchiveDate(summary, now);
+  const previous = sessionUsageArchive || readSessionUsageArchive();
+  const next = captureSessionUsageArchive(previous, summary, archiveDate);
+  if (!dryRun && JSON.stringify(next) !== JSON.stringify(previous)) {
+    try {
+      writeSessionUsageArchive(next);
+      sessionUsageArchive = next;
+    } catch (error) {
+      console.error(`[session-archive] write failed: ${error.message}`);
+    }
+  } else if (!dryRun) {
+    sessionUsageArchive = next;
+  }
+  return applySessionUsageArchive(summary, next, { now: archiveDate });
+}
 
 async function postUsage(summary) {
   const response = await fetch(`${hubUrl}/api/ingest`, {
@@ -42,9 +69,10 @@ async function postUsage(summary) {
 }
 
 async function deliver(summary) {
-  if (dryRun) { console.log(JSON.stringify(summary, null, 2)); return; }
-  await postUsage(summary);
-  console.log(`[${new Date().toISOString()}] posted ${summary.deviceId}: today=${summary.today.totalTokens} month=${summary.month.totalTokens} allTime=${summary.allTime.totalTokens}`);
+  const visibleSummary = summaryWithSessionUsageArchive(summary);
+  if (dryRun) { console.log(JSON.stringify(visibleSummary, null, 2)); return; }
+  await postUsage(visibleSummary);
+  console.log(`[${new Date().toISOString()}] posted ${visibleSummary.deviceId}: today=${visibleSummary.today.totalTokens} month=${visibleSummary.month.totalTokens} allTime=${visibleSummary.allTime.totalTokens}`);
 }
 
 function registerPidFile() {
@@ -59,7 +87,7 @@ function registerPidFile() {
 }
 
 async function main() {
-  console.log(`Token Monitor agent device=${deviceId} hub=${hubUrl} intervalMs=${intervalMs} watch=${watchEnabled} history=${historyEnabled ? 'on' : 'off'} limits=${limitsEnabled ? `${limitProviders || 'none'}:${limitsRefreshMs}ms` : 'off'}`);
+  console.log(`Token Monitor agent device=${deviceId} hub=${hubUrl} intervalMs=${intervalMs} watch=${watchEnabled} history=${historyEnabled ? 'on' : 'off'} sessionArchive=${sessionUsageArchiveEnabled ? 'on' : 'off'} limits=${limitsEnabled ? `${limitProviders || 'none'}:${limitsRefreshMs}ms` : 'off'}`);
   if (!secret) console.warn('Warning: TOKEN_MONITOR_SECRET is not set. Posting without authorization header.');
   if (once) {
     const summary = await collectUsageOnce({ ...collectorOptions, includeHistory: true });
