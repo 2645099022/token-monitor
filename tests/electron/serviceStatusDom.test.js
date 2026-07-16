@@ -288,6 +288,7 @@ test('view switcher preserves click-to-cycle and direct selection without crowdi
   assert.match(cssRule(css, '.view-switcher-disclosure'), /flex:\s*0 0 24px/);
   assert.match(cssRule(css, '.view-switcher-menu'), /position:\s*absolute/);
   assert.match(cssRule(css, '.view-switcher-menu'), /width:\s*100%/);
+  assert.match(cssRule(css, '.view-switcher-menu'), /max-height:\s*min\(280px, calc\(100vh - 84px\)\)/);
   assert.match(cssRule(css, '.view-switcher-menu'), /transform-origin:\s*left bottom/);
   assert.match(cssRule(css, '.view-switcher-menu'), /transition:[\s\S]*opacity 190ms/);
   assert.match(cssRule(css, '.view-switcher-menu'), /visibility 0s linear 0s/);
@@ -307,4 +308,65 @@ test('view switcher preserves click-to-cycle and direct selection without crowdi
   assert.doesNotMatch(css, /@media \(max-width: 280px\)[\s\S]*\.view-switcher-current > \.view-switcher-icon/);
   assert.match(cssRule(css, '.view-switcher-icon'), /flex:\s*0 0 auto/);
   assert.doesNotMatch(css, /\.view-dock/);
+});
+
+test('Projects view separates visibility from metadata collection', () => {
+  const app = readRendererFile('app.js');
+  assert.match(app, /state\.projectSettingsExpanded = false/);
+  assert.match(app, /id === 'project' && !projectsEnabled/);
+  assert.match(app, /projectSettingsContainer/);
+  assert.match(app, /function renderProjectSettingsList/);
+  assert.match(app, /settings\.views\.enableProjects/);
+  assert.match(app, /function setProjectsEnabled/);
+  assert.match(app, /saveSettings\(\{ projectsEnabled: false \}\)/);
+  assert.match(app, /hidden\.delete\('project'\)/);
+  assert.match(app, /function onProjectVisibilityToggle/);
+});
+
+test('project identity helpers load before the Projects row renderer', () => {
+  const html = readRendererFile('index.html');
+  const projectKeyIndex = html.indexOf('../../shared/projectKey.js');
+  const projectRowsIndex = html.indexOf('projectRows.js');
+  assert.ok(projectKeyIndex >= 0);
+  assert.ok(projectRowsIndex >= 0);
+  assert.ok(projectKeyIndex < projectRowsIndex);
+});
+
+test('Projects TOTAL view explains an incomplete cross-device breakdown', () => {
+  const app = readRendererFile('app.js');
+  const css = readRendererFile('styles.css');
+  assert.match(app, /projectRowsApi\.projectBreakdownIncomplete\(state\.stats, state\.period\)/);
+  assert.match(app, /hint\.className = 'project-incomplete-hint'/);
+  assert.doesNotMatch(app, /hint\.dataset\.key/);
+  assert.match(app, /children\.filter\(\(child\) => child !== existingHint\)/);
+  assert.match(app, /JSON\.stringify\(\[state\.breakdown, hintText, rows\.map\(\(row\) => row\.key\)\]\)/);
+  assert.match(app, /hint\.setAttribute\('role', 'status'\)/);
+  assert.match(app, /t\('projects\.incomplete'\)/);
+  assert.match(cssRule(css, '.project-incomplete-hint'), /color:\s*var\(--muted\)/);
+});
+
+test('project rows use a fuller icon without changing the navigation icon', () => {
+  const css = readRendererFile('styles.css');
+  assert.match(css, /\.view-icon-project\s*\{[^}]*icons\/views\/project\.svg/);
+  assert.match(css, /\.row-icon-project\s*\{[^}]*icons\/views\/project-row\.svg/);
+});
+
+test('row accordions expose keyboard and aria interactions', () => {
+  const app = readRendererFile('app.js');
+  assert.match(app, /function toggleAccordionRow/);
+  assert.match(app, /function setAttributeIfChanged/);
+  assert.match(app, /event\.key !== 'Enter' && event\.key !== ' '/);
+  assert.match(app, /row\.tabIndex = 0/);
+  assert.match(app, /setAttributeIfChanged\(row, 'role', 'button'\)/);
+  assert.match(app, /setAttributeIfChanged\(row, 'aria-expanded'/);
+  assert.match(app, /setAttributeIfChanged\(row, 'aria-label', `\$\{name\}, \$\{t\('dashboard\.stat\.totalTokens'\)\}/);
+  assert.match(app, /\$\{t\('dashboard\.stat\.totalCost'\)\}: \$\{formatCost\(cost \|\| 0\)\}/);
+  assert.match(app, /row\.removeAttribute\('aria-label'\)/);
+});
+
+test('project accordions retain unchanged DOM between live refreshes', () => {
+  const app = readRendererFile('app.js');
+  assert.match(app, /accordionSignature = JSON\.stringify/);
+  assert.match(app, /accordionInner\.dataset\.signature !== accordionSignature/);
+  assert.match(app, /accordionInner\.dataset\.signature = accordionSignature/);
 });

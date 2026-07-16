@@ -16,6 +16,7 @@
   // they only surface in edge states (links, warnings, errors) and --purple is
   // unused entirely, so a picker for them would be a no-op for everyday use.
   const INTERFACE_COLOR_KEYS = ['accent', 'bg', 'text', 'muted'];
+  const THEME_CODE_VERSION = 'TM1';
 
   const THEME_VAR_MAP = {
     accent: '--green',
@@ -60,8 +61,8 @@
   // synthetic "default" fallback is shown last.
   const VENDOR_ORDER = [
     'claude', 'codex', 'hermes', 'opencode', 'openclaw', 'cline', 'cursor',
-    'gemini', 'antigravity', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro', 'codebuddy', 'workbuddy', 'deepseek', 'xai', 'meta', 'mistral',
-    'moonshot', 'zai', 'cohere', 'xiaomi', 'minimax'
+    'gemini', 'antigravity', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro', 'codebuddy', 'workbuddy', 'proma', 'deepseek', 'xai', 'meta', 'mistral',
+    'moonshot', 'zai', 'zaiteam', 'cohere', 'xiaomi', 'minimax', 'doubao', 'volcengine', 'qoder', 'ollama'
   ];
 
   // Display labels for every vendor in the clientColors map. The widget also
@@ -88,16 +89,22 @@
     kiro: 'Kiro',
     codebuddy: 'CodeBuddy',
     workbuddy: 'WorkBuddy',
+    proma: 'Proma',
     deepseek: 'DeepSeek',
     xai: 'xAI',
     meta: 'Meta',
     mistral: 'Mistral',
     qwen: 'Qwen',
     moonshot: 'Moonshot',
-    zai: 'Z.ai',
+    zai: 'GLM',
+    zaiteam: 'GLM Team',
     cohere: 'Cohere',
     xiaomi: 'Xiaomi',
     minimax: 'MiniMax',
+    doubao: 'Doubao',
+    volcengine: 'Volcengine',
+    qoder: 'Qoder',
+    ollama: 'Ollama',
     default: 'Default'
   };
 
@@ -129,6 +136,29 @@
   function mergeThemeColors(overrides) {
     const clean = normalizeOverrides(overrides, INTERFACE_COLOR_KEYS);
     return { ...DEFAULT_THEME, ...clean };
+  }
+
+  // Portable, offline theme code. The fixed field order is part of the TM1
+  // format, so future schemas can add fields under a new version without
+  // silently changing how an older shared code is interpreted.
+  function encodeThemeCode(overrides) {
+    const colors = mergeThemeColors(overrides);
+    const fields = INTERFACE_COLOR_KEYS.map((key) => colors[key].slice(1).toUpperCase());
+    return `${THEME_CODE_VERSION}-${fields.join('-')}`;
+  }
+
+  function decodeThemeCode(value) {
+    const code = typeof value === 'string' ? value.trim() : '';
+    const version = /^TM(\d+)(?:-|$)/i.exec(code);
+    if (version && version[1] !== '1') return { ok: false, reason: 'unsupportedVersion' };
+
+    const match = /^TM1-([0-9a-f]{6})-([0-9a-f]{6})-([0-9a-f]{6})-([0-9a-f]{6})$/i.exec(code);
+    if (!match) return { ok: false, reason: 'invalid' };
+
+    const colors = Object.fromEntries(
+      INTERFACE_COLOR_KEYS.map((key, index) => [key, `#${match[index + 1].toLowerCase()}`])
+    );
+    return { ok: true, colors, code: encodeThemeCode(colors) };
   }
 
   function hexToRgbTriplet(hex) {
@@ -207,6 +237,7 @@
 
   return {
     INTERFACE_COLOR_KEYS,
+    THEME_CODE_VERSION,
     THEME_VAR_MAP,
     DEFAULT_THEME,
     THEME_PRESETS,
@@ -216,6 +247,8 @@
     normalizeHex,
     normalizeOverrides,
     mergeThemeColors,
+    encodeThemeCode,
+    decodeThemeCode,
     hexToRgbTriplet,
     isLightHex,
     themeCssVarEntries,

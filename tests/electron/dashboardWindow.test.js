@@ -12,7 +12,9 @@ test('preload exposes the dashboard IPC surface', () => {
   const preload = read('src', 'electron', 'preload.js');
   assert.match(preload, /openDashboard: \(\) => ipcRenderer\.invoke\('dashboard:open'\)/);
   assert.match(preload, /getDashboardHistory: \(\) => ipcRenderer\.invoke\('dashboard:getHistory'\)/);
+  assert.match(preload, /ipcRenderer\.on\('dashboard:historyChanged', listener\)/);
   assert.match(preload, /dashboard: \{/);
+  assert.match(preload, /ready: \(\) => ipcRenderer\.send\('dashboard:ready'\)/);
   assert.match(preload, /minimize: \(\) => ipcRenderer\.send\('dashboard:minimize'\)/);
   assert.match(preload, /close: \(\) => ipcRenderer\.send\('dashboard:close'\)/);
 });
@@ -22,14 +24,26 @@ test('main registers dashboard handlers and a sender-scoped close', () => {
   assert.match(main, /ipcMain\.handle\('dashboard:open'/);
   assert.match(main, /ipcMain\.handle\('dashboard:getHistory'/);
   assert.match(main, /ipcMain\.on\('dashboard:close'/);
+  assert.match(main, /ipcMain\.on\('dashboard:ready'/);
   assert.match(main, /BrowserWindow\.fromWebContents\(event\.sender\)/);
   assert.match(main, /function createDashboardWindow/);
   assert.match(main, /function getDashboardHistory/);
 });
 
+test('dashboard readiness waits for data and recovers only from actual failures', () => {
+  const main = read('src', 'electron', 'main.js');
+  assert.doesNotMatch(main, /dashboardShowFallback|armDashboardShowFallback/);
+  assert.match(main, /webContents\.on\('did-fail-load'/);
+  assert.match(main, /errorCode === -3/);
+  assert.match(main, /webContents\.on\('render-process-gone'/);
+  assert.match(main, /win\.on\('unresponsive'/);
+  assert.match(main, /function discardFailedDashboardWindow\(win, reason\)[\s\S]*?win\.destroy\(\)/);
+  assert.match(main, /const controller = new AbortController\(\);[\s\S]*?signal: controller\.signal[\s\S]*?clearTimeout\(timeout\)/);
+});
+
 test('getDashboardHistory mirrors the local/sync split of fetchStats', () => {
   const main = read('src', 'electron', 'main.js');
-  assert.match(main, /aggregateHistory\(localDevice \? \[localDevice\] : \[\], 0\)/);
+  assert.match(main, /aggregateHistory\(localDevice \? \[localDevice\] : \[\]\)/);
   assert.match(main, /\/api\/history/);
 });
 
@@ -47,7 +61,7 @@ test('dashboard history is gated by the historyEnabled setting', () => {
   const main = read('src', 'electron', 'main.js');
   assert.match(main, /historyEnabled:\s*true/);
   assert.match(main, /historyEnabled:\s*parseBoolean\(patch\.historyEnabled[\s\S]*?,\s*false\)/);
-  assert.match(main, /if \(settings\?\.historyEnabled === false\) return aggregateHistory\(\[\], 0\)/);
+  assert.match(main, /if \(settings\?\.historyEnabled === false\) return aggregateHistory\(\[\]\)/);
   assert.match(main, /historyEnabled:\s*settings\.historyEnabled !== false/);
 });
 
@@ -97,6 +111,33 @@ test('dashboard.js fetches history over IPC and renders both tabs', () => {
   assert.match(js, /charts\.heatmapSvg/);
   assert.match(js, /updateSettings\(\{ dashboardFlat: state\.flat \}\)/);
   assert.match(js, /dashboard\.minimize\(\)/);
+  assert.match(js, /dashboard\.ready\(\)/);
+  assert.match(js, /onDashboardHistoryChanged\?\.\(\(\) => \{ void refresh\(\); \}\)/);
+});
+
+test('dashboard motion is data-scoped and respects reduced-motion preferences', () => {
+  const js = read('src', 'electron', 'renderer', 'dashboard.js');
+  const css = read('src', 'electron', 'renderer', 'dashboard.css');
+  assert.match(js, /prefers-reduced-motion: reduce/);
+  assert.match(js, /function animateChartGeometry/);
+  assert.match(js, /function animateCandles/);
+  assert.match(js, /function animateHeatmapEntry/);
+  assert.match(js, /document\.hasFocus\(\)/);
+  assert.match(js, /\.bar-stack\[data-motion-key\]/);
+  assert.match(js, /is-motion-pending/);
+  assert.doesNotMatch(js, /function animateValue/);
+  assert.match(js, /state\.motion = 'entry'/);
+  assert.match(css, /\.dash-bd-bar-fill[^}]*transform:\s*scaleX\(var\(--bar-scale/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(css, /\.dash-heatmap-wrap\.is-motion-pending[^}]*opacity:\s*0/);
+  assert.doesNotMatch(css, /\.dash-pane[^}]*transition/);
+});
+
+test('main invalidates an open dashboard only when stats history changes', () => {
+  const main = read('src', 'electron', 'main.js');
+  const sendPush = /function sendPush\(payload\)\s*\{([\s\S]*?)\n\}\n\nfunction statsHistoryRevision/.exec(main);
+  assert.ok(sendPush, 'sendPush should be defined before statsHistoryRevision');
+  assert.match(sendPush[1], /if \(payload\?\.data\?\.stats\) \{[\s\S]*?nextHistoryRevision !== previousHistoryRevision[\s\S]*?dashboardWindow\.webContents\.send\('dashboard:historyChanged'\)/);
 });
 
 test('dashboard repains on a rate-only settings push, not just a currency-code change', () => {

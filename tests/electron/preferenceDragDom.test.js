@@ -178,8 +178,23 @@ test('main section holds views; appearance is its own section; window holds beha
   assert.match(appearance, /id="glassInput"/);
   assert.match(appearance, /id="zoomInput"/);
   assert.match(appearance, /id="themePresetChips"/);
-  assert.match(appearance, /id="themeColorGrid"/);
-  assert.match(appearance, /id="vendorColorList"/);
+  assert.match(appearance, /id="themeCodeInput"/);
+  assert.match(appearance, /id="applyThemeCodeButton"/);
+  assert.match(appearance, /id="copyThemeCodeButton"/);
+  assert.match(appearance, /id="themeCodeStatus"[^>]*aria-live="polite"/);
+  assert.match(appearance, /id="themeAdvancedToggle"[^>]*aria-controls="themeAdvancedDetails"/);
+  assert.match(appearance, /id="themeAdvancedDetails" class="cursor-settings-details hidden" inert/);
+  assert.match(appearance, /id="themeVendorToggle"[^>]*aria-controls="themeVendorDetails"/);
+  assert.match(appearance, /id="themeVendorDetails" class="cursor-settings-details hidden" inert/);
+
+  const vendorGroupIndex = appearance.indexOf('id="themeVendorGroup"');
+  assert.ok(vendorGroupIndex > appearance.indexOf('id="themeAdvancedGroup"'), 'vendor colours should follow advanced customization');
+  const advancedGroup = appearance.slice(appearance.indexOf('id="themeAdvancedGroup"'), vendorGroupIndex);
+  const vendorGroup = appearance.slice(vendorGroupIndex);
+  assert.match(advancedGroup, /id="themeColorGrid"/);
+  assert.doesNotMatch(advancedGroup, /id="vendorColorList"/);
+  assert.match(vendorGroup, /id="resetVendorColorsButton"/);
+  assert.match(vendorGroup, /id="vendorColorList"/);
 
   const windowSection = html.slice(
     html.indexOf('<div id="windowSettingsDetails"'),
@@ -202,6 +217,7 @@ test('main section holds views; appearance is its own section; window holds beha
   assert.match(presenceGroup, /id="floatingBubbleInput"/);
   assert.match(presenceGroup, /id="showTrayIconInput"/);
   assert.match(presenceGroup, /id="trayModeInput"/);
+  assert.equal((presenceGroup.match(/value="limitsAllSessions"/g) || []).length, 2);
 
   const showTrayIconIndex = presenceGroup.indexOf('id="showTrayIconInput"');
   const trayIconOptionsIndex = presenceGroup.indexOf('id="trayIconOptions"');
@@ -218,6 +234,47 @@ test('main section holds views; appearance is its own section; window holds beha
     /id="trayIconOptions"[\s\S]*?<\/div>\s*<label class="checkbox-label"><input id="trayModeInput"/,
     'tray-only mode should not sit beside tray icon options'
   );
+});
+
+test('theme code feedback clears when the displayed code changes', () => {
+  const app = readRendererFile('app.js');
+  const build = functionBody(app, 'buildAppearanceColorControls', 'renderThemePresetChips');
+  const clear = functionBody(app, 'clearThemeCodeStatus', 'applyThemeCodeFromInput');
+  const invalidate = functionBody(app, 'invalidateThemeCodeFeedback', 'themeCodeFeedbackIsCurrent');
+  const apply = functionBody(app, 'applyThemeCodeFromInput', 'copyCurrentThemeCode');
+  const paste = functionBody(app, 'pasteAndApplyThemeCode', 'copyCurrentThemeCode');
+  const copy = functionBody(app, 'copyCurrentThemeCode', 'previewVendorColor');
+
+  assert.match(build, /themeCodeInput\.value !== code/);
+  assert.match(build, /invalidateThemeCodeFeedback\(\)/);
+  assert.match(clear, /themeCodeStatus\.textContent = ''/);
+  assert.match(clear, /classList\.remove\('success', 'error'\)/);
+  assert.match(invalidate, /themeCodeFeedbackGeneration \+= 1/);
+  assert.match(app, /themeCodeInput\?\.addEventListener\('input', invalidateThemeCodeFeedback\)/);
+  assert.match(apply, /const generation = invalidateThemeCodeFeedback\(\)/);
+  assert.match(apply, /themeCodeFeedbackIsCurrent\(generation, parsed\.code\)/);
+  assert.match(paste, /const generation = invalidateThemeCodeFeedback\(\)/);
+  assert.match(paste, /const code = els\.themeCodeInput\?\.value/);
+  assert.equal((paste.match(/themeCodeFeedbackIsCurrent\(generation, code\)/g) || []).length, 2);
+  assert.match(paste, /if \(els\.themeCodeInput\) els\.themeCodeInput\.value = trimmed/);
+  assert.match(copy, /const generation = invalidateThemeCodeFeedback\(\)/);
+  assert.match(copy, /themeCodeFeedbackIsCurrent\(generation, code\)/);
+});
+
+test('theme colour accordions share accessible collapsed-state handling', () => {
+  const app = readRendererFile('app.js');
+  const setupStart = app.indexOf('function setupThemeAccordion(');
+  const setupEnd = app.indexOf('\nsetupThemeAccordion(els.themeAdvancedGroup', setupStart);
+  assert.notEqual(setupStart, -1, 'setupThemeAccordion function should exist');
+  assert.notEqual(setupEnd, -1, 'theme accordion setup calls should follow the helper');
+  const setup = app.slice(setupStart, setupEnd);
+
+  assert.match(setup, /toggle\.setAttribute\('aria-expanded', String\(open\)\)/);
+  assert.match(setup, /details\.classList\.toggle\('hidden', !open\)/);
+  assert.match(setup, /details\.inert = !open/);
+  assert.match(setup, /group\.classList\.toggle\('expanded', open\)/);
+  assert.match(app, /setupThemeAccordion\(els\.themeAdvancedGroup, els\.themeAdvancedToggle, els\.themeAdvancedDetails\)/);
+  assert.match(app, /setupThemeAccordion\(els\.themeVendorGroup, els\.themeVendorToggle, els\.themeVendorDetails\)/);
 });
 
 test('Trends has a master toggle separate from main-screen visibility', () => {
@@ -237,6 +294,32 @@ test('Trends has a master toggle separate from main-screen visibility', () => {
   assert.match(app, /row\.classList\.toggle\('is-disabled'/);
   assert.match(css, /\.view-preference-row\.is-disabled/);
   assert.match(css, /\.trend-settings-list/);
+});
+
+test('session archive retention has its own setting separate from Trends', () => {
+  const app = readRendererFile('app.js');
+  const html = readRendererFile('index.html');
+  const css = readRendererFile('styles.css');
+  const main = readRendererFile('../main.js');
+  const agent = readRendererFile('../../agent/agent.js');
+  const preload = readRendererFile('../preload.js');
+  assert.match(html, /settings-subgroup session-archive-settings/);
+  assert.match(html, /id="sessionUsageArchiveInput"/);
+  assert.match(html, /id="sessionUsageArchiveStatus"/);
+  assert.match(html, /id="clearSessionUsageArchiveButton" class="session-archive-clear"/);
+  assert.match(app, /sessionUsageArchiveEnabled:\s*els\.sessionUsageArchiveInput\.checked/);
+  assert.doesNotMatch(app, /sessionUsageArchiveCount/);
+  assert.match(app, /sessionRowsApi\.archivedSessionCount\(state\.stats\)/);
+  assert.match(app, /sessionUsageArchiveEnabled === false[\s\S]{0,160}sessionArchivePaused/);
+  assert.doesNotMatch(app, /sessionSettingsExpanded|renderSessionSettingsList/);
+  assert.match(css, /\.session-archive-clear\s*\{[\s\S]*?width:\s*auto;[\s\S]*?font-size:\s*10px;/);
+  assert.match(main, /sessionUsageArchiveEnabled:\s*parseBoolean\(process\.env\.TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED,\s*true\)/);
+  assert.doesNotMatch(main, /sessionUsageArchiveCount:/);
+  assert.match(main, /settings\?\.sessionUsageArchiveEnabled === false/);
+  assert.match(main, /ipcMain\.handle\('sessionUsageArchive:clear'/);
+  assert.match(agent, /TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED,\s*true\)/);
+  assert.match(preload, /clearSessionUsageArchive/);
+  assert.doesNotMatch(app, /historyEnabled[\s\S]{0,120}sessionUsageArchiveEnabled|sessionUsageArchiveEnabled[\s\S]{0,120}historyEnabled/);
 });
 
 test('view visibility changes do not toggle trend history collection', () => {

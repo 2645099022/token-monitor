@@ -17,6 +17,7 @@ const {
   homeActivityScrollRecord,
   homeTrendSummary,
   pickHomeHistory,
+  patchDailyToday,
   historyPreviewKey,
   shouldFetchHomeHistory
 } = require('../../src/electron/renderer/homeOverview');
@@ -48,6 +49,8 @@ test('Home activity heatmap is a scaled copy of the dashboard heatmap', () => {
     assert.equal(fill(css, homeSelector), fill(dashboardCss, dashboardSelector));
   }
   assert.doesNotMatch(rule(css, '.home-activity-scroll'), /padding-block/);
+  assert.match(rule(css, '.home-activity-canvas .heat-bright-layer'), /pointer-events:\s*none/);
+  assert.match(rule(css, '.home-activity-tooltip'), /position:\s*fixed/);
   assert.match(rule(css, '.home-activity-canvas .heat-month'), /fill:\s*rgba\(var\(--line-rgb\), 0\.5\)/);
 });
 
@@ -59,6 +62,35 @@ test('Home module selection is independent from main view preferences', () => {
   assert.match(match[1], /hiddenHomeModuleSet|orderedHomeModules|HOME_MODULE_OPTIONS/);
   assert.match(rendererSource, /function renderHomeToolModule/);
   assert.match(rendererSource, /function renderHomeDeviceModule/);
+});
+
+test('Home activity uses a custom spotlight hover instead of native SVG titles', () => {
+  const rendererSource = fs.readFileSync(path.join(__dirname, '../../src/electron/renderer/app.js'), 'utf8');
+  const match = rendererSource.match(/function renderHomeTrendsModule\(\) \{([\s\S]*?)\n\}\n\nfunction renderHome/);
+  assert.ok(match, 'renderHomeTrendsModule exists');
+  assert.match(match[1], /setupHomeActivityHover\(activityScroll\)/);
+  assert.match(match[1], /spotlightId:\s*'homeActivitySpotlight'/);
+  assert.doesNotMatch(match[1], /titleOf:/);
+});
+
+test('Home activity tooltip is dismissed on Home rerender and when the view leaves Home', () => {
+  const rendererSource = fs.readFileSync(path.join(__dirname, '../../src/electron/renderer/app.js'), 'utf8');
+  // The body-level tooltip only has scroller-local pointer handlers; DOM removal fires
+  // no pointerleave, so the hover setup must expose a teardown other code can invoke.
+  assert.match(rendererSource, /state\.homeActivityHoverTeardown\s*=\s*hide/);
+  // Clearing the ref after teardown lets a discarded scroller closure be collected.
+  const hideFn = rendererSource.match(/function hideHomeActivityTooltip\(\) \{([\s\S]*?)\n\}/);
+  assert.ok(hideFn, 'hideHomeActivityTooltip exists');
+  assert.match(hideFn[1], /state\.homeActivityHoverTeardown\s*=\s*null/);
+  // renderHome replaces the scroller that owns those handlers — it must hide the tooltip
+  // before rebuilding, or a cell hovered across a stats refresh leaves a stale tooltip.
+  const renderHome = rendererSource.match(/function renderHome\(\) \{([\s\S]*?)\n\}\n\nfunction render\(\)/);
+  assert.ok(renderHome, 'renderHome exists');
+  assert.match(renderHome[1], /hideHomeActivityTooltip\(\)/);
+  // Leaving Home for another view must also dismiss it (the panel is only CSS-hidden).
+  const render = rendererSource.match(/function render\(\) \{([\s\S]*?)\n\}\n\nfunction setStatus/);
+  assert.ok(render, 'render exists');
+  assert.match(render[1], /breakdown !== 'home'[\s\S]*?hideHomeActivityTooltip\(\)/);
 });
 
 test('Home device rows keep only the local badge and mute stale devices without status text', () => {
@@ -80,7 +112,7 @@ test('homeLimitAccounts keeps account windows together and sorts lowest remainin
     {
       key: 'codex:1',
       providerId: 'codex',
-      name: 'linus@example.com',
+      name: 'secondary@example.com',
       color: '#49a3b0',
       windows: [
         { kind: 'session', usedPercent: 30 },
@@ -90,7 +122,7 @@ test('homeLimitAccounts keeps account windows together and sorts lowest remainin
     {
       key: 'codex:0',
       providerId: 'codex',
-      name: 'javis@example.com',
+      name: 'primary@example.com',
       color: '#49a3b0',
       windows: [
         { kind: 'weekly', usedPercent: 57, resetDescription: '4d 13h' },
@@ -100,7 +132,7 @@ test('homeLimitAccounts keeps account windows together and sorts lowest remainin
   ]);
 
   assert.equal(rows.length, 2);
-  assert.equal(rows[0].name, 'javis@example.com');
+  assert.equal(rows[0].name, 'primary@example.com');
   assert.equal(rows[0].providerId, 'codex');
   assert.equal(rows[0].lowestRemaining, 0);
   assert.deepEqual(rows[0].windows.map((window) => window.kind), ['session', 'weekly']);
@@ -157,6 +189,119 @@ test('homeLimitAccountsForProviders includes Grok billing and DeepSeek balance r
   assert.deepEqual(rows[1].windows.map((window) => [window.kind, window.label, window.remainingPercent, window.amount, window.currency, window.value]), [
     ['balance', 'balance', 100, 4.61, 'CNY', '']
   ]);
+});
+
+test('homeLimitAccountsForProviders includes MiMo Token Plan status and balance', () => {
+  const rows = homeLimitAccountsForProviders({
+    providers: [
+      {
+        provider: 'mimo',
+        windows: [],
+        balance: { amount: 7.51, currency: 'CNY', planStatus: 'active', planUsed: 250, planLimit: 1000 }
+      },
+      {
+        provider: 'mimo',
+        windows: [{ kind: 'billing', label: 'Token Plan', remainingPercent: 100 }],
+        balance: { amount: 7.51, currency: 'CNY', planStatus: 'expired' }
+      }
+    ],
+    providerOptions: [{ id: 'mimo', label: 'MiMo' }],
+    enabledProviderIds: ['mimo'],
+    colors: { mimo: '#5daeea' },
+    limit: 5
+  });
+
+  assert.deepEqual(rows[0].windows.map((window) => window.kind), ['billing', 'balance']);
+  assert.equal(rows[0].windows[0].remainingPercent, 75);
+  assert.equal(rows[0].windows[1].amount, 7.51);
+  assert.deepEqual(rows[1].windows.map((window) => [window.kind, window.planStatus]), [
+    ['billing', 'expired'],
+    ['balance', '']
+  ]);
+});
+
+test('MiMo balance without plan data does not synthesize a Token Plan meter', () => {
+  const rows = homeLimitAccountsForProviders({
+    providers: [{
+      provider: 'mimo',
+      accountKey: 'mimo-no-plan',
+      status: 'ok',
+      windows: [],
+      balance: {
+        amount: 9.61,
+        currency: 'CNY',
+        planStatus: null,
+        planUsed: null,
+        planLimit: null,
+        planPercent: null
+      }
+    }],
+    providerOptions: [{ id: 'mimo', label: 'MiMo' }],
+    enabledProviderIds: ['mimo'],
+    colors: { mimo: '#5daeea' },
+    limit: 5
+  });
+
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].windows.map((window) => window.kind), ['balance']);
+  assert.equal(rows[0].windows.some((window) => window.kind === 'billing'), false);
+  assert.equal(rows[0].windows[0].amount, 9.61);
+});
+
+test('MiMo empty plan values do not synthesize a Token Plan meter', () => {
+  const rows = homeLimitAccounts([
+    {
+      key: 'mimo-empty-plan',
+      providerId: 'mimo',
+      name: 'MiMo',
+      windows: [],
+      balance: {
+        amount: 4.83,
+        currency: 'CNY',
+        planUsed: '',
+        planLimit: '',
+        planPercent: ''
+      }
+    }
+  ]);
+
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].windows.map((window) => window.kind), ['balance']);
+});
+
+test('MiMo active unused plan keeps a real 100 percent remaining meter', () => {
+  const rows = homeLimitAccounts([
+    {
+      key: 'mimo-active-plan',
+      providerId: 'mimo',
+      name: 'MiMo',
+      windows: [],
+      balance: {
+        amount: 9.61,
+        currency: 'CNY',
+        planUsed: 0,
+        planLimit: 1000,
+        planPercent: 0
+      }
+    }
+  ]);
+
+  assert.equal(rows.length, 1);
+  const billing = rows[0].windows.find((window) => window.kind === 'billing');
+  assert.ok(billing);
+  assert.equal(billing.remainingPercent, 100);
+});
+
+test('home limit windows ignore missing percentage values', () => {
+  const rows = homeLimitAccounts([
+    {
+      key: 'missing-meter',
+      providerId: 'mimo',
+      windows: [{ kind: 'billing', usedPercent: null, remainingPercent: null }]
+    }
+  ]);
+
+  assert.deepEqual(rows, []);
 });
 
 test('homeModelRows returns one-line token shares without cost fields', () => {
@@ -312,6 +457,37 @@ test('pickHomeHistory falls back to the preview rather than shadowing it with an
 test('pickHomeHistory returns an empty-daily shape when both sources are empty', () => {
   assert.deepEqual(pickHomeHistory(null, null), { daily: [] });
   assert.equal(pickHomeHistory(emptyHistory, emptyHistory), emptyHistory);
+});
+
+test('patchDailyToday overwrites the frozen today bucket with the live headline total', () => {
+  const daily = [
+    { date: '2026-07-06', tokens: 200, cost: 2 },
+    { date: '2026-07-07', tokens: 61_500_000, cost: 490 } // stale one-shot snapshot
+  ];
+  const patched = patchDailyToday(daily, '2026-07-07', 61_700_000, 492.5);
+  const patchedToday = patched.find((d) => d.date === '2026-07-07');
+  assert.equal(patchedToday.tokens, 61_700_000);
+  assert.equal(patchedToday.cost, 492.5); // cost drives the heatmap intensity, patch it too
+  assert.equal(patched.find((d) => d.date === '2026-07-06').tokens, 200); // past days untouched
+  assert.equal(patched.length, 2);
+  assert.equal(daily[1].tokens, 61_500_000); // input not mutated
+});
+
+test('patchDailyToday appends today with live cost so its heatmap cell is not empty', () => {
+  const daily = [{ date: '2026-07-06', tokens: 200, cost: 2 }];
+  const patched = patchDailyToday(daily, '2026-07-07', 61_700_000, 492.5);
+  assert.equal(patched.length, 2);
+  const appended = patched[patched.length - 1];
+  assert.equal(appended.date, '2026-07-07');
+  assert.equal(appended.tokens, 61_700_000);
+  assert.equal(appended.cost, 492.5); // intensity uses cost — a 0 here renders today as empty
+});
+
+test('renderHomeTrendsModule patches the activity today cell with the live period total', () => {
+  const rendererSource = fs.readFileSync(path.join(__dirname, '../../src/electron/renderer/app.js'), 'utf8');
+  const match = rendererSource.match(/function renderHomeTrendsModule\(\) \{([\s\S]*?)\n\}\n\nfunction renderHome/);
+  assert.ok(match, 'renderHomeTrendsModule exists');
+  assert.match(match[1], /patchDailyToday\([\s\S]*?totalTokens/);
 });
 
 test('historyPreviewKey is empty for no days and changes as the daily tail moves', () => {

@@ -5,10 +5,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const accountIdentityApi = require('../../src/electron/renderer/accountIdentity');
 
 const {
   apiKeyAccountStatus,
   isCodexLiveAccount,
+  limitProviderDisplayLabel,
   limitProviderCapabilityTags,
   limitProviderMainDeviceLabel,
   limitProviderProvenance,
@@ -38,6 +40,15 @@ test('isCodexLiveAccount stays marked when both devices are signed in but the re
   assert.equal(isCodexLiveAccount(liveProvider, { selectedIsRemote: true, hasLocalCandidate: true }), true);
 });
 
+test('limitProviderDisplayLabel normalizes short account labels without rewriting identifiers', () => {
+  assert.equal(limitProviderDisplayLabel('plus'), 'Plus');
+  assert.equal(limitProviderDisplayLabel('pro'), 'Pro');
+  assert.equal(limitProviderDisplayLabel('go'), 'Go');
+  assert.equal(limitProviderDisplayLabel('Team'), 'Team');
+  assert.equal(limitProviderDisplayLabel('primary.user@example.com'), 'primary.user@example.com');
+  assert.equal(limitProviderDisplayLabel(''), '');
+});
+
 const rendererDir = path.join(__dirname, '..', '..', 'src', 'electron', 'renderer');
 
 function readRendererFile(name) {
@@ -57,7 +68,15 @@ function runLocalProviderStatus(source, state, providerName) {
   const localProviderHelper = functionBody(source, 'localProviderStatus', 'deepseekAccountLinked');
   return vm.runInNewContext(
     `${localDeviceHelper}\n${localProviderHelper}\nlocalProviderStatus(${JSON.stringify(providerName)});`,
-    { state }
+    { accountIdentityApi, state }
+  );
+}
+
+function runLocalLiveCodexProvider(source, state) {
+  const liveHelper = functionBody(source, 'localLiveCodexProvider', 'codexActiveAccountFromStats');
+  return vm.runInNewContext(
+    `${liveHelper}\nlocalLiveCodexProvider();`,
+    { accountIdentityApi, state }
   );
 }
 
@@ -82,6 +101,16 @@ test('Minimax capability tags are localized in settings', () => {
   assert.match(i18n, /'settings\.limits\.capability\.apiKey': 'API key'/);
   assert.match(i18n, /'settings\.limits\.capability\.apiKey': 'API 金鑰'/);
   assert.match(i18n, /'settings\.limits\.capability\.apiKey': 'API 密钥'/);
+});
+
+test('Coding Plan capability tags are localized in settings', () => {
+  const app = readRendererFile('app.js');
+  const i18n = readRendererFile('i18n.js');
+
+  assert.match(app, /'Coding Plan': 'settings\.limits\.capability\.codingPlan'/);
+  assert.match(app, /'AK\/SK': 'settings\.limits\.capability\.akSk'/);
+  assert.match(i18n, /'settings\.limits\.capability\.codingPlan': 'Coding Plan'/);
+  assert.match(i18n, /'settings\.limits\.capability\.akSk': 'AK\/SK'/);
 });
 
 test('Grok CLI/Web capability tag is localized in settings', () => {
@@ -305,12 +334,47 @@ test('Codex limits render as one provider group with account subrows', () => {
   assert.match(styles, /\.limit-account-row\s*\{/);
 });
 
-test('tray all-sessions mode can consider multiple providers for one configured id', () => {
+test('tray primary-limit modes use the shared provider-aware resolver', () => {
   const app = readRendererFile('app.js');
   const pickConfigured = functionBody(app, 'pickConfiguredSessionProviders', 'renderAllSessionsIcon');
+  const renderAllSessions = functionBody(app, 'renderAllSessionsIcon', 'renderLimitSessionsIcon');
+  const renderBars = functionBody(app, 'renderBarsIcon', 'pickConfiguredSessionProviders');
+  const pickSession = functionBody(app, 'pickWorstSessionProvider', 'pickWorstWeeklyProvider');
 
-  assert.match(pickConfigured, /providersByLimitProviderId\(providers\)/);
-  assert.doesNotMatch(pickConfigured, /new Map\(providers\.map\(\(p\) => \[String\(p\.provider\)\.toLowerCase\(\), p\]\)\)/);
+  assert.match(pickConfigured, /pickConfiguredLimitProviders\(stats/);
+  assert.match(pickSession, /pickLimitProviderByKindPriority\(stats, \['session', 'weekly'\]\)/);
+  assert.match(renderBars, /primaryWindow/);
+  assert.match(renderBars, /secondaryWindow/);
+  assert.doesNotMatch(renderBars, /\.find\(\(w\) => w\.kind/);
+  assert.match(renderAllSessions, /trayBarsLayout\(height, \{ contentOnly: true \}\)/);
+});
+
+test('limit percent tray mode renders provider icons into a generated tray image', () => {
+  const app = readRendererFile('app.js');
+  const main = fs.readFileSync(path.join(__dirname, '../../src/electron/main.js'), 'utf8');
+  const renderLimitSessionsIcon = functionBody(app, 'renderLimitSessionsIcon', 'barsDataUrlForMode');
+  const maybeUpdateBarsIcon = functionBody(app, 'maybeUpdateBarsIcon', 'loadImage');
+  const updateTrayDisplay = functionBody(main, 'updateTrayDisplay', 'sendStatus');
+
+  assert.match(renderLimitSessionsIcon, /pickConfiguredSessionProviders\(stats, configOrder\)/);
+  assert.match(renderLimitSessionsIcon, /trayBarsLayout\(height/);
+  assert.match(renderLimitSessionsIcon, /layout\.iconSize/);
+  assert.match(renderLimitSessionsIcon, /picks\.length === 1/);
+  assert.match(renderLimitSessionsIcon, /primaryWindow/);
+  assert.match(renderLimitSessionsIcon, /secondaryWindow/);
+  assert.match(renderLimitSessionsIcon, /trayProviderImages\[pick\.providerRecord\.provider\]/);
+  assert.match(renderLimitSessionsIcon, /`500 \$\{fontSize\}px/);
+  assert.match(renderLimitSessionsIcon, /formatPercent\(limitFillPercent/);
+  assert.match(renderLimitSessionsIcon, /·/);
+  assert.match(maybeUpdateBarsIcon, /limitsAllSessions/);
+  assert.match(maybeUpdateBarsIcon, /trayDataUrlForMode\(mode, 44\)/);
+  assert.match(maybeUpdateBarsIcon, /\{ \[mode\]: dataUrl \|\| null \}/);
+  assert.match(updateTrayDisplay, /mode === 'limitsAllSessions'/);
+  assert.match(updateTrayDisplay, /const barsImageMode = .*?!limitText && providerTrayIcons\[mode\]/);
+  assert.match(updateTrayDisplay, /Boolean\(limitText\)/);
+  assert.match(updateTrayDisplay, /const limitText = formatTrayText/);
+  assert.match(updateTrayDisplay, /trayImageMode[\s\S]*?\? '' : limitText/);
+  assert.match(main, /if \(dataUrl === null\) \{[\s\S]*?delete providerTrayIcons\[id\]/);
 });
 
 test('Grok renders its single Monthly billing window full-width instead of an empty session/weekly pair', () => {
@@ -324,6 +388,55 @@ test('Grok renders its single Monthly billing window full-width instead of an em
   assert.match(renderProviderWindows, /windowForKind\(provider, 'billing'\)/);
   assert.match(renderProviderWindows, /limitWindowNode\(monthly\.label \|\| 'Monthly', monthly, color, 0\.68\)/);
   assert.match(renderProviderWindows, /limit-window-wide/);
+});
+
+test('Qoder renders its single Credits billing window full-width', () => {
+  const app = readRendererFile('app.js');
+  const renderProviderWindows = functionBody(app, 'renderProviderWindows', 'renderLimitProviderRow');
+
+  assert.match(renderProviderWindows, /provider\.provider === 'qoder'/);
+  assert.match(renderProviderWindows, /const credits = windowForKind\(provider, 'billing'\);/);
+  assert.match(renderProviderWindows, /formatLimitCount\(credits, Boolean\(state\.settings\?\.showLimitUsed\)\)/);
+  assert.match(renderProviderWindows, /limit-window-wide/);
+});
+
+test('Ollama renders Session and Weekly usage windows', () => {
+  const app = readRendererFile('app.js');
+  const renderProviderWindows = functionBody(app, 'renderProviderWindows', 'renderLimitProviderRow');
+  assert.match(renderProviderWindows, /provider\.provider === 'ollama'/);
+  assert.match(renderProviderWindows, /windowForKind\(provider, 'session'\)/);
+  assert.match(renderProviderWindows, /windowForKind\(provider, 'weekly'\)/);
+  assert.match(renderProviderWindows, /limitWindowNode\('Session', session/);
+  assert.match(renderProviderWindows, /limitWindowNode\('Weekly', weekly/);
+});
+
+test('Volcengine renders 5-hour, Weekly, and Monthly quota windows', () => {
+  const app = readRendererFile('app.js');
+  const renderProviderWindows = functionBody(app, 'renderProviderWindows', 'renderLimitProviderRow');
+
+  assert.match(renderProviderWindows, /provider\.provider === 'volcengine'/);
+  assert.match(renderProviderWindows, /const session = windowForKind\(provider, 'session'\);/);
+  assert.match(renderProviderWindows, /const weekly = windowForKind\(provider, 'weekly'\);/);
+  assert.match(renderProviderWindows, /const monthly = windowForKind\(provider, 'billing'\);/);
+  assert.match(renderProviderWindows, /limitWindowNode\(session\.label \|\| '5-hour', session, color, 0\.95\)/);
+  assert.match(renderProviderWindows, /limitWindowNode\('Weekly', weekly, color, 0\.68\)/);
+  assert.match(renderProviderWindows, /limitWindowNode\('Monthly', monthly, color, 0\.68\)/);
+  assert.match(renderProviderWindows, /monthlyNode\.classList\.add\('limit-window-wide'\)/);
+});
+
+test('Z.ai renders 5-hour and Weekly first, then MCP full-width', () => {
+  const app = readRendererFile('app.js');
+  const renderProviderWindows = functionBody(app, 'renderProviderWindows', 'renderLimitProviderRow');
+
+  assert.match(renderProviderWindows, /provider\.provider === 'zai'/);
+  assert.match(renderProviderWindows, /const fiveHour = windowForKind\(provider, 'session'\);/);
+  assert.match(renderProviderWindows, /const weekly = windowForKind\(provider, 'weekly'\);/);
+  assert.match(renderProviderWindows, /const mcp = windowForKind\(provider, 'billing'\);/);
+  assert.match(renderProviderWindows, /const fiveHourNode = limitWindowNode\('5-hour', fiveHour, color, 0\.95\)/);
+  assert.match(renderProviderWindows, /if \(!weekly\) fiveHourNode\.classList\.add\('limit-window-wide'\)/);
+  assert.match(renderProviderWindows, /limitWindowNode\('Weekly', weekly, color, 0\.68\)/);
+  assert.match(renderProviderWindows, /const mcpNode = limitWindowNode\('MCP', mcp, color, 0\.68\)/);
+  assert.match(renderProviderWindows, /mcpNode\.classList\.add\('limit-window-wide'\)/);
 });
 
 test('Copilot renders monthly Premium and Chat quotas as billing windows', () => {
@@ -340,76 +453,60 @@ test('Codex renders manual reset credits below session and weekly windows', () =
   const app = readRendererFile('app.js');
   const styles = readRendererFile('styles.css');
   const renderProviderWindows = functionBody(app, 'renderProviderWindows', 'renderLimitProviderRow');
-  const resetCreditsValue = functionBody(app, 'formatCodexResetCreditsValue', 'formatCodexResetCreditsExpiry');
-  const resetCreditsExpiry = functionBody(app, 'formatCodexResetCreditsExpiry', 'codexResetCreditExpirationDates');
+  const resetCreditsValue = functionBody(app, 'formatCodexResetCreditsValue', 'codexResetCreditExpirationDates');
   const resetCreditExpirationDates = functionBody(app, 'codexResetCreditExpirationDates', 'codexResetCreditExpiryLabel');
-  const resetCreditExpiryLabel = functionBody(app, 'codexResetCreditExpiryLabel', 'codexResetCreditsNode');
+  const resetCreditExpiryLabel = functionBody(app, 'codexResetCreditExpiryLabel', 'codexResetCreditExpiryDetailLabel');
+  const resetCreditExpiryDetailLabel = functionBody(app, 'codexResetCreditExpiryDetailLabel', 'codexResetCreditExpiryDateLabel');
+  const resetCreditExpiryDateLabel = functionBody(app, 'codexResetCreditExpiryDateLabel', 'resetCreditsTooltipShouldHoldRender');
   const codexResetCreditsNode = functionBody(app, 'codexResetCreditsNode', 'renderLimitProviderHead');
   const resetCreditsTooltipShouldHoldRender = functionBody(app, 'resetCreditsTooltipShouldHoldRender', 'flushPendingResetCreditsTooltipRender');
-  const flushPendingResetCreditsTooltipRender = functionBody(app, 'flushPendingResetCreditsTooltipRender', 'codexResetCreditsNode');
   const renderLimits = functionBody(app, 'renderLimits', 'serviceStatusLabel');
 
-  assert.match(app, /resetCreditsTooltipHasOpened: false/);
-  assert.match(app, /resetCreditsTooltipActive: false/);
-  assert.match(app, /resetCreditsTooltipRenderPending: false/);
   assert.match(renderProviderWindows, /provider\.provider === 'codex'/);
+  assert.match(renderProviderWindows, /if \(!weekly\) sessionNode\.classList\.add\('limit-window-wide'\);/);
+  assert.match(renderProviderWindows, /if \(!session\) weeklyNode\.classList\.add\('limit-window-wide'\);/);
   assert.match(renderProviderWindows, /const resetNode = codexResetCreditsNode\(provider\.resetCredits\);/);
   assert.doesNotMatch(renderProviderWindows, /limitWindowNode\('Reset credits'/);
   assert.match(resetCreditsValue, /if \(count <= 0\) return '';/);
   assert.match(resetCreditsValue, /return `\$\{count\} reset\$\{count === 1 \? '' : 's'\}`;/);
-  assert.doesNotMatch(resetCreditsValue, /available`;/);
-  assert.match(resetCreditsExpiry, /`Next expires in \$\{formatDuration\(diffMs\)\}`/);
   assert.match(resetCreditExpirationDates, /resetCredits\?\.expirations/);
   assert.match(resetCreditExpirationDates, /\.sort\(\(a, b\) => a\.getTime\(\) - b\.getTime\(\)\)/);
-  assert.match(resetCreditExpiryLabel, /`Expires in \$\{formatDuration\(diffMs\)\}`/);
+  assert.match(resetCreditExpirationDates, /resetCredits\?\.nextExpiresAt/);
+  assert.match(resetCreditExpiryLabel, /diffMs <= 0 \? 'now'/);
+  assert.match(resetCreditExpiryLabel, /formatDuration\(diffMs\)/);
+  assert.match(resetCreditExpiryDetailLabel, /`Expires in \$\{formatDuration\(diffMs\)\}`/);
+  assert.match(resetCreditExpiryDateLabel, /Intl\.DateTimeFormat\(currentLocale\(\), \{ month: 'numeric', day: 'numeric' \}\)/);
   assert.match(codexResetCreditsNode, /limit-reset-credits/);
   assert.match(codexResetCreditsNode, /limit-reset-credits-line/);
+  assert.match(codexResetCreditsNode, /limit-reset-credits-timeline/);
+  assert.match(codexResetCreditsNode, /limit-reset-credits-time/);
+  assert.match(codexResetCreditsNode, /limit-reset-credits-separator/);
+  assert.match(codexResetCreditsNode, /separator\.textContent = '·'/);
   assert.match(codexResetCreditsNode, /limit-reset-credits-info-wrap/);
-  assert.match(codexResetCreditsNode, /limit-reset-credits-info/);
   assert.match(codexResetCreditsNode, /limit-reset-credits-tooltip/);
-  assert.match(codexResetCreditsNode, /infoWrap\.classList\.toggle\('has-opened', state\.resetCreditsTooltipHasOpened\);/);
-  assert.match(codexResetCreditsNode, /pointerenter/);
-  assert.match(codexResetCreditsNode, /focusin/);
-  assert.match(codexResetCreditsNode, /state\.resetCreditsTooltipHasOpened = true;/);
-  assert.match(codexResetCreditsNode, /state\.resetCreditsTooltipActive = true;/);
-  assert.match(codexResetCreditsNode, /infoWrap\.classList\.add\('has-opened'\);/);
+  assert.match(codexResetCreditsNode, /expirationDates\.slice\(0, 3\)\.map\(codexResetCreditExpiryLabel\)/);
+  assert.match(codexResetCreditsNode, /hiddenExpirationCount = expirationDates\.length - summaryParts\.length/);
+  assert.match(codexResetCreditsNode, /summaryParts\.push\(`\+\$\{hiddenExpirationCount\}`\)/);
+  assert.match(codexResetCreditsNode, /expirationDates\.forEach/);
+  assert.match(codexResetCreditsNode, /label\.textContent = codexResetCreditExpiryDateLabel\(date\)/);
+  assert.match(codexResetCreditsNode, /tooltipExpiry\.textContent = codexResetCreditExpiryLabel\(date\)/);
+  assert.match(codexResetCreditsNode, /state\.resetCreditsTooltipActive = true/);
   assert.match(codexResetCreditsNode, /addEventListener\('pointerenter', markResetCreditsTooltipOpened\)/);
-  assert.match(codexResetCreditsNode, /addEventListener\('focusin', markResetCreditsTooltipOpened\)/);
-  assert.match(codexResetCreditsNode, /addEventListener\('pointerleave', releaseResetCreditsTooltip\)/);
-  assert.match(codexResetCreditsNode, /addEventListener\('focusout', releaseResetCreditsTooltip\)/);
-  assert.match(codexResetCreditsNode, /infoWrap\.matches\(':hover, :focus-within'\)/);
-  assert.match(codexResetCreditsNode, /info\.textContent = 'i';/);
-  assert.match(codexResetCreditsNode, /infoWrap\.append\(info, tooltip\);/);
-  assert.match(codexResetCreditsNode, /expiryGroup\.append\(infoWrap\);/);
-  assert.match(codexResetCreditsNode, /tabIndex = 0/);
-  assert.doesNotMatch(codexResetCreditsNode, /aria-expanded/);
-  assert.doesNotMatch(codexResetCreditsNode, /addEventListener\('click'/);
   assert.match(codexResetCreditsNode, /formatCodexResetCreditsValue\(resetCredits\)/);
-  assert.match(codexResetCreditsNode, /formatCodexResetCreditsExpiry\(resetCredits\)/);
   assert.match(codexResetCreditsNode, /aria-label/);
   assert.match(resetCreditsTooltipShouldHoldRender, /state\.resetCreditsTooltipActive/);
-  assert.match(resetCreditsTooltipShouldHoldRender, /querySelector\('\.limit-reset-credits-info-wrap:hover, \.limit-reset-credits-info-wrap:focus-within'\)/);
-  assert.match(flushPendingResetCreditsTooltipRender, /state\.resetCreditsTooltipRenderPending/);
-  assert.match(flushPendingResetCreditsTooltipRender, /state\.breakdown !== 'limits'/);
-  assert.match(flushPendingResetCreditsTooltipRender, /renderLimits\(\)/);
-  assert.match(renderLimits, /if \(resetCreditsTooltipShouldHoldRender\(\)\) \{/);
-  assert.match(renderLimits, /state\.resetCreditsTooltipRenderPending = true;/);
-  assert.match(renderLimits, /return;/);
-  assert.match(styles, /\.limit-reset-credits\s*\{[^}]*font-size: 9px;/s);
+  assert.match(renderLimits, /const holdResetCreditsTooltipRender = resetCreditsTooltipShouldHoldRender\(\);/);
+  assert.match(renderLimits, /if \(holdResetCreditsTooltipRender \|\| holdCodexSwitchPopoverRender\)/);
+  assert.match(styles, /\.limit-reset-credits\s*\{[^}]*min-height: 11px;[^}]*font-size: 9px;/s);
   assert.match(styles, /\.limit-reset-credits-line\s*\{[^}]*justify-content: space-between;/s);
+  assert.match(styles, /\.limit-reset-credits-expiry-group\s*\{[^}]*flex: 0 0 auto;/s);
+  assert.match(styles, /\.limit-reset-credits-timeline\s*\{[^}]*opacity: 0\.66;/s);
+  assert.match(styles, /\.limit-reset-credits-time\s*\{[^}]*gap: 3px;/s);
   assert.match(styles, /\.limit-reset-credits-info-wrap\s*\{[^}]*position: relative;/s);
-  assert.match(styles, /\.limit-reset-credits-info-wrap\s*\{[^}]*width: 14px;/s);
-  assert.match(styles, /\.limit-reset-credits-info\s*\{[^}]*width: 10px;/s);
-  assert.match(styles, /\.limit-reset-credits-info\s*\{[^}]*cursor: default;/s);
-  assert.match(styles, /\.limit-reset-credits-info\s*\{[^}]*border-radius: 999px;/s);
-  assert.match(styles, /\.limit-reset-credits-tooltip\s*\{[^}]*position: absolute;/s);
-  assert.match(styles, /\.limit-reset-credits-tooltip\s*\{[^}]*rgba\(var\(--glass-rgb\), 0\.76\)/s);
-  assert.match(styles, /\.limit-reset-credits-info-wrap:hover \.limit-reset-credits-tooltip/s);
-  assert.match(styles, /\.limit-reset-credits-info-wrap:focus-within \.limit-reset-credits-tooltip/s);
-  assert.match(styles, /\.limit-reset-credits-info-wrap\.has-opened \.limit-reset-credits-tooltip\s*\{[^}]*transition: none;/s);
-  assert.doesNotMatch(styles, /\.limit-reset-credits-info:hover \+ \.limit-reset-credits-tooltip/);
-  assert.doesNotMatch(styles, /\.limit-reset-credits-details/);
-  assert.match(styles, /\.limit-reset-credits-expiry\s*\{[^}]*opacity: 0\.66;/s);
+  assert.match(styles, /\.limit-reset-credits-tooltip\s*\{[^}]*position: absolute;[^}]*width: max-content;[^}]*grid-template-columns: max-content max-content;/s);
+  assert.match(styles, /\.limit-reset-credit-detail\s*\{[^}]*display: contents;/s);
+  assert.match(styles, /\.limit-reset-credit-detail span:last-child\s*\{[^}]*text-align: right;/s);
+  assert.doesNotMatch(styles, /\.limit-reset-credits-clock/);
 });
 
 test('Home uses explicit billing labels so Copilot Premium and Chat stay distinct', () => {
@@ -424,23 +521,21 @@ test('Home uses explicit billing labels so Copilot Premium and Chat stay distinc
   assert.match(homeLabel, /if \(label\) return label;/);
   assert.match(homeLabel, /billing: 'home\.limit\.billing'/);
   assert.match(homeLabel, /if \(window\?\.kind === 'balance'\) return 'Balance';/);
-  assert.match(homeModule, /value\.textContent = window\.value \|\| formatHomeLimitWindowValue\(window, Boolean\(state\.settings\?\.showLimitUsed\)\);/);
+  assert.match(homeModule, /const showUsed = Boolean\(state\.settings\?\.showLimitUsed\);/);
+  assert.match(homeModule, /value\.textContent = window\.value \|\| formatHomeLimitWindowValue\(window, showUsed\);/);
   assert.match(valueFormatter, /`\$\{formatMoney\(window\.amount, window\.currency\)\} left`/);
   assert.match(valueFormatter, /`\$\{formatPercent\(percent\)\} \$\{limitModeSuffix\(showUsed\)\}`/);
   assert.doesNotMatch(i18n, /home\.limit\.(balance|leftPercent|leftAmount)/);
 });
 
-test('tray bars draw the billing window for a billing-only provider instead of two empty bars', () => {
-  // renderBarsIcon used to unconditionally draw session+weekly, painting two
-  // empty tracks for a Grok-only selection. It must now branch: session/weekly
-  // when present, else the single billing bar on the top track.
+test('tray bars draw the resolved primary window on top and preserve an empty lower track', () => {
   const app = readRendererFile('app.js');
   const renderBarsIcon = functionBody(app, 'renderBarsIcon', 'renderAllSessionsIcon');
 
-  assert.match(renderBarsIcon, /w\.kind === 'billing'/);
-  assert.match(renderBarsIcon, /if \(session \|\| weekly\)/);
-  assert.match(renderBarsIcon, /} else if \(billing\)/);
-  assert.match(renderBarsIcon, /drawBar\(layout\.barsStartY, Number\(billing\.remainingPercent\)\)/);
+  assert.match(renderBarsIcon, /primaryWindow\?\.remainingPercent/);
+  assert.match(renderBarsIcon, /secondaryWindow\?\.remainingPercent/);
+  assert.equal((renderBarsIcon.match(/drawBar\(/g) || []).length, 3);
+  assert.doesNotMatch(renderBarsIcon, /\.find\(\(w\) => w\.kind/);
 });
 
 test('DeepSeek main Limits row uses a balance meter without since-tracking copy', () => {
@@ -459,6 +554,63 @@ test('DeepSeek main Limits row uses a balance meter without since-tracking copy'
   assert.match(styles, /\.limit-window-no-reset \.limit-reset\s*\{/);
 });
 
+test('MiMo main Limits row falls back to balance plan fields for Token Plan', () => {
+  const app = readRendererFile('app.js');
+  const renderProviderWindows = functionBody(app, 'renderProviderWindows', 'renderLimitProviderRow');
+  const tokenPlanFallback = functionBody(app, 'mimoTokenPlanWindowFromBalance', 'limitWindowNode');
+
+  assert.match(renderProviderWindows, /const balance = provider\.balance \|\| null;/);
+  assert.match(renderProviderWindows, /const tokenPlan = windowForKind\(provider, 'billing'\) \|\| mimoTokenPlanWindowFromBalance\(balance\);/);
+  assert.match(renderProviderWindows, /limitWindowNode\(tokenPlan\.label \|\| 'Token Plan', tokenPlan, color, 0\.68\)/);
+  assert.match(renderProviderWindows, /const giftBalance = optionalFiniteNumber\(balance\?\.giftBalance\);/);
+  assert.match(renderProviderWindows, /const cashBalance = optionalFiniteNumber\(balance\?\.cashBalance\);/);
+  assert.match(renderProviderWindows, /const balanceNode = limitWindowNode\(\s*'Balance',\s*\{ showMeter: false \},\s*color,\s*0\.68,\s*balanceText,\s*detailParts\.join\(' · '\)\s*\);/);
+  assert.match(renderProviderWindows, /balanceNode\.classList\.add\('limit-window-wide', 'limit-window-no-reset'\);/);
+  assert.match(tokenPlanFallback, /const used = optionalFiniteNumber\(balance\.planUsed\);/);
+  assert.match(tokenPlanFallback, /const limit = optionalFiniteNumber\(balance\.planLimit\);/);
+  assert.match(tokenPlanFallback, /const percent = optionalFiniteNumber\(balance\.planPercent\);/);
+  assert.match(tokenPlanFallback, /if \(!hasUsed && !hasLimit && !hasPercent\) return null;/);
+  assert.match(tokenPlanFallback, /usedPercent: resolvedPercent/);
+  assert.match(tokenPlanFallback, /remainingPercent: resolvedPercent == null \? null : Math\.max\(0, Math\.min\(100, 100 - resolvedPercent\)\)/);
+});
+
+test('MiMo balance-only accounts do not synthesize an empty Token Plan meter', () => {
+  const app = readRendererFile('app.js');
+  const optionalNumber = functionBody(app, 'optionalFiniteNumber', 'formatLimitWindowValue');
+  const tokenPlanFallback = functionBody(app, 'mimoTokenPlanWindowFromBalance', 'limitWindowNode');
+  const context = {};
+  vm.runInNewContext(`${optionalNumber}\n${tokenPlanFallback}\nresult = mimoTokenPlanWindowFromBalance({
+    planUsed: null,
+    planLimit: null,
+    planPercent: null,
+    planStatus: null
+  });`, context);
+  assert.equal(context.result, null);
+});
+
+test('MiMo expired Token Plan renders a localized status without a meter', () => {
+  const app = readRendererFile('app.js');
+  const i18n = readRendererFile('i18n.js');
+  const renderProviderWindows = functionBody(app, 'renderProviderWindows', 'renderLimitProviderRow');
+  const tokenPlanFallback = functionBody(app, 'mimoTokenPlanWindowFromBalance', 'limitWindowNode');
+
+  assert.match(renderProviderWindows, /balance\?\.planStatus === 'expired'/);
+  assert.match(renderProviderWindows, /\{ showMeter: false \}, color, 0\.68, t\('limits\.mimo\.planExpired'\)/);
+  assert.match(tokenPlanFallback, /if \(balance\.planStatus === 'expired'\) return null;/);
+  assert.match(i18n, /'limits\.mimo\.planExpired': 'Expired'/);
+  assert.match(i18n, /'limits\.mimo\.planExpired': '已过期'/);
+  assert.match(i18n, /'limits\.mimo\.planExpired': '만료됨'/);
+  assert.match(i18n, /'limits\.mimo\.planExpired': '期限切れ'/);
+});
+
+test('main Limits plan text shows failure status before account labels', () => {
+  const app = readRendererFile('app.js');
+  const planBody = functionBody(app, 'limitProviderPlan', 'configuredLimitProviderOrder');
+
+  assert.match(planBody, /if \(provider\?\.status && provider\.status !== 'ok' && !provider\.stale\) return limitStatusLabel\(provider\.status, false\);/);
+  assert.match(planBody, /const label = String\(provider\?\.accountLabel \|\| ''\)\.trim\(\);/);
+});
+
 test('settings provider status waits for stats and refreshes when stats arrive', () => {
   const app = readRendererFile('app.js');
   const renderSettings = functionBody(app, 'renderLimitProviderCheckboxes', 'onToolTrackingToggle');
@@ -469,10 +621,13 @@ test('settings provider status waits for stats and refreshes when stats arrive',
 
   assert.doesNotMatch(renderSettings, /state\.stats \? missingLimitProviderStatus\(\) : 'unavailable'/);
   assert.match(refreshStats, /renderLimitProviderCheckboxes\(\);/);
+  assert.match(refreshStats, /applyCodexActiveAccountFromStats\(\);/);
+  assert.doesNotMatch(refreshStats, /state\.codexActiveAccount = codexActiveAccountFromStats\(\);/);
+  assert.match(statsPush, /applyCodexActiveAccountFromStats\(\);/);
   assert.match(statsPush, /renderLimitProviderCheckboxes\(\);/);
-  // DeepSeek/Minimax account cards read state.stats, so every path that refreshes
-  // stats must re-render both. Grok is automatic and belongs only to the generic
-  // provider list, so it must not retain a separate account-card renderer.
+  // Account cards read state.stats, so every path that refreshes stats must
+  // re-render them. Grok is automatic and belongs only to the generic provider
+  // list, so it must not retain a separate account-card renderer.
   // Settings pushes route through syncSettingsForm (which init() also calls), so
   // the two cards are re-rendered there and
   // onSettingsPush itself does not duplicate the calls.
@@ -481,10 +636,52 @@ test('settings provider status waits for stats and refreshes when stats arrive',
     assert.match(statsPush, new RegExp(`${fn}\\(\\);`), `${fn} missing from onStatsPush`);
     assert.match(syncSettings, new RegExp(`${fn}\\(\\);`), `${fn} missing from syncSettingsForm`);
   }
+  for (const provider of ['zai', 'volcengine', 'qoder', 'kimi', 'ollama']) {
+    assert.match(refreshStats, new RegExp(`renderExternalProviderStatus\\('${provider}'\\);`), `${provider} missing from refreshStats`);
+    assert.match(statsPush, new RegExp(`renderExternalProviderStatus\\('${provider}'\\);`), `${provider} missing from onStatsPush`);
+    assert.match(syncSettings, new RegExp(`renderExternalProviderStatus\\('${provider}'\\);`), `${provider} missing from syncSettingsForm`);
+  }
   for (const fn of ['renderDeepseekStatus', 'renderMinimaxStatus']) {
     assert.doesNotMatch(settingsPush, new RegExp(`${fn}\\(\\);`), `${fn} should not be duplicated in onSettingsPush (syncSettingsForm covers it)`);
   }
   assert.doesNotMatch(app, /renderGrokStatus|grokAccountLinked|grokAccountExpanded/);
+});
+
+test('saving Ollama credentials enables its provider and always settles validation', () => {
+  const app = readRendererFile('app.js');
+  const renderExternalStatus = functionBody(app, 'renderExternalProviderStatus', 'setMinimaxAccountExpanded');
+  const selection = functionBody(app, 'limitProviderSelectionIncluding', 'missingLimitProviderStatus');
+  const setup = functionBody(app, 'setupCursorAccountUI', 'initSettingsAnimationWrappers');
+  const ollamaSetup = setup.slice(
+    setup.indexOf("document.getElementById('ollamaCookieSubmit')"),
+    setup.indexOf('const kimiToggle')
+  );
+  assert.match(selection, /selected\.add\(providerName\)/);
+  assert.match(selection, /\.filter\(\(id\) => selected\.has\(id\)\)/);
+  assert.match(ollamaSetup, /limitProviders: limitProviderSelectionIncluding\('ollama'\)/);
+  assert.match(ollamaSetup, /limitsEnabled: true/);
+  assert.match(ollamaSetup, /await window\.tokenMonitor\.ollama\.validateCookie\(input\.value\)/);
+  assert.match(ollamaSetup, /if \(!validation\?\.ok\)/);
+  assert.doesNotMatch(ollamaSetup, /await refreshStats\(\{ force: true \}\);/);
+  assert.match(ollamaSetup, /clearExternalProviderCheckPending\('ollama'\);/);
+  assert.match(renderExternalStatus, /pending \? t\('settings\.common\.checking'\)/);
+  assert.match(
+    renderExternalStatus,
+    /providerName === 'ollama' && wasPending && !pending && linked[\s\S]*?setExternalAccountExpanded\('ollama', false\)/,
+    'Ollama should collapse only after a fresh provider confirms the account is linked'
+  );
+  assert.doesNotMatch(
+    ollamaSetup,
+    /input\.value = '';[\s\S]*?clearExternalProviderCheckPending\('ollama'\);[\s\S]*?setExternalAccountExpanded\('ollama', false\);/,
+    'a successful save must stay pending until the collector publishes a fresh provider'
+  );
+  assert.doesNotMatch(
+    ollamaSetup,
+    /input\.value = '';[\s\S]*?setExternalAccountExpanded\('ollama', false\);/,
+    'the setup panel must remain open while validation is pending'
+  );
+  assert.match(ollamaSetup, /catch \(err\) \{[\s\S]*?clearExternalProviderCheckPending\('ollama'\);[\s\S]*?renderExternalProviderStatus\('ollama'\);/);
+  assert.match(ollamaSetup, /ollamaValidationError\(validation\)/);
 });
 
 test('account validation reads the local device raw limits, not the collapsed aggregate', () => {
@@ -499,10 +696,9 @@ test('account validation reads the local device raw limits, not the collapsed ag
   // where it has already been dropped. Searching the aggregate would miss the
   // local row and fall back to the remote `ok`, falsely reporting an invalid
   // local key as Linked.
-  assert.match(rawHelper, /state\.stats\?\.devices/);
-  assert.match(rawHelper, /Array\.isArray\(devices\)/);
-  assert.match(rawHelper, /device\.deviceId === localId/);
-  assert.match(rawHelper, /limits\?\.providers/);
+  assert.match(rawHelper, /accountIdentityApi\.localDeviceLimitsProviders/);
+  assert.match(rawHelper, /state\.stats/);
+  assert.match(rawHelper, /state\.settings\?\.deviceId/);
   assert.match(helper, /localDeviceLimitsProviders\(\)/);
   assert.match(helper, /localProviders !== null/);
   // Falls back to the aggregate only for legacy/non-aggregated stats that do
@@ -563,15 +759,31 @@ test('Copilot env token is documented in env example, not the README overview', 
   assert.doesNotMatch(readmeTw, /COPILOT_API_TOKEN|GITHUB_COPILOT_TOKEN/);
 });
 
-test('Accounts summary counts Copilot as the sixth managed account group', () => {
+test('Accounts summary counts all managed account groups including MiMo and Ollama', () => {
   const app = readRendererFile('app.js');
+  const mimoLinkedBody = functionBody(app, 'mimoAccountLinked', 'renderMimoStatus');
   const summaryBody = functionBody(app, 'settingsSectionSummary', 'renderSettingsSummaries');
 
+  assert.match(mimoLinkedBody, /return \(state\.settings\?\.mimoManagedAccounts \|\| \[\]\)\.length > 0;/);
   assert.match(summaryBody, /const minimaxLinked = minimaxAccountLinked\(\);/);
+  assert.match(summaryBody, /const zaiLinked = externalProviderAccountLinked\('zai'\);/);
+  assert.match(summaryBody, /const zaiteamLinked = externalProviderAccountLinked\('zaiteam'\);/);
+  assert.match(summaryBody, /const volcengineLinked = externalProviderAccountLinked\('volcengine'\);/);
+  assert.match(summaryBody, /const qoderLinked = externalProviderAccountLinked\('qoder'\);/);
+  assert.match(summaryBody, /const kimiLinked = externalProviderAccountLinked\('kimi'\);/);
+  assert.match(summaryBody, /const ollamaLinked = externalProviderAccountLinked\('ollama'\);/);
+  assert.match(summaryBody, /const mimoLinked = mimoAccountLinked\(\);/);
   assert.match(summaryBody, /const copilotLinked = copilotAccountLinked\(\);/);
   assert.match(summaryBody, /\(minimaxLinked \? 1 : 0\)/);
+  assert.match(summaryBody, /\(zaiLinked \? 1 : 0\)/);
+  assert.match(summaryBody, /\(zaiteamLinked \? 1 : 0\)/);
+  assert.match(summaryBody, /\(volcengineLinked \? 1 : 0\)/);
+  assert.match(summaryBody, /\(qoderLinked \? 1 : 0\)/);
+  assert.match(summaryBody, /\(kimiLinked \? 1 : 0\)/);
+  assert.match(summaryBody, /\(ollamaLinked \? 1 : 0\)/);
+  assert.match(summaryBody, /\(mimoLinked \? 1 : 0\)/);
   assert.match(summaryBody, /\(copilotLinked \? 1 : 0\)/);
-  assert.match(summaryBody, /total: 6/);
+  assert.match(summaryBody, /total: 13/);
 });
 
 test('account validation does not use a remote aggregate when the local device lacks the provider', () => {
@@ -589,6 +801,61 @@ test('account validation does not use a remote aggregate when the local device l
   }, 'minimax');
 
   assert.equal(provider, null);
+});
+
+test('active Codex account follows the local login, not a remote device signed into a different account', () => {
+  // Local machine is signed into account C (App) and only manages the other two.
+  // A synced device is signed into account A, so aggregateLimits() picks its live
+  // App record for the account A row — which sorts first. Reading the aggregate
+  // would move the ✓ onto account A; the marker must instead track this device's
+  // own live login (account C).
+  const app = readRendererFile('app.js');
+  const localProviders = [
+    { provider: 'codex', status: 'ok', sourceDetail: 'managed', accountKey: 'sha256:account-a', accountEmail: 'primary@example.com' },
+    { provider: 'codex', status: 'ok', sourceDetail: 'managed', accountKey: 'sha256:account-b', accountEmail: 'secondary@example.com' },
+    { provider: 'codex', status: 'ok', sourceDetail: 'app', accountKey: 'sha256:account-c', accountEmail: 'tertiary@example.com' }
+  ];
+  const remoteAccountALive = { provider: 'codex', status: 'ok', sourceDetail: 'app', accountKey: 'sha256:account-a', accountEmail: 'primary@example.com', sourceDeviceId: 'remote-device' };
+  const provider = runLocalLiveCodexProvider(app, {
+    settings: { deviceId: 'this-mac' },
+    stats: {
+      devices: [
+        { deviceId: 'this-mac', limits: { providers: localProviders } },
+        { deviceId: 'remote-device', limits: { providers: [remoteAccountALive] } }
+      ],
+      limits: { providers: [remoteAccountALive, localProviders[1], localProviders[2]] }
+    }
+  });
+
+  assert.equal(provider.accountKey, 'sha256:account-c');
+});
+
+test('no active Codex account when this device is signed out, even if a synced device is live', () => {
+  const app = readRendererFile('app.js');
+  const remoteLive = { provider: 'codex', status: 'ok', sourceDetail: 'app', accountKey: 'sha256:account-a', sourceDeviceId: 'remote-device' };
+  const provider = runLocalLiveCodexProvider(app, {
+    settings: { deviceId: 'this-mac' },
+    stats: {
+      devices: [
+        { deviceId: 'this-mac', limits: { providers: [{ provider: 'codex', status: 'ok', sourceDetail: 'managed', accountKey: 'sha256:account-a' }] } },
+        { deviceId: 'remote-device', limits: { providers: [remoteLive] } }
+      ],
+      limits: { providers: [remoteLive] }
+    }
+  });
+
+  assert.equal(provider, null);
+});
+
+test('active Codex account falls back to the aggregate for legacy stats without device rows', () => {
+  const app = readRendererFile('app.js');
+  const live = { provider: 'codex', status: 'ok', sourceDetail: 'app', accountKey: 'sha256:solo' };
+  const provider = runLocalLiveCodexProvider(app, {
+    settings: { deviceId: 'this-mac' },
+    stats: { limits: { providers: [live] } }
+  });
+
+  assert.equal(provider.accountKey, 'sha256:solo');
 });
 
 test('account validation keeps aggregate fallback for legacy stats without device rows', () => {
@@ -632,9 +899,74 @@ test('minimax status copy uses the same API key wording as CodexBar', () => {
   );
 });
 
+test('mimo setup status uses the generic not configured and sign-in-again copy', () => {
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'mimo', status: 'notConfigured' }),
+    { label: 'Not set up', tone: 'setup' }
+  );
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'mimo', status: 'unauthorized' }),
+    { label: 'Sign in again', tone: 'setup' }
+  );
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'mimo', status: 'error' }),
+    { label: 'Unavailable', tone: 'warn' }
+  );
+});
+
 test('copilot setup status asks for sign-in instead of an API key', () => {
   assert.deepEqual(
     presentation.limitProviderStatusLabel({ provider: 'copilot', status: 'notConfigured' }),
     { label: 'Sign in', tone: 'setup' }
   );
+});
+
+test('Z.ai, Volcengine, Qoder, and Ollama source labels and setup statuses', () => {
+  assert.deepEqual(presentation.limitProviderCapabilityTags('zai'), ['Coding Plan', 'API key']);
+  assert.deepEqual(presentation.limitProviderCapabilityTags('volcengine'), ['Coding Plan', 'API key']);
+  assert.deepEqual(presentation.limitProviderCapabilityTags('qoder'), ['Manual login', 'Web']);
+  assert.deepEqual(presentation.limitProviderCapabilityTags('ollama'), ['Manual login', 'Web']);
+  assert.equal(presentation.limitProviderSourceLabel({ provider: 'zai', source: 'api' }), 'API');
+  assert.equal(presentation.limitProviderSourceLabel({ provider: 'volcengine', source: 'api' }), 'API');
+  assert.equal(presentation.limitProviderSourceLabel({ provider: 'qoder', source: 'web' }), 'Web');
+  assert.equal(presentation.limitProviderSourceLabel({ provider: 'ollama', source: 'web' }), 'Web');
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'zai', status: 'notConfigured' }),
+    { label: 'Add API key', tone: 'setup' }
+  );
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'volcengine', status: 'unauthorized' }),
+    { label: 'Update API key', tone: 'setup' }
+  );
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'qoder', status: 'notConfigured' }),
+    { label: 'Sign in', tone: 'setup' }
+  );
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'qoder', status: 'unauthorized' }),
+    { label: 'Sign in again', tone: 'setup' }
+  );
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'ollama', status: 'notConfigured' }),
+    { label: 'Sign in', tone: 'setup' }
+  );
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'ollama', status: 'unauthorized' }),
+    { label: 'Sign in again', tone: 'setup' }
+  );
+});
+
+test('Kimi capability tags and source label', () => {
+  assert.deepEqual(presentation.limitProviderCapabilityTags('kimi'), ['Coding Plan', 'API key']);
+  assert.equal(presentation.limitProviderSourceLabel({ provider: 'kimi', source: 'api' }), 'API');
+  assert.deepEqual(
+    presentation.limitProviderStatusLabel({ provider: 'kimi', status: 'notConfigured' }),
+    { label: 'Add API key', tone: 'setup' }
+  );
+});
+
+test('Kimi usage and limits share the canonical provider id and vendor color', () => {
+  const app = readRendererFile('app.js');
+  assert.match(app, /\{ id: 'kimi', label: 'Kimi' \}/);
+  assert.match(app, /const color = id === 'mimo' \? clientColors\.xiaomi : \(clientColors\[id\] \|\| clientColors\.default\)/);
 });

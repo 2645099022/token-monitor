@@ -25,7 +25,7 @@ Three runtime entry points share a single `src/shared/` library:
 - **`src/electron/main.js`** — widget process. Owns the BrowserWindow, IPC, and chooses between *local* and *sync* mode based on whether `settings.hubUrl` is set.
 - **`src/hub/server.js`** — Node HTTP hub. Stores device records in `data/devices.json`, exposes `/api/ingest`, `/api/stats`, `/api/stats/stream` (SSE).
 - **`src/agent/agent.js`** — headless collector for machines without a widget. Same data path as the widget's sync-mode collector.
-- **`worker/src/index.js`** — Cloudflare Worker hub that speaks the same protocol; the aggregation rules must stay portable (no Node built-ins in `usage.js`). The "Deploy to Cloudflare" button isolates `worker/` into a fresh repo, so the Worker may **not** import files above its own dir — its shared closure (`limits.js` / `usage.js` / `history.js`) is vendored into `worker/src/shared/` by `npm run sync:worker` (`scripts/sync-worker-shared.js`). `src/shared/` stays the single source of truth; those copies are `@generated` (a CommonJS `package.json` marker scopes them back to CJS inside the ESM worker) and CI fails on drift. Edit `src/shared/`, never the copies, then re-run the sync.
+- **`worker/src/index.js`** — Cloudflare Worker hub that speaks the same protocol; the aggregation rules must stay portable (no Node built-ins in `usage.js`). The "Deploy to Cloudflare" button isolates `worker/` into a fresh repo, so the Worker may **not** import files above its own dir — its shared closure (`limits.js` / `usage.js` / `history.js` / `projectKey.js`) is vendored into `worker/src/shared/` by `npm run sync:worker` (`scripts/sync-worker-shared.js`). `src/shared/` stays the single source of truth; those copies are `@generated` (a CommonJS `package.json` marker scopes them back to CJS inside the ESM worker) and CI fails on drift. Edit `src/shared/`, never the copies, then re-run the sync.
 
 ### Collector pipeline (shared by widget and agent)
 
@@ -50,7 +50,7 @@ When both a widget and the headless agent run on the same machine, the widget's 
 
 Two stores, but only one config file on disk:
 
-1. **`.env` at project root** — read by `loadDotEnv()` in `src/shared/config.js` at the top of every entry file. Only assigns keys that aren't already in `process.env`, so real env vars (systemd / launchd / Docker) still win. The user-facing surface is just four keys (`TOKEN_MONITOR_HUB_URL`, `TOKEN_MONITOR_SECRET`, `TOKEN_MONITOR_DEVICE_ID`, `TOKEN_MONITOR_CLIENTS`); the rest (`TOKEN_MONITOR_INTERVAL_MS`, `TOKEN_MONITOR_PORT`, `TOKEN_MONITOR_STALE_AFTER_MS`, limit knobs, …) are accepted but kept out of `.env.example` to reduce noise.
+1. **`.env` at project root** — read by `loadDotEnv()` in `src/shared/config.js` at the top of every entry file. Only assigns keys that aren't already in `process.env`, so real env vars (systemd / launchd / Docker) still win. `.env.example` documents the operator-facing settings intended for direct configuration, including connection/device settings, feature toggles, and provider credentials. Lower-level runtime knobs may still be accepted without being listed there; treat additions or removals from the documented env surface as compatibility changes and keep `.env.example` aligned with the code.
 2. **Widget GUI** — Electron `userData/settings.json`. `readSettings()` merges `{ ...defaults, ...saved }`; `defaultSettings()` pulls initial values from `process.env` (i.e. from `.env`), so a fresh widget install picks up `.env`, but any GUI change is final.
 
 Per-setting precedence for the agent and hub: `CLI flag → env var (real or .env) → built-in default`. There is no JSON config file anymore — `config.local.json` was removed.
@@ -79,7 +79,7 @@ Two caveats on top of the table:
 
 ### Data flow contract
 
-The hub stores normalized device records (`normalizeDeviceRecord` in `usage.js`) and aggregates on read (`aggregateDevices`). The wire shape between agent/widget and hub is whatever `collectUsageOnce()` returns — that function is the source of truth, and `docs/API.md` documents the full contract. The core is `{deviceId, hostname, platform, updatedAt, agentVersion, today, month, allTime}` (each period has `{totalTokens, costUsd, clients, clientCosts, models, modelCosts}`), plus attribution fields (`trackedClients`, `clientStatus`, `wslStatus`, `periodWindows`) and optional `agentRuntime` / `history` / `limits`. The Worker hub uses the exact same shapes.
+The hub stores normalized device records (`normalizeDeviceRecord` in `usage.js`) and aggregates on read (`aggregateDevices`). The wire shape between agent/widget and hub is whatever `collectUsageOnce()` returns — that function is the source of truth, and `docs/API.md` documents the full contract. The core is `{deviceId, hostname, platform, updatedAt, agentVersion, today, month, allTime}` (each period has `{totalTokens, costUsd, clients, clientCosts, models, modelCosts}`), plus attribution fields (`trackedClients`, `clientStatus`, `wslStatus`, `periodWindows`, `projectsEnabled`) and optional `agentRuntime` / `history` / `limits`. The Worker hub uses the exact same shapes.
 
 ### Stale devices
 

@@ -5,6 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('tokenMonitor', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
+  clearSessionUsageArchive: () => ipcRenderer.invoke('sessionUsageArchive:clear'),
   lookupModelPricing: (modelId) => ipcRenderer.invoke('pricing:lookup', modelId),
   previewAppearance: (patch) => ipcRenderer.invoke('appearance:preview', patch),
   getStats: (options) => ipcRenderer.invoke('stats:get', options),
@@ -13,7 +14,13 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   getServiceStatus: (options) => ipcRenderer.invoke('serviceStatus:get', options),
   openDashboard: () => ipcRenderer.invoke('dashboard:open'),
   getDashboardHistory: () => ipcRenderer.invoke('dashboard:getHistory'),
+  onDashboardHistoryChanged: (callback) => {
+    const listener = () => { try { callback(); } catch (_) {} };
+    ipcRenderer.on('dashboard:historyChanged', listener);
+    return () => ipcRenderer.removeListener('dashboard:historyChanged', listener);
+  },
   dashboard: {
+    ready: () => ipcRenderer.send('dashboard:ready'),
     minimize: () => ipcRenderer.send('dashboard:minimize'),
     close: () => ipcRenderer.send('dashboard:close')
   },
@@ -34,14 +41,37 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     ipcRenderer.on('settings:push', listener);
     return () => ipcRenderer.removeListener('settings:push', listener);
   },
+  onOpenSettings: (callback) => {
+    const listener = () => { try { callback(); } catch (_) {} };
+    ipcRenderer.on('settings:open', listener);
+    return () => ipcRenderer.removeListener('settings:open', listener);
+  },
+  onOpenView: (callback) => {
+    const listener = (_event, viewId) => { try { callback(viewId); } catch (_) {} };
+    ipcRenderer.on('view:open', listener);
+    return () => ipcRenderer.removeListener('view:open', listener);
+  },
   onTokscalePush: (callback) => {
     const listener = (_event, payload) => { try { callback(payload); } catch (_) {} };
     ipcRenderer.on('tokscale:push', listener);
     return () => ipcRenderer.removeListener('tokscale:push', listener);
   },
   getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
+  copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   openUserData: () => ipcRenderer.invoke('app:openUserData'),
+  mimo: {
+    accounts: () => ipcRenderer.invoke('mimo:accounts'),
+    addAccount: (cookieHeader) => ipcRenderer.invoke('mimo:addAccount', cookieHeader),
+    openConsole: () => ipcRenderer.invoke('mimo:openConsole'),
+    removeAccount: (id) => ipcRenderer.invoke('mimo:removeAccount', id),
+    setAccountEnabled: (id, enabled) => ipcRenderer.invoke('mimo:setAccountEnabled', id, enabled),
+    onAccounts: (callback) => {
+      const handler = (_event, accounts) => callback(accounts);
+      ipcRenderer.on('mimo:accounts', handler);
+      return () => ipcRenderer.removeListener('mimo:accounts', handler);
+    }
+  },
   exportNow: () => ipcRenderer.invoke('export:now'),
   pickExportDir: () => ipcRenderer.invoke('export:pickAutoDir'),
   getTokscaleStatus: () => ipcRenderer.invoke('tokscale:getStatus'),
@@ -50,6 +80,8 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   resetTokscaleToBundled: () => ipcRenderer.invoke('tokscale:resetToBundled'),
   getAppUpdateState: () => ipcRenderer.invoke('appUpdate:getState'),
   checkAppUpdateNow: () => ipcRenderer.invoke('appUpdate:checkNow'),
+  downloadAppUpdate: () => ipcRenderer.invoke('appUpdate:download'),
+  installAppUpdate: () => ipcRenderer.invoke('appUpdate:install'),
   dismissAppUpdate: (version) => ipcRenderer.invoke('appUpdate:dismiss', version),
   expandFloatingBubble: () => ipcRenderer.invoke('floatingBubble:expand'),
   moveFloatingBubble: (delta) => ipcRenderer.invoke('floatingBubble:move', delta),
@@ -74,6 +106,9 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
     logout: () => ipcRenderer.invoke('cursor:logout'),
     status: () => ipcRenderer.invoke('cursor:status')
   },
+  ollama: {
+    validateCookie: (cookie) => ipcRenderer.invoke('ollama:validateCookie', cookie)
+  },
   opencode: {
     saveCookie: (cookie) => ipcRenderer.invoke('opencode:saveCookie', cookie),
     logout: () => ipcRenderer.invoke('opencode:logout'),
@@ -86,13 +121,16 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   },
   codex: {
     accounts: () => ipcRenderer.invoke('codex:accounts'),
-    addAccount: () => ipcRenderer.invoke('codex:addAccount'),
+    addAccount: (options = {}) => ipcRenderer.invoke('codex:addAccount', options),
+    cancelLogin: (options = {}) => ipcRenderer.invoke('codex:cancelLogin', options),
     removeAccount: (id) => ipcRenderer.invoke('codex:removeAccount', id),
     setAccountEnabled: (id, enabled) => ipcRenderer.invoke('codex:setAccountEnabled', id, enabled),
-    onLoginOutput: (callback) => {
-      const handler = (_event, text) => callback(text);
-      ipcRenderer.on('codex:loginOutput', handler);
-      return () => ipcRenderer.removeListener('codex:loginOutput', handler);
+    switchSystemAccount: (id) => ipcRenderer.invoke('codex:switchSystemAccount', id),
+    refreshAccountLimits: (id) => ipcRenderer.invoke('codex:refreshAccountLimits', id),
+    onLoginStatus: (callback) => {
+      const handler = (_event, status) => callback(status);
+      ipcRenderer.on('codex:loginStatus', handler);
+      return () => ipcRenderer.removeListener('codex:loginStatus', handler);
     }
   },
   copilot: {

@@ -108,6 +108,7 @@ test('contribHeatmap lays days on a Sunday-started week grid, filling gaps with 
   assert.equal(byDate['2026-05-31'].row, 0);     // grid starts on the prior Sunday
   assert.equal(byDate['2026-06-07'].col, 1);
   assert.equal(byDate['2026-06-07'].row, 0);
+  assert.equal(byDate['2026-06-07'].tokens, 0);
   assert.equal(byDate['2026-06-08'].col, 1);
   assert.equal(byDate['2026-06-08'].x, 13);
   assert.equal(byDate['2026-06-03'].intensity, 0); // gap day filled with 0
@@ -116,6 +117,13 @@ test('contribHeatmap lays days on a Sunday-started week grid, filling gaps with 
   assert.deepEqual(h.monthLabels, [{ col: 0, label: '2026-06' }]);
   assert.equal(h.cell, 11);
   assert.equal(h.gap, 2);
+});
+
+test('contribHeatmap carries daily token values for hover titles', () => {
+  const h = contribHeatmap([{ date: '2026-06-01', intensity: 4, tokens: 1234, cost: 0.5 }], { cell: 11, gap: 2 });
+  const cell = h.cells.find((c) => c.date === '2026-06-01');
+  assert.equal(cell.tokens, 1234);
+  assert.equal(cell.cost, 0.5);
 });
 
 test('contribHeatmap tolerates empty input', () => {
@@ -135,6 +143,51 @@ test('heatmapSvg scales its corner radius for compact variants', () => {
   }, { radius: 2 });
 
   assert.match(svg, /rx="2"/);
+});
+
+test('heatmapSvg embeds escaped per-cell titles when supplied', () => {
+  const svg = heatmapSvg({
+    width: 9,
+    height: 9,
+    cell: 9,
+    gap: 3,
+    cells: [{ date: '2026-06-22', intensity: 4, tokens: 1234, x: 0, y: 0, size: 9 }],
+    monthLabels: []
+  }, { titleOf: (cell) => `${cell.date} < ${cell.tokens}` });
+
+  assert.match(svg, /<title>2026-06-22 &lt; 1234<\/title>/);
+});
+
+test('heatmapSvg can include a glow filter for hovered cells', () => {
+  const svg = heatmapSvg({
+    width: 9,
+    height: 9,
+    cell: 9,
+    gap: 3,
+    cells: [{ date: '2026-06-22', intensity: 4, tokens: 1234, x: 0, y: 0, size: 9 }],
+    monthLabels: []
+  }, { glowFilterId: 'homeActivityHeatGlow' });
+
+  assert.match(svg, /<defs><filter id="homeActivityHeatGlow"/);
+  assert.match(svg, /<feDropShadow/);
+});
+
+test('heatmapSvg can include a spotlight layer with cell data attributes', () => {
+  const svg = heatmapSvg({
+    width: 9,
+    height: 9,
+    cell: 9,
+    gap: 3,
+    cells: [{ date: '2026-06-22', intensity: 4, tokens: 1234, cost: 0.25, x: 0, y: 0, size: 9 }],
+    monthLabels: []
+  }, { spotlightId: 'homeActivitySpotlight' });
+
+  assert.match(svg, /id="homeActivitySpotlightGradient"/);
+  assert.match(svg, /id="homeActivitySpotlightMask"/);
+  assert.match(svg, /class="heat-base-layer"/);
+  assert.match(svg, /class="heat-bright-layer"/);
+  assert.match(svg, /data-d="2026-06-22"/);
+  assert.match(svg, /data-t="1234"/);
 });
 
 test('statsCards returns ordered descriptors with kinds and coerced values', () => {

@@ -27,12 +27,16 @@ test('clientColors carries the known palette and a default', () => {
   assert.equal(clientColors.claude, '#cc7c5e');
   assert.equal(clientColors.codex, '#49a3b0');
   assert.equal(clientColors.cline, '#323B43');
+  assert.equal(clientColors.volcengine, '#006EFF');
+  assert.equal(clientColors.qoder, '#2ADB5C');
+  assert.equal(clientColors.ollama, '#888888');
   assert.equal(typeof clientColors.default, 'string');
 });
 
 test('modelVendorFor maps families and modelColor falls back deterministically', () => {
   assert.equal(modelVendorFor('claude-sonnet-4'), 'claude');
   assert.equal(modelVendorFor('gpt-5'), 'codex');
+  assert.equal(modelVendorFor('doubao-seed-1.6'), 'doubao');
   assert.equal(modelColor('claude-opus'), clientColors.claude);
   assert.equal(modelColor('totally-unknown'), modelColor('totally-unknown')); // stable
 });
@@ -58,6 +62,7 @@ test('barsChartSvg renders one rect per segment with colorFor fill and a per-bar
   });
   assert.match(svg, /^<svg /);
   assert.equal((svg.match(/class="bar-seg"/g) || []).length, 2); // one shape per stacked segment
+  assert.match(svg, /class="bar-stack" data-motion-key="2026-06-01"/); // entry motion grows the whole stack from one baseline
   assert.match(svg, /<path d="M[\d.,\sLQZ-]+" fill="#49a3b0" class="bar-seg">/); // top segment gets a rounded-top cap
   assert.equal((svg.match(/class="bar-hover"/g) || []).length, 1); // plus a transparent hover overlay
   assert.match(svg, /fill="#cc7c5e"/);
@@ -81,14 +86,16 @@ test('barsChartSvg always emits a data-indexed hover target and draws y-axis tic
   assert.match(withAxis, /class="axis-label y-axis"/);
 });
 
-test('candleChartSvg marks up/down candles and renders a wick + body each', () => {
+test('candleChartSvg marks up/down candles and splits each wick from the body midpoint', () => {
   const model = candleChart(
     [{ date: '2026-06-01', tokens: 10 }, { date: '2026-06-07', tokens: 30 }],
     { width: 100, height: 100, padTop: 0, padRight: 0, padBottom: 0, padLeft: 0, gap: 0, metric: 'tokens' }
   );
   const svg = candleChartSvg(model, { titleOf: (c) => `o${c.open}c${c.close}`, axisLabel: () => '' });
   assert.match(svg, /candle-body candle-up/);
-  assert.match(svg, /<line /);            // wick
+  assert.match(svg, /class="candle-stack" data-motion-key="2026-06-01"/);
+  assert.match(svg, /candle-wick candle-wick-high candle-up/);
+  assert.match(svg, /candle-wick candle-wick-low candle-up/);
   assert.match(svg, /<title>o10c30<\/title>/);
 });
 
@@ -110,6 +117,12 @@ test('heatmapSvg colors cells by intensity level class', () => {
   assert.match(svg, /heat lvl-0/);
   assert.match(svg, /data-d="2026-06-01"/); // drives the custom hover tooltip
   assert.match(svg, /<title>2026-06-01<\/title>/);
+});
+
+test('heatmapSvg can hide entry cells in the initial SVG markup', () => {
+  const model = contribHeatmap([{ date: '2026-06-01', intensity: 2 }], { cell: 10, gap: 2 });
+  const svg = heatmapSvg(model, { initialHidden: true });
+  assert.match(svg, /data-motion-hidden="true" opacity="0"/);
 });
 
 test('statsCardsHtml renders a card per descriptor with label + formatted value', () => {

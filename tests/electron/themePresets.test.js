@@ -5,14 +5,18 @@ const test = require('node:test');
 
 const {
   INTERFACE_COLOR_KEYS,
+  THEME_CODE_VERSION,
   THEME_VAR_MAP,
   DEFAULT_THEME,
   THEME_PRESETS,
+  VENDOR_ORDER,
   VENDOR_LABELS,
   isValidHex,
   normalizeHex,
   normalizeOverrides,
   mergeThemeColors,
+  encodeThemeCode,
+  decodeThemeCode,
   hexToRgbTriplet,
   isLightHex,
   themeCssVarEntries,
@@ -133,6 +137,37 @@ test('mergeThemeColors layers valid overrides on defaults', () => {
   assert.equal(merged.muted, DEFAULT_THEME.muted); // absent key falls back
 });
 
+test('TM1 theme codes round-trip the four interface colours in a stable order', () => {
+  assert.equal(THEME_CODE_VERSION, 'TM1');
+  const code = encodeThemeCode({
+    accent: '#112233',
+    bg: '#445566',
+    text: '#AABBCC',
+    muted: '#778899'
+  });
+  assert.equal(code, 'TM1-112233-445566-AABBCC-778899');
+  assert.deepEqual(decodeThemeCode(code), {
+    ok: true,
+    code,
+    colors: {
+      accent: '#112233',
+      bg: '#445566',
+      text: '#aabbcc',
+      muted: '#778899'
+    }
+  });
+});
+
+test('TM1 theme codes normalize input and reject malformed or future versions', () => {
+  assert.equal(
+    decodeThemeCode('  tm1-b7ead4-303438-eef5fb-a3adbb  ').code,
+    'TM1-B7EAD4-303438-EEF5FB-A3ADBB'
+  );
+  assert.deepEqual(decodeThemeCode('TM1-not-a-theme'), { ok: false, reason: 'invalid' });
+  assert.deepEqual(decodeThemeCode('TM2-B7EAD4-303438-EEF5FB-A3ADBB'), { ok: false, reason: 'unsupportedVersion' });
+  assert.deepEqual(decodeThemeCode(''), { ok: false, reason: 'invalid' });
+});
+
 test('mergeVendorColors overrides brand defaults, ignoring junk', () => {
   const brand = { claude: '#cc7c5e', codex: '#49a3b0', default: '#6ab4f0' };
   assert.deepEqual(mergeVendorColors(brand, {}), brand);
@@ -164,4 +199,9 @@ test('every non-default brand vendor has a display label', () => {
   }
   assert.equal(vendorLabel('claude'), 'Claude Code');
   assert.equal(vendorLabel('somethingnew'), 'Somethingnew'); // graceful fallback
+});
+
+test('Kimi usage and limits share one vendor color entry', () => {
+  assert.equal(VENDOR_ORDER.filter((id) => id === 'kimi').length, 1);
+  assert.equal(clientColors.kimi, '#16191e');
 });

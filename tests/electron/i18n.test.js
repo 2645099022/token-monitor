@@ -50,7 +50,7 @@ test('translate falls back to English and interpolates values', () => {
   assert.equal(translate('zh-TW', 'missing.key'), 'missing.key');
 });
 
-test('every bundled locale defines every English settings key', () => {
+test('every bundled locale defines every English key', () => {
   const englishKeys = Object.keys(MESSAGES.en).sort();
   for (const locale of Object.keys(MESSAGES).filter((code) => code !== 'en')) {
     const missing = englishKeys.filter((key) => MESSAGES[locale][key] === undefined);
@@ -70,8 +70,11 @@ test('every language option has a dictionary, normalizes to itself, and is reach
 
 test('tray limit labels describe remaining quota instead of ambiguous worst windows', () => {
   assert.equal(translate('zh-TW', 'settings.tray.barsSession'), '額度條：單次剩餘最少');
-  assert.equal(translate('zh-TW', 'settings.tray.barsAllSessions'), '額度條：前兩個工具的單次額度');
+  assert.equal(translate('zh-TW', 'settings.tray.barsAllSessions'), '額度條：前兩個工具的主要額度');
+  assert.equal(translate('zh-CN', 'settings.tray.limitsAllSessions'), '额度：前两个工具的主要额度（12% · 34%）');
   assert.equal(translate('zh-CN', 'settings.tray.barsWindow'), '额度条：任一额度剩余最少');
+  assert.equal(translate('ko', 'settings.tray.barsAllSessions'), '한도 바: 처음 두 도구의 주요 한도');
+  assert.equal(translate('ko', 'settings.tray.limitsAllSessions'), '한도: 처음 두 도구의 주요 한도 (12% · 34%)');
 });
 
 test('window shortcut labels stay concise in Chinese', () => {
@@ -111,14 +114,15 @@ test('applyTranslations updates text, title, aria-label, placeholders, and docum
   const button = fakeElement({ i18nTitle: 'settings.sync.copySecret' });
   const dismiss = fakeElement({ i18nAriaLabel: 'settings.appUpdate.dismiss' });
   const input = fakeElement({ i18nPlaceholder: 'settings.sync.secretPlaceholder' });
+  const paste = fakeElement({ i18nTitle: 'settings.sync.pasteSecret', i18nAriaLabel: 'settings.sync.pasteSecret' });
   const langOption = fakeElement({ i18n: 'settings.language.zhTW' });
   const documentElement = fakeElement();
   const root = {
     documentElement,
     querySelectorAll(selector) {
       if (selector === '[data-i18n]') return [title, langOption];
-      if (selector === '[data-i18n-title]') return [button];
-      if (selector === '[data-i18n-aria-label]') return [dismiss];
+      if (selector === '[data-i18n-title]') return [button, paste];
+      if (selector === '[data-i18n-aria-label]') return [dismiss, paste];
       if (selector === '[data-i18n-placeholder]') return [input];
       return [];
     }
@@ -128,6 +132,8 @@ test('applyTranslations updates text, title, aria-label, placeholders, and docum
 
   assert.equal(title.textContent, '多裝置同步');
   assert.equal(button.title, '複製密鑰');
+  assert.equal(paste.title, '貼上密鑰');
+  assert.equal(paste.getAttribute('aria-label'), '貼上密鑰');
   assert.equal(dismiss.getAttribute('aria-label'), '忽略此版本');
   assert.equal(input.placeholder, '選填的共享密鑰');
   assert.equal(langOption.textContent, '繁體中文');

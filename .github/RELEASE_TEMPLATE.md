@@ -1,36 +1,36 @@
 # English
 
-**Open-source build, not paid-signed.** macOS and Windows may ask you to confirm on first launch. Linux AppImage downloads may need executable permission — instructions below.
+**Open-source build.** macOS is signed and notarized; Windows is unsigned (SmartScreen may appear); Linux AppImages need executable permission — see notes below.
 
 ## What's changed
 
+<!-- app-update-notes:en:start -->
 ### Added
-- **Japanese and Korean interface languages:** Settings -> General -> Interface language now includes 日本語 and 한국어, and Auto (system) recognizes Japanese and Korean system locales. (#57, #58)
-- **Linux AppImage downloads:** Linux x64 AppImage is now available alongside macOS and Windows builds. (#65)
+- **Low-limit highlights:** Added an optional Home setting that highlights remaining AI tool limits below 50% and marks critical limits below 20%. (#161)
+- **Reduce Motion:** Added a three-state preference under Appearance. System follows the OS setting, On reduces animations, and Off keeps animations enabled across the main widget and Usage Dashboard. (#167)
 
 ### Improved
-- **Dashboard stat cards:** Activity summary cards now balance their widths so longer localized labels and values fit more evenly.
-- **Bundled tokscale 4.0.11:** Includes Oh My Pi (OMP) usage tracking and ZCode parsing fixes. (#77)
+- **Usage animations:** Live token totals and breakdown values now transition smoothly, while bars, activity heatmaps, trend lines, and Dashboard bar/K-line charts animate data and period changes. Page navigation stays immediate. (#163, #166)
+- **Update release notes:** Improved the contrast and readability of the release notes popover. (#162)
 
 ### Fixed
-- **App update prompts:** Dismissing one release no longer hides later releases for a full day; cached newer versions are refreshed more quickly.
+- **App updates:** Dismissed updates remain available through manual checks and Settings, while downloaded updates expose the restart action instead of staying hidden. (#158)
+- **Claude limits:** Fall back to the Claude CLI when OAuth credentials cannot be found, so limits continue to load for signed-in CLI sessions. (#159)
+<!-- app-update-notes:en:end -->
 
-## Which file should I download?
+## Download
 
-- **macOS (Apple Silicon, M1 and later)** — the `.dmg` file
-- **Windows 10/11** — `Token Monitor Setup ….exe` (installer, recommended)
-- **Windows portable** — `Token Monitor ….exe` (runs without installing)
-- **Linux x64** — the `.AppImage` file
+- **macOS Apple Silicon** — [Token-Monitor-0.29.0-arm64.dmg](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0-arm64.dmg)
+- **Windows Installer** — [Token-Monitor-Setup-0.29.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-Setup-0.29.0.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.29.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0.exe) (no install required)
+- **Linux x64** — [Token-Monitor-0.29.0.AppImage](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0.AppImage)
 
-Other platforms are not pre-built — run from source per the [README](https://github.com/Javis603/token-monitor#readme). The macOS `.zip` is the same app repackaged; ignore it unless you specifically need it.
+<details>
+<summary><strong>First launch and other notes</strong></summary>
 
-## First-launch unlock
+### First launch
 
-**macOS:** right-click `Token Monitor.app` → Open (once). If you see "Token Monitor" can't be opened or is damaged:
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/Token Monitor.app"
-```
+**macOS:** open the `.dmg`, drag Token Monitor to Applications.
 
 **Windows:** SmartScreen → More info → Run anyway.
 
@@ -41,47 +41,53 @@ chmod +x "Token Monitor"*.AppImage
 ./"Token Monitor"*.AppImage
 ```
 
-## tokscale dependency
+### Other notes
+
+Other platforms are not pre-built — run from source per the [README](https://github.com/Javis603/token-monitor#readme). The macOS `.zip` is the same app repackaged; ignore it unless you specifically need it.
+
+### tokscale dependency
 
 Tokscale is bundled with this app. See **Settings → Tokscale** for the exact version
 and the option to download a newer version directly from npm. Tokscale is MIT,
 open-source: https://github.com/junhoyeo/tokscale
 
+</details>
+
 ---
 
 # 中文
 
-**这是开源构建，不是付费签名版本。** macOS 和 Windows 首次启动时可能会要求你手动确认；Linux AppImage 下载后可能需要先赋予执行权限，操作说明见下方。
+**这是开源构建。** macOS 已签名并 notarize；Windows 尚未签名（可能跳出 SmartScreen）；Linux AppImage 需要先赋予执行权限，说明见下方。
 
 ## 更新内容
 
+<!-- app-update-notes:zh:start -->
 ### 新增
-- **日文和韩文界面：** 设置 -> 常规 -> 界面语言 现在包含 日本語 和 한국어，自动（跟随系统）也会识别日文、韩文系统语言。（#57、#58）
-- **Linux AppImage 下载：** 现在会和 macOS、Windows 一起提供 Linux x64 AppImage。（#65）
+- **低额度提示：** 新增可选主页设置，在 AI 工具剩余额度低于 50% 时高亮，并在低于 20% 时标记为紧急。（#161）
+- **减少动态效果：** 外观中新增「系统／开启／关闭」三态设置。系统跟随操作系统，开启减少动画，关闭保留动画，并统一应用于主窗口与使用仪表板。（#167）
 
 ### 改进
-- **仪表盘统计卡片：** 活动摘要卡片现在会平衡宽度，较长的本地化标签和值也更容易排布整齐。
-- **内置 tokscale 4.0.11：** 包含 Oh My Pi (OMP) 用量追踪和 ZCode 解析修复。（#77）
+- **用量动画：** 实时 Token 总计与明细数值现在会平滑过渡；柱形图、活动热力图、趋势线以及仪表盘的柱形图和 K 线图会呈现数据与周期变化。页面切换仍保持即时。（#163、#166）
+- **更新说明：** 提升了更新说明弹窗的对比度和可读性。（#162）
 
 ### 修复
-- **应用更新提示：** 忽略某个版本后，后续新版本不会再被整天隐藏；已缓存的新版本会更快刷新。
+- **应用更新：** 已忽略的更新仍可通过手动检查和设置页面操作；下载完成后会显示重启操作，不再被忽略状态隐藏。（#158）
+- **Claude 额度：** 未找到 OAuth 凭据时自动回退到 Claude CLI，使已登录的 CLI 会话仍能读取额度。（#159）
+<!-- app-update-notes:zh:end -->
 
-## 应该下载哪个文件？
+## 下载
 
-- **macOS（苹果芯片，M1 及之后机型）** — 下载 `.dmg` 安装包
-- **Windows 10/11** — 下载 `Token Monitor Setup ….exe`（安装版，推荐）
-- **Windows 便携版** — 下载 `Token Monitor ….exe`（无需安装，直接运行）
-- **Linux x64** — 下载 `.AppImage` 文件
+- **macOS Apple Silicon** — [Token-Monitor-0.29.0-arm64.dmg](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0-arm64.dmg)
+- **Windows 安装版** — [Token-Monitor-Setup-0.29.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-Setup-0.29.0.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.29.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0.exe)（免安装）
+- **Linux x64** — [Token-Monitor-0.29.0.AppImage](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0.AppImage)
 
-其他平台暂不提供预构建版本，请参考 [README](https://github.com/Javis603/token-monitor#readme) 从源码运行。macOS 的 `.zip` 只是同一个 app 的重新打包版本，除非你明确需要，否则可以忽略。
+<details>
+<summary><strong>首次启动与其他说明</strong></summary>
 
-## 首次启动放行
+### 首次启动
 
-**macOS：** 右键 `Token Monitor.app` → 打开（只需要一次）。如果看到「Token Monitor」未开启 或 已损坏：
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/Token Monitor.app"
-```
+**macOS：** 打开 `.dmg`，把 Token Monitor 拖到 Applications。
 
 **Windows：** SmartScreen → 更多信息 → 仍要运行。
 
@@ -92,8 +98,14 @@ chmod +x "Token Monitor"*.AppImage
 ./"Token Monitor"*.AppImage
 ```
 
-## tokscale 依赖
+### 其他说明
+
+其他平台暂不提供预构建版本，请参考 [README](https://github.com/Javis603/token-monitor#readme) 从源码运行。macOS 的 `.zip` 只是同一个 app 的重新打包版本，除非你明确需要，否则可以忽略。
+
+### tokscale 依赖
 
 Tokscale 已随应用内置。你可以在 **设置 → Tokscale** 查看确切版本，
 也可以直接从 npm 下载更新版本。Tokscale 是 MIT 开源项目：
 https://github.com/junhoyeo/tokscale
+
+</details>

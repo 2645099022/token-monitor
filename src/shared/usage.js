@@ -110,6 +110,7 @@ function emptyPeriod() {
     modelOutputs: {},
     clientModels: {},
     clientModelCosts: {},
+    projects: Object.create(null),
     sessions: {}
   };
 }
@@ -135,6 +136,7 @@ function normalizeClientName(value) {
   if (raw.includes('kiro')) return 'kiro';
   if (raw.includes('codebuddy')) return 'codebuddy';
   if (raw.includes('workbuddy')) return 'workbuddy';
+  if (raw.includes('proma')) return 'proma';
   if (raw.includes('opencode')) return 'opencode';
   if (raw.includes('openclaw') || raw.includes('clawd') || raw.includes('moltbot') || raw.includes('moldbot')) return 'openclaw';
   return raw.replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || null;
@@ -146,7 +148,7 @@ function detectClient(obj) {
 }
 
 function normalizeModelName(value) {
-  const raw = String(value || '').trim();
+  const raw = String(value || '').trim().toLowerCase();
   return raw || null;
 }
 
@@ -162,6 +164,70 @@ function normalizeProviderName(value) {
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function emptyProject(label = '') {
+  return {
+    label: String(label || '').trim().normalize('NFC'),
+    tokens: 0,
+    costUsd: 0,
+    clients: Object.create(null)
+  };
+}
+
+function addProjectInto(projects, rawKey, source) {
+  if (!source || typeof source !== 'object') return;
+  const label = String(source.label || rawKey || '').trim().normalize('NFC');
+  const key = canonicalProjectKey(label || rawKey);
+  if (!key) return;
+  if (!hasOwn(projects, key)) projects[key] = emptyProject(label || rawKey);
+  const target = projects[key];
+  target.label = deterministicProjectLabel(target.label, label || rawKey);
+  target.tokens += Math.max(0, Math.round(asNumber(source.tokens ?? source.totalTokens)));
+  target.costUsd += asNumber(source.costUsd ?? source.cost);
+  for (const [client, tokens] of Object.entries(source.clients || {})) {
+    const clientKey = normalizeClientName(client);
+    if (!clientKey) continue;
+    target.clients[clientKey] = (hasOwn(target.clients, clientKey) ? target.clients[clientKey] : 0)
+      + Math.max(0, Math.round(asNumber(tokens)));
+  }
+}
+
+function normalizeProjects(value) {
+  const projects = Object.create(null);
+  if (!value || typeof value !== 'object') return projects;
+  for (const [key, project] of Object.entries(value)) addProjectInto(projects, key, project);
+  return projects;
+}
+
+function projectRollupFromSessions(sessions) {
+  const projects = Object.create(null);
+  for (const session of Object.values(sessions || {})) {
+    const label = String(session?.projectLabel || '').trim().normalize('NFC');
+    const key = canonicalProjectKey(label);
+    if (!key) continue;
+    if (!hasOwn(projects, key)) projects[key] = emptyProject(label);
+    const project = projects[key];
+    project.label = deterministicProjectLabel(project.label, label);
+    const tokens = Math.max(0, Math.round(asNumber(session.totalTokens)));
+    project.tokens += tokens;
+    project.costUsd += asNumber(session.costUsd);
+    const client = normalizeClientName(session.client);
+    if (client && tokens > 0) {
+      project.clients[client] = (hasOwn(project.clients, client) ? project.clients[client] : 0) + tokens;
+    }
+  }
+  return projects;
+}
+
+function applyProjectRollups(summary) {
+  if (!summary || typeof summary !== 'object') return summary;
+  for (const periodName of PERIODS) {
+    const period = summary.periods?.[periodName] || summary[periodName];
+    if (!period || typeof period !== 'object') continue;
+    period.projects = projectRollupFromSessions(period.sessions);
+  }
+  return summary;
 }
 
 function normalizeTrackedClients(value) {
@@ -286,11 +352,15 @@ function emptySession(client, id) {
     reasoningTokens: 0,
     startedAt: '',
     lastUsedAt: '',
+    projectId: '',
+    projectLabel: '',
     models: {},
     modelCosts: {},
     providers: {}
   };
 }
+
+const sessionsWithLiveSource = new WeakSet();
 
 function mergeSession(target, source) {
   target.totalTokens += Math.max(0, Math.round(asNumber(source.totalTokens)));
@@ -307,6 +377,13 @@ function mergeSession(target, source) {
   const sourceLastUsed = timestampMs(source.lastUsedAt);
   const targetLastUsed = timestampMs(target.lastUsedAt);
   if (sourceLastUsed && sourceLastUsed > targetLastUsed) target.lastUsedAt = new Date(sourceLastUsed).toISOString();
+  const sourceProjectId = String(source.projectId || '');
+  if (!target.projectId && sourceProjectId) {
+    target.projectId = sourceProjectId;
+    target.projectLabel = String(source.projectLabel || '');
+  } else if (target.projectId === sourceProjectId && !target.projectLabel && source.projectLabel) {
+    target.projectLabel = String(source.projectLabel);
+  }
   for (const [model, tokens] of Object.entries(source.models || {})) {
     const key = normalizeModelName(model);
     if (key) target.models[key] = (target.models[key] || 0) + Math.max(0, Math.round(asNumber(tokens)));
@@ -318,6 +395,13 @@ function mergeSession(target, source) {
   for (const [provider, tokens] of Object.entries(source.providers || {})) {
     const key = normalizeProviderName(provider);
     if (key) target.providers[key] = (target.providers[key] || 0) + Math.max(0, Math.round(asNumber(tokens)));
+  }
+  const sourceArchived = source.archived === true || source.deleted === true || source.sourceDeleted === true;
+  if (!sourceArchived) {
+    sessionsWithLiveSource.add(target);
+    delete target.archived;
+  } else if (!sessionsWithLiveSource.has(target)) {
+    target.archived = true;
   }
   return target;
 }
@@ -340,6 +424,8 @@ function sessionFromRow(row) {
   Object.assign(session, sessionTokenComponents(row));
   session.startedAt = normalizeIsoTimestamp(firstString(row, STARTED_AT_KEYS));
   session.lastUsedAt = normalizeIsoTimestamp(firstString(row, LAST_USED_AT_KEYS));
+  session.projectId = String(row.projectId || row.project_id || '').trim();
+  session.projectLabel = String(row.projectLabel || row.project_label || '').trim();
   let model = detectModel(row);
   if (client === 'cursor' && model === 'auto') model = 'cursor-auto';
   if (model && session.totalTokens > 0) session.models[model] = (session.models[model] || 0) + session.totalTokens;
@@ -363,6 +449,8 @@ function normalizeSession(input, fallbackKey) {
   session.messageCount = Math.max(0, Math.round(firstNumber(input, MESSAGE_COUNT_KEYS)));
   session.startedAt = normalizeIsoTimestamp(firstString(input, STARTED_AT_KEYS));
   session.lastUsedAt = normalizeIsoTimestamp(firstString(input, LAST_USED_AT_KEYS));
+  session.projectId = String(input.projectId || input.project_id || '').trim();
+  session.projectLabel = String(input.projectLabel || input.project_label || '').trim();
   if (input.models && typeof input.models === 'object') {
     for (const [model, value] of Object.entries(input.models)) {
       const key = normalizeModelName(model);
@@ -381,12 +469,14 @@ function normalizeSession(input, fallbackKey) {
       if (key) session.providers[key] = (session.providers[key] || 0) + Math.max(0, Math.round(asNumber(value)));
     }
   }
+  if (input.archived === true || input.deleted === true || input.sourceDeleted === true) session.archived = true;
   return session;
 }
 
-function normalizePeriod(input) {
+function normalizePeriod(input, options = {}) {
   const period = emptyPeriod();
   if (!input || typeof input !== 'object') return period;
+  const projectsEnabled = options.projectsEnabled !== false;
   period.totalTokens = Math.max(0, Math.round(asNumber(input.totalTokens ?? input.total_tokens ?? 0)));
   period.costUsd = asNumber(input.costUsd ?? input.cost_usd ?? input.cost ?? 0);
   period.cacheReadTokens = Math.max(0, Math.round(asNumber(input.cacheReadTokens ?? input.cache_read_tokens ?? 0)));
@@ -453,9 +543,17 @@ function normalizePeriod(input) {
   if (input.sessions && typeof input.sessions === 'object') {
     for (const [key, value] of Object.entries(input.sessions)) {
       const session = normalizeSession(value, key);
-      if (session) addSession(period, session);
+      if (!session) continue;
+      if (!projectsEnabled) {
+        session.projectId = '';
+        session.projectLabel = '';
+      }
+      addSession(period, session);
     }
   }
+  period.projects = projectsEnabled
+    ? (hasOwn(input, 'projects') ? normalizeProjects(input.projects) : projectRollupFromSessions(period.sessions))
+    : Object.create(null);
   return period;
 }
 
@@ -540,12 +638,20 @@ function normalizeDeviceRecord(record) {
   if (hasOwn(record, 'trackedClients')) normalized.trackedClients = normalizeTrackedClients(record.trackedClients);
   if (hasOwn(record, 'clientStatus')) normalized.clientStatus = normalizeClientStatus(record.clientStatus);
   if (hasOwn(record, 'wslStatus')) normalized.wslStatus = normalizeWslStatus(record.wslStatus);
+  if (hasOwn(record, 'projectsEnabled')) normalized.projectsEnabled = record.projectsEnabled !== false;
+  if (hasOwn(record, 'allTimeProjectsOmitted')) normalized.allTimeProjectsOmitted = record.allTimeProjectsOmitted === true;
+  if (hasOwn(record, 'allTimeProjectsIncomplete')) normalized.allTimeProjectsIncomplete = record.allTimeProjectsIncomplete === true;
+  if (hasOwn(record, 'syncUploadIntervalMs')) normalized.syncUploadIntervalMs = normalizeSyncUploadIntervalMs(record.syncUploadIntervalMs);
   if (hasOwn(record, 'history')) normalized.history = coerceHistory(record.history);
   if (hasOwn(record, 'periodWindows')) {
     const windows = normalizePeriodWindows(record.periodWindows);
     if (windows) normalized.periodWindows = windows;
   }
-  for (const periodName of PERIODS) normalized.periods[periodName] = normalizePeriod(record[periodName] || record.periods?.[periodName]);
+  for (const periodName of PERIODS) {
+    normalized.periods[periodName] = normalizePeriod(record[periodName] || record.periods?.[periodName], {
+      projectsEnabled: normalized.projectsEnabled !== false
+    });
+  }
   return normalized;
 }
 
@@ -562,11 +668,26 @@ function addClientModelUsage(target, client, models, costs) {
   }
 }
 
-function addClientSessionUsage(target, client, sessions) {
-  for (const session of Object.values(sessions || {})) {
+function addClientSessionUsage(target, client, sessions, restoredSessions, projectsEnabled) {
+  for (const [key, session] of Object.entries(sessions || {})) {
     if (session?.client !== client) continue;
-    addSession(target, session);
+    const restored = projectsEnabled ? session : { ...session, projectId: '', projectLabel: '' };
+    addSession(target, restored);
+    if (projectsEnabled) restoredSessions[key] = restored;
   }
+}
+
+function missingProjectAttribution(sourceProjects, restoredProjects, clients) {
+  for (const [rawKey, source] of Object.entries(sourceProjects || {})) {
+    const key = canonicalProjectKey(source?.label || rawKey);
+    const restored = restoredProjects?.[key];
+    for (const client of clients) {
+      const expectedTokens = Math.max(0, Math.round(asNumber(source?.clients?.[client])));
+      const restoredTokens = Math.max(0, Math.round(asNumber(restored?.clients?.[client])));
+      if (restoredTokens < expectedTokens) return true;
+    }
+  }
+  return false;
 }
 
 function shouldPreservePeriod(periodName, existingRecord, incomingRecord) {
@@ -581,10 +702,13 @@ function shouldPreservePeriod(periodName, existingRecord, incomingRecord) {
 
 function preserveUntrackedClientUsage(existingRecord, incomingRecord, trackedClients) {
   const active = new Set(trackedClients || []);
+  const projectsEnabled = incomingRecord.projectsEnabled !== false;
   for (const periodName of PERIODS) {
     if (!shouldPreservePeriod(periodName, existingRecord, incomingRecord)) continue;
     const source = existingRecord.periods?.[periodName] || emptyPeriod();
     const target = incomingRecord.periods?.[periodName] || emptyPeriod();
+    const restoredSessions = Object.create(null);
+    const preservedClients = new Set();
     incomingRecord.periods[periodName] = target;
     for (const [client, tokens] of Object.entries(source.clients || {})) {
       if (active.has(client) || hasOwn(target.clients, client)) continue;
@@ -592,9 +716,23 @@ function preserveUntrackedClientUsage(existingRecord, incomingRecord, trackedCli
       target.totalTokens += tokens;
       target.costUsd += cost;
       target.clients[client] = tokens;
+      preservedClients.add(client);
       if (cost > 0) target.clientCosts[client] = cost;
       addClientModelUsage(target, client, source.clientModels?.[client], source.clientModelCosts?.[client]);
-      addClientSessionUsage(target, client, source.sessions);
+      addClientSessionUsage(target, client, source.sessions, restoredSessions, projectsEnabled);
+    }
+    if (!projectsEnabled) continue;
+    const restoredProjects = projectRollupFromSessions(restoredSessions);
+    for (const [key, project] of Object.entries(restoredProjects)) addProjectInto(target.projects, key, project);
+    if (
+      periodName === 'allTime'
+      && preservedClients.size > 0
+      && (existingRecord.allTimeProjectsIncomplete === true
+        || existingRecord.allTimeProjectsOmitted === true
+        || existingRecord.projectsEnabled === false
+        || missingProjectAttribution(source.projects, restoredProjects, preservedClients))
+    ) {
+      incomingRecord.allTimeProjectsIncomplete = true;
     }
   }
 }
@@ -656,6 +794,12 @@ function mergeDeviceRecord(existing, incoming) {
   if (incoming?.limitsOnly === true) {
     normalizedIncoming.periods = normalizedExisting.periods;
     if (hasOwn(normalizedExisting, 'periodWindows')) normalizedIncoming.periodWindows = normalizedExisting.periodWindows;
+    if (hasOwn(normalizedExisting, 'projectsEnabled')) normalizedIncoming.projectsEnabled = normalizedExisting.projectsEnabled;
+    if (hasOwn(normalizedExisting, 'allTimeProjectsOmitted')) normalizedIncoming.allTimeProjectsOmitted = normalizedExisting.allTimeProjectsOmitted;
+    if (hasOwn(normalizedExisting, 'allTimeProjectsIncomplete')) normalizedIncoming.allTimeProjectsIncomplete = normalizedExisting.allTimeProjectsIncomplete;
+    if (!hasOwn(normalizedIncoming, 'syncUploadIntervalMs') && hasOwn(normalizedExisting, 'syncUploadIntervalMs')) {
+      normalizedIncoming.syncUploadIntervalMs = normalizedExisting.syncUploadIntervalMs;
+    }
   }
   if (!hasIncomingLimits) normalizedIncoming.limits = normalizedExisting.limits;
   else normalizedIncoming.limits = mergeDeviceLimits(normalizedExisting, normalizedIncoming);
@@ -680,14 +824,15 @@ function carryDeviceHistory(previous, incoming) {
   return incoming;
 }
 
-function aggregateHistory(devices, staleAfterMs, nowMs = Date.now()) {
+// History is durable device data, not live presence. Keep a stored device's
+// contributions in the aggregate while it is offline; explicit device deletion
+// is the boundary that removes them. Staleness still applies independently to
+// live limits and expired today/month period snapshots.
+function aggregateHistory(devices) {
   const histories = [];
   for (const record of devices) {
     const normalized = normalizeDeviceRecord(record);
     if (!hasOwn(normalized, 'history')) continue;
-    const ageMs = nowMs - Date.parse(normalized.receivedAt || normalized.updatedAt || 0);
-    const stale = Number.isFinite(ageMs) && staleAfterMs > 0 ? ageMs > staleAfterMs : false;
-    if (stale) continue;
     histories.push(normalized.history);
   }
   return mergeHistories(histories);
@@ -728,6 +873,7 @@ function addPeriodInto(target, source) {
       target.clientModelCosts[client][model] = (target.clientModelCosts[client][model] || 0) + cost;
     }
   }
+  for (const [key, project] of Object.entries(source.projects || {})) addProjectInto(target.projects, key, project);
   for (const session of Object.values(source.sessions)) addSession(target, session);
   return target;
 }
@@ -763,13 +909,14 @@ function isPeriodExpired(record, periodName, nowMs) {
 }
 
 function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
-  const aggregate = { updatedAt: new Date().toISOString(), periods: {}, devices: [] };
+  const aggregate = { updatedAt: new Date().toISOString(), periods: {}, devices: [], projectsIncomplete: false };
   for (const periodName of PERIODS) aggregate.periods[periodName] = emptyPeriod();
   const now = nowMs;
   for (const record of devices) {
     const normalized = normalizeDeviceRecord(record);
     const ageMs = now - Date.parse(normalized.receivedAt || normalized.updatedAt || 0);
-    const stale = Number.isFinite(ageMs) && staleAfterMs > 0 ? ageMs > staleAfterMs : false;
+    const deviceStaleAfterMs = staleAfterMsForSyncUpload(normalized.syncUploadIntervalMs, staleAfterMs);
+    const stale = Number.isFinite(ageMs) && deviceStaleAfterMs > 0 ? ageMs > deviceStaleAfterMs : false;
     aggregate.devices.push({
       deviceId: normalized.deviceId,
       hostname: normalized.hostname,
@@ -783,9 +930,19 @@ function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
       ...(hasOwn(normalized, 'trackedClients') ? { trackedClients: normalized.trackedClients } : {}),
       ...(hasOwn(normalized, 'clientStatus') ? { clientStatus: normalized.clientStatus } : {}),
       ...(hasOwn(normalized, 'wslStatus') ? { wslStatus: normalized.wslStatus } : {}),
+      ...(hasOwn(normalized, 'projectsEnabled') ? { projectsEnabled: normalized.projectsEnabled } : {}),
+      ...(hasOwn(normalized, 'allTimeProjectsOmitted') ? { allTimeProjectsOmitted: normalized.allTimeProjectsOmitted } : {}),
+      ...(hasOwn(normalized, 'allTimeProjectsIncomplete') ? { allTimeProjectsIncomplete: normalized.allTimeProjectsIncomplete } : {}),
+      ...(hasOwn(normalized, 'syncUploadIntervalMs') ? { syncUploadIntervalMs: normalized.syncUploadIntervalMs } : {}),
+      ...(hasOwn(normalized, 'periodWindows') ? { periodWindows: normalized.periodWindows } : {}),
       periods: normalized.periods,
       limits: normalized.limits
     });
+    if (
+      normalized.allTimeProjectsOmitted === true
+      || normalized.allTimeProjectsIncomplete === true
+      || (normalized.projectsEnabled === false && normalized.periods.allTime.totalTokens > 0)
+    ) aggregate.projectsIncomplete = true;
     for (const periodName of PERIODS) {
       if (isPeriodExpired(normalized, periodName, now)) continue;
       addPeriodInto(aggregate.periods[periodName], normalizePeriod(normalized.periods[periodName]));
@@ -806,6 +963,9 @@ function aggregateDevices(devices, staleAfterMs, nowMs = Date.now()) {
       for (const [model, cost] of Object.entries(models)) {
         models[model] = Number(cost.toFixed(6));
       }
+    }
+    for (const project of Object.values(aggregate.periods[periodName].projects)) {
+      project.costUsd = Number(project.costUsd.toFixed(6));
     }
     for (const session of Object.values(aggregate.periods[periodName].sessions)) {
       session.costUsd = Number(session.costUsd.toFixed(6));
@@ -846,7 +1006,7 @@ function deltaValue(base, fresh, anchor, key) {
   if (typeof sample === 'string') return base ?? fresh;
   if (sample && typeof sample === 'object') {
     const keys = new Set([...Object.keys(base || {}), ...Object.keys(fresh || {}), ...Object.keys(anchor || {})]);
-    const result = {};
+    const result = Object.getPrototypeOf(sample) === null ? Object.create(null) : {};
     for (const childKey of keys) {
       result[childKey] = deltaValue(
         base ? base[childKey] : undefined,

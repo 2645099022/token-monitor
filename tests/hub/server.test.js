@@ -54,6 +54,16 @@ test('ingest inserts a device and is visible in getStats', () => {
   }
 });
 
+test('getStats exposes the effective staleness threshold', () => {
+  const dataFile = tempDataFile();
+  const hub = createHub({ port: 0, host: '127.0.0.1', secret: '', staleAfterMs: 123456, dataFile, logger: { error() {} } });
+  try {
+    assert.equal(hub.getStats().staleAfterMs, 123456);
+  } finally {
+    fs.rmSync(dataFile, { force: true });
+  }
+});
+
 test('ingest without a deviceId throws', () => {
   const dataFile = tempDataFile();
   const hub = createHub({ port: 0, host: '127.0.0.1', secret: '', dataFile, logger: { error() {} } });
@@ -81,6 +91,51 @@ test('onStats fires on ingest and on deleteDevice, and unsubscribe stops it', ()
     hub.ingest({ deviceId: 'dev-b', today: { totalTokens: 1 } });
     assert.equal(calls, 2);
   } finally {
+    fs.rmSync(dataFile, { force: true });
+  }
+});
+
+test('oversized ingest returns 413 without storing the device', async () => {
+  const dataFile = tempDataFile();
+  const hub = createHub({ port: 0, host: '127.0.0.1', secret: '', dataFile, logger: { error() {} } });
+  await hub.start();
+  try {
+    const { port } = hub.server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/api/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: 'oversized', padding: '🚀'.repeat(270_000) })
+    });
+
+    assert.equal(response.status, 413);
+    assert.equal(response.headers.get('connection'), 'close');
+    assert.deepEqual(await response.json(), {
+      error: 'payload_too_large',
+      message: 'Request body too large'
+    });
+    assert.equal(hub.getStats().devices.length, 0);
+  } finally {
+    await hub.stop();
+    fs.rmSync(dataFile, { force: true });
+  }
+});
+
+test('ingest accepts payloads above the legacy 256 KiB limit', async () => {
+  const dataFile = tempDataFile();
+  const hub = createHub({ port: 0, host: '127.0.0.1', secret: '', dataFile, logger: { error() {} } });
+  await hub.start();
+  try {
+    const { port } = hub.server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/api/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: 'larger', padding: 'x'.repeat(300 * 1024) })
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(hub.getStats().devices.length, 1);
+  } finally {
+    await hub.stop();
     fs.rmSync(dataFile, { force: true });
   }
 });

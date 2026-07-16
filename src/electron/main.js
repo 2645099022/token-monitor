@@ -4,11 +4,13 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
-const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, screen, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, Notification, screen, session, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const { defaultDeviceId, generateHubSecret, lanIpv4Addresses, loadDotEnv, pidFilePath, sharedDataDir } = require('../shared/config');
 const { installSafeStdout } = require('../shared/safeStdio');
 const { appVersion } = require('../shared/appVersion');
 const { exportFileSet, exportSignature, EXPORT_FILENAMES } = require('../shared/exporter');
+const motionPreferenceApi = require('./motionPreference');
 
 // Install EPIPE suppression before anything that might log. Without this,
 // a closed parent pipe turns the next log call into an unhandled 'error'
@@ -19,15 +21,24 @@ const { startCollector, lookupModelPricing, normalizeHistoryIntervalMs } = requi
 const { customPricingPath } = require('../shared/tokscaleConfig');
 const { applyCustomPricing, normalizeCustomPricingSetting } = require('../shared/tokscaleCustomPricing');
 const { createHub } = require('../hub/server');
-const { deepseekToken, normalizeLimitsRefreshMs, parseBoolean, parseLimitProviders, runCodexLogin, minimaxToken, copilotToken } = require('../shared/limitCollector');
+const { collectLimitsOnce, deepseekToken, normalizeLimitsRefreshMs, parseBoolean, parseLimitProviders, runCodexLogin, minimaxToken, copilotToken, zaiToken, zaiRegion, zaiTeamToken, volcengineCredentials, qoderCookie, kimiToken, ollamaSessionCookie } = require('../shared/limitCollector');
+const { mergeCodexTransientWindows } = require('../shared/limits');
+const { fetchOllamaLimits, rememberOllamaValidation } = require('../shared/ollamaLimits');
 const { copilotLoginErrorMessage, isAllowedVerificationUrl, runCopilotDeviceFlowLogin } = require('../shared/copilotDeviceFlow');
 const { codexAuthIdentity, hashAccountKey } = require('../shared/codexAuth');
+const { codexLoginUrlFromOutput, isAllowedCodexLoginUrl } = require('../shared/codexLogin');
+const {
+  codexAccountMatchesIdentity,
+  liveCodexAuthPath,
+  readCodexAuthMaterial,
+  writeCodexAuthFile
+} = require('../shared/codexSystemSwitch');
 const {
   normalizeClientDisplayOrder,
   normalizeHiddenClients,
   normalizePinnedClients
 } = require('./renderer/clientDisplayPreferences');
-const { LANGUAGE_OPTIONS } = require('./renderer/i18n');
+const { LANGUAGE_OPTIONS, resolveLocale, translate } = require('./renderer/i18n');
 const {
   defaultViewDisplayPreferences,
   normalizeHiddenViews,
@@ -45,7 +56,15 @@ const {
   getTokscaleStatus,
   resetToBundled
 } = require('../shared/tokscaleUpdater');
-const { checkLatestRelease, shouldSkipAppUpdateCheck } = require('../shared/appUpdater');
+const {
+  appUpdateInstallSupport,
+  checkLatestRelease,
+  deriveAppUpdateAvailability,
+  downloadedAppUpdateMatchesLatest,
+  GITHUB_REPO,
+  mergeLatestReleaseMetadata,
+  shouldSkipAppUpdateCheck
+} = require('../shared/appUpdater');
 const cursorAuth = require('../shared/cursorAuth');
 const cursorProbe = require('../shared/cursorProbe');
 const opencodeWeb = require('../shared/opencodeWeb');
@@ -65,7 +84,17 @@ const { syncLimits } = require('../shared/limits');
 const { historyPreview } = require('../shared/history');
 const { readSessionDetail } = require('../shared/sessionDetail');
 const { startDiscordRpc, stopDiscordRpc, updateDiscordRpc } = require('./discordRpc');
-const { buildTrayIcon, createTray, formatTrayText, pickUsageTrayIconId, popoverBounds } = require('./tray');
+const linuxAutostart = require('./linuxAutostart');
+const { codexAccountIdForProvider, localLiveCodexProvider } = require('./renderer/accountIdentity');
+const {
+  buildTrayIcon,
+  createTray,
+  formatTrayText,
+  pickUsageTrayIconId,
+  popoverBounds,
+  reconcileCodexAccountSelection,
+  sortCodexAccountsForDisplay
+} = require('./tray');
 const {
   macActivationPolicyMode,
   mainWindowCloseAction,
@@ -75,6 +104,8 @@ const {
 } = require('./trayModeSettings');
 const { SERVICE_STATUS_PROVIDERS, createServiceStatusClient } = require('./serviceStatus');
 const { classifyStreamFailure } = require('./syncConnection');
+const { composeLocalSyncStats } = require('./syncDisplayStats');
+const { createSyncUploadScheduler, normalizeSyncUploadIntervalMs } = require('./syncUploadScheduler');
 const { describeWindowBehavior, normalizeWindowBehaviorSettings } = require('./windowBehavior');
 const {
   normalizeWindowToggleShortcut,
@@ -120,7 +151,7 @@ const CSP_HEADER = [
   "form-action 'none'",
   "frame-ancestors 'none'"
 ].join('; ');
-const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon']);
+const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon']);
 const HUB_MODE_VALUES = new Set(['local', 'client', 'host']);
 const LANGUAGE_VALUES = new Set(LANGUAGE_OPTIONS.map((option) => option.value));
 const COLLECTION_MODE_VALUES = new Set(['live', 'interval']);
@@ -128,8 +159,9 @@ const COLLECTION_INTERVAL_OPTIONS = [5 * 60 * 1000, 15 * 60 * 1000, 30 * 60 * 10
 const DEFAULT_COLLECTION_INTERVAL_MS = 5 * 60 * 1000;
 const HUB_DEFAULT_PORT = 17321;
 const KNOWN_CLIENT_LIST = KNOWN_CLIENTS.split(',').map((id) => ({ id }));
-const DEFAULT_VIEW_LIST = ['home', 'tool', 'status', 'device', 'model', 'session', 'limits', 'trends'].map((id) => ({ id }));
+const DEFAULT_VIEW_LIST = ['home', 'tool', 'status', 'device', 'model', 'project', 'session', 'limits', 'trends'].map((id) => ({ id }));
 const DEFAULT_HOME_MODULE_LIST = ['limits', 'tool', 'device', 'model', 'trends'].map((id) => ({ id }));
+const TRAY_OPEN_VIEW_IDS = new Set(['home', 'project', 'session', 'limits', 'trends', 'status']);
 
 let mainWindow = null;
 let dashboardWindow = null;
@@ -165,9 +197,11 @@ function defaultSettings() {
     glassOpacity: 68,
     glassBlur: 32,
     systemGlass: true,
+    reduceMotion: 'system',
     showLiveDot: true,
     showToolIcons: true,
     titleIconOnly: true,
+    showCompactTotalTokens: false,
     themeColors: {},
     vendorColors: {},
     floatingBubbleEnabled: false,
@@ -186,14 +220,18 @@ function defaultSettings() {
     hiddenViews: defaultViewDisplayPreferences().hiddenViews,
     homeModuleOrder: defaultHomeModulePreferences().homeModuleOrder,
     hiddenHomeModules: defaultHomeModulePreferences().hiddenHomeModules,
+    showHomeLimitBars: false,
+    projectsEnabled: parseBoolean(process.env.TOKEN_MONITOR_PROJECTS_ENABLED, false),
     historyEnabled: true,
     historyIntervalMs: normalizeHistoryIntervalMs(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS),
+    sessionUsageArchiveEnabled: parseBoolean(process.env.TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED, true),
     wslScanEnabled: parseBoolean(process.env.TOKEN_MONITOR_WSL_SCAN, true),
     exportAutoEnabled: false,
     exportDir: '',
     exportIntervalMs: 60 * 1000,
     collectionMode: 'live',
     collectionIntervalMs: 5 * 60 * 1000,
+    syncUploadIntervalMs: normalizeSyncUploadIntervalMs(process.env.TOKEN_MONITOR_SYNC_UPLOAD_INTERVAL_MS),
     serviceProviderDisplayOrder: '',
     hiddenServiceProviders: '',
     serviceStatusRefreshMs: 60000,
@@ -207,8 +245,8 @@ function defaultSettings() {
     hiddenHomeLimitProviders: '',
     limitsRefreshMs: normalizeLimitsRefreshMs(process.env.TOKEN_MONITOR_LIMITS_REFRESH_MS),
     showLimitSource: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_SOURCE, false),
+    maskLimitAccountEmails: false,
     showLimitUsed: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_USED, false),
-    showActiveAccount: parseBoolean(process.env.TOKEN_MONITOR_SHOW_ACTIVE_ACCOUNT, false),
     windowBounds: null,
     zoomFactor: 1,
     showTrayIcon: true,
@@ -225,7 +263,20 @@ function defaultSettings() {
     minimaxApiKey: '',
     copilotApiToken: '',
     copilotEnterpriseHost: '',
+    zaiApiKey: '',
+    zaiApiRegion: normalizeZaiApiRegion(process.env.TOKEN_MONITOR_ZAI_API_REGION || process.env.ZAI_API_REGION || process.env.Z_AI_API_HOST || 'global'),
+    zaiTeamApiKey: '',
+    zaiTeamOrganizationId: '',
+    zaiTeamProjectId: '',
+    volcengineAccessKeyId: '',
+    volcengineSecretAccessKey: '',
+    volcengineRegion: '',
+    qoderCookie: '',
+    qoderSite: 'global',
+    kimiApiKey: '',
+    ollamaCookie: '',
     codexManagedAccounts: [],
+    mimoManagedAccounts: [],
     appUpdate: {
       lastCheckedAt: null,
       lastKnownLatest: null,
@@ -253,6 +304,10 @@ function collectorIntervalMs() {
 
 function collectorWatchEnabled() {
   return normalizeCollectionMode(settings?.collectionMode) === 'live';
+}
+
+function syncUploadIntervalMs() {
+  return normalizeSyncUploadIntervalMs(settings?.syncUploadIntervalMs);
 }
 
 function defaultLimitProviders() {
@@ -287,11 +342,84 @@ function currentCopilotApiToken() {
   return settings?.copilotApiToken || copilotToken(process.env);
 }
 
+function normalizeSecretSetting(value) {
+  let raw = String(value || '').trim();
+  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+    raw = raw.slice(1, -1).trim();
+  }
+  return raw;
+}
+
+function normalizeZaiApiKey(value) {
+  return zaiToken({}, String(value || ''));
+}
+
+function normalizeZaiApiRegion(value) {
+  return zaiRegion({ zaiApiRegion: value }, {});
+}
+
+function currentZaiApiKey() {
+  return settings?.zaiApiKey || zaiToken(process.env);
+}
+
+function normalizeZaiTeamApiKey(value) {
+  return zaiTeamToken({}, String(value || ''));
+}
+
+function normalizeZaiTeamId(value) {
+  return String(value || '').trim();
+}
+
+function currentZaiTeamApiKey() {
+  return settings?.zaiTeamApiKey || zaiTeamToken(process.env);
+}
+
+function normalizeVolcengineRegion(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return raw || '';
+}
+
+function currentVolcengineCredentials() {
+  return volcengineCredentials(process.env, settings || {});
+}
+
+function normalizeQoderCookie(value) {
+  return qoderCookie({}, { qoderCookie: String(value || '') });
+}
+
+function normalizeQoderSite(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'cn' || raw === 'china' || raw.includes('qoder.com.cn')) return 'cn';
+  return 'global';
+}
+
+function currentQoderCookie() {
+  return settings?.qoderCookie || qoderCookie(process.env);
+}
+
+function normalizeOllamaCookie(value) {
+  return ollamaSessionCookie({}, { ollamaCookie: String(value || '') });
+}
+
+function currentOllamaCookie() {
+  return settings?.ollamaCookie || ollamaSessionCookie(process.env);
+}
+
+function normalizeKimiApiKey(value) {
+  return kimiToken({}, String(value || ''));
+}
+
+function currentKimiApiKey() {
+  return settings?.kimiApiKey || kimiToken(process.env);
+}
+
 function normalizeCopilotEnterpriseHost(value) {
   return String(value || '').trim().replace(/^https?:\/\//i, '').split('/')[0].toLowerCase();
 }
 
-let codexLoginInFlight = false;
+let codexLoginController = null;
+let codexLoginFlowId = '';
+let codexLoginCanCancel = false;
 let copilotLoginController = null;
 let copilotLoginFlowId = '';
 
@@ -333,15 +461,164 @@ function codexManagedAccountsForCollector() {
   return normalizeCodexManagedAccounts(settings?.codexManagedAccounts);
 }
 
+function normalizeMimoManagedAccounts(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const accounts = [];
+  for (const account of value) {
+    if (!account || typeof account !== 'object') continue;
+    const id = String(account.id || '').trim();
+    const accountKey = String(account.accountKey || '').trim();
+    if (!id || !accountKey) continue;
+    if (seen.has(accountKey)) continue;
+    seen.add(accountKey);
+    accounts.push({
+      id,
+      accountKey,
+      accountEmail: String(account.accountEmail || '').trim().slice(0, 254),
+      accountLabel: String(account.accountLabel || '').trim(),
+      addedAt: account.addedAt || new Date().toISOString(),
+      updatedAt: account.updatedAt || account.addedAt || new Date().toISOString(),
+      enabled: account.enabled !== false
+    });
+  }
+  return accounts;
+}
+
+function mimoAccountsForRenderer() {
+  return normalizeMimoManagedAccounts(settings?.mimoManagedAccounts).map(({
+    id, accountKey, accountEmail, accountLabel, addedAt, updatedAt, enabled
+  }) => ({ id, accountKey, accountEmail, accountLabel, addedAt, updatedAt, enabled }));
+}
+
+function mimoManagedAccountsForCollector() {
+  return normalizeMimoManagedAccounts(settings?.mimoManagedAccounts).map((account) => ({
+    ...account,
+    cookieHeader: readMimoCredential(account.id)
+  })).filter((account) => account.cookieHeader);
+}
+
+function mimoCredentialPath(id) {
+  const digest = crypto.createHash('sha256').update(String(id || '')).digest('hex');
+  return path.join(app.getPath('userData'), 'mimo-credentials', `${digest}.cookie`);
+}
+
+function writeMimoCredential(id, value) {
+  const cookieHeader = normalizeMimoCookieHeader(value);
+  if (!cookieHeader) return false;
+  const destination = mimoCredentialPath(id);
+  const temporary = `${destination}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(destination), 0o700);
+    fs.writeFileSync(temporary, `${cookieHeader}\n`, { encoding: 'utf8', mode: 0o600 });
+    fs.chmodSync(temporary, 0o600);
+    fs.renameSync(temporary, destination);
+    fs.chmodSync(destination, 0o600);
+    return true;
+  } catch (_) {
+    try { fs.rmSync(temporary, { force: true }); } catch (_) {}
+    return false;
+  }
+}
+
+function readMimoCredential(id) {
+  try {
+    return normalizeMimoCookieHeader(fs.readFileSync(mimoCredentialPath(id), 'utf8'));
+  } catch (_) {
+    return '';
+  }
+}
+
+function removeMimoCredential(id) {
+  const target = mimoCredentialPath(id);
+  try {
+    fs.rmSync(target, { force: true });
+    return !fs.existsSync(target);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function addMimoManagedAccount(cookieValue) {
+  const accounts = normalizeMimoManagedAccounts(settings?.mimoManagedAccounts);
+  const result = createMimoManagedAccount(cookieValue, accounts);
+  if (!result.ok) return result;
+  const [validation] = await fetchMimoLimits({ mimoManagedAccounts: [result.account] });
+  if (validation?.status !== 'ok') {
+    const errorCode = validation?.status === 'unauthorized'
+      ? 'invalidCookie'
+      : validation?.status === 'sourceRateLimited' ? 'validationRateLimited' : 'validationUnavailable';
+    return { ok: false, errorCode };
+  }
+  result.account.accountEmail = String(validation.accountEmail || '').trim().slice(0, 254);
+  const credentialStored = writeMimoCredential(result.account.id, result.account.cookieHeader);
+  delete result.account.cookieHeader;
+  if (!credentialStored) return { ok: false, errorCode: 'credentialStorageUnavailable' };
+  settings.mimoManagedAccounts = normalizeMimoManagedAccounts([
+    ...accounts.filter((account) => account.accountKey !== result.account.accountKey),
+    result.account
+  ]);
+  saveSettings();
+  pushSettingsToRenderer();
+  sendMimoAccountsPush();
+  startMode();
+  return { ok: true, accounts: mimoAccountsForRenderer() };
+}
+
+async function removeMimoManagedAccount(id) {
+  const accountId = String(id || '').trim();
+  const accounts = normalizeMimoManagedAccounts(settings.mimoManagedAccounts);
+  const account = accounts.find((entry) => entry.id === accountId);
+  if (!account) return { ok: false, error: 'Account not found' };
+  if (!removeMimoCredential(accountId)) return { ok: false, error: 'Could not remove stored credential' };
+  settings.mimoManagedAccounts = accounts.filter((entry) => entry.id !== accountId);
+  saveSettings();
+  pushSettingsToRenderer();
+  sendMimoAccountsPush();
+  startMode();
+  return { ok: true, accounts: mimoAccountsForRenderer() };
+}
+
+function setMimoManagedAccountEnabled(id, enabled) {
+  const accountId = String(id || '').trim();
+  const accounts = normalizeMimoManagedAccounts(settings.mimoManagedAccounts);
+  const account = accounts.find((entry) => entry.id === accountId);
+  if (!account) return { ok: false, error: 'Account not found' };
+  account.enabled = Boolean(enabled);
+  account.updatedAt = new Date().toISOString();
+  settings.mimoManagedAccounts = accounts;
+  saveSettings();
+  pushSettingsToRenderer();
+  sendMimoAccountsPush();
+  startMode();
+  return { ok: true, accounts: mimoAccountsForRenderer() };
+}
+
 function codexManagedRoot() {
   return path.join(app.getPath('userData'), 'managed-codex-homes');
 }
 
+function codexManagedHomePath(accountId) {
+  const resolvedRoot = path.resolve(codexManagedRoot());
+  const resolvedHome = path.resolve(resolvedRoot, String(accountId || ''));
+  if (resolvedHome === resolvedRoot) return '';
+  if (!resolvedHome.startsWith(`${resolvedRoot}${path.sep}`)) return '';
+  return resolvedHome;
+}
+
+function codexEmailDerivedAccountKey(account, identity) {
+  const email = String(identity.email || account.email || '').trim().toLowerCase();
+  return Boolean(email && String(account.accountKey || '').trim() === hashAccountKey(email));
+}
+
 function findExistingCodexAccount(accounts, identity) {
-  return accounts.find((account) => (
-    (identity.accountKey && account.accountKey === identity.accountKey) ||
-    (identity.email && account.email === identity.email)
-  ));
+  return accounts.find((account) => {
+    if (identity.accountKey && account.accountKey && !codexEmailDerivedAccountKey(account, identity)) {
+      return account.accountKey === identity.accountKey;
+    }
+    return Boolean(identity.email && account.email === identity.email);
+  });
 }
 
 function codexAccountId(identity, existing) {
@@ -362,7 +639,7 @@ async function removeManagedHomeIfSafe(homePath) {
 
 // Records a managed account for the auth that already lives in `homePath`, then
 // reloads the collector so the new account's limits show up immediately.
-function commitCodexManagedAccount(identity, homePath, existing) {
+function commitCodexManagedAccount(identity, homePath, existing, options = {}) {
   const now = new Date().toISOString();
   const id = codexAccountId(identity, existing);
   const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
@@ -375,15 +652,40 @@ function commitCodexManagedAccount(identity, homePath, existing) {
     authPath: path.join(homePath, 'auth.json'),
     addedAt: existing?.addedAt || now,
     updatedAt: now,
-    enabled: true
+    enabled: options.enabled ?? true
   };
   settings.codexManagedAccounts = normalizeCodexManagedAccounts([
     ...accounts.filter((account) => account.id !== id),
     record
   ]);
   saveSettings();
-  startMode();
+  if (options.restart !== false) startMode();
   return codexAccountsForRenderer().find((account) => account.id === id);
+}
+
+function hasCodexIdentity(identity) {
+  return Boolean(identity?.accountKey || identity?.email);
+}
+
+async function preserveLiveCodexAuthAsManagedAccount(targetIdentity) {
+  let liveMaterial;
+  try {
+    liveMaterial = await readCodexAuthMaterial(liveCodexAuthPath(process.env));
+  } catch (error) {
+    if (error?.code !== 'ENOENT') console.warn('Could not read live Codex auth before switching accounts:', error?.message || error);
+    return null;
+  }
+  if (!hasCodexIdentity(liveMaterial.identity)) return null;
+  if (codexAccountMatchesIdentity(targetIdentity, liveMaterial.identity)) return null;
+  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
+  const existing = findExistingCodexAccount(accounts, liveMaterial.identity);
+  const homePath = codexManagedHomePath(codexAccountId(liveMaterial.identity, existing));
+  if (!homePath) return null;
+  await writeCodexAuthFile(path.join(homePath, 'auth.json'), liveMaterial.data);
+  return commitCodexManagedAccount(liveMaterial.identity, homePath, existing, {
+    enabled: existing?.enabled ?? true,
+    restart: false
+  });
 }
 
 function codexLoginErrorMessage(result) {
@@ -395,23 +697,42 @@ function codexLoginErrorMessage(result) {
       return `Could not start codex login.${detail}`;
     case 'timedOut':
       return `Sign-in timed out. Finish the browser login, then try again.${detail}`;
+    case 'cancelled':
+      return 'Sign-in cancelled.';
     default:
       return `codex login failed.${detail}`;
   }
 }
 
+function cancelledCodexLoginResult() {
+  return {
+    ok: false,
+    error: codexLoginErrorMessage({ outcome: 'cancelled' }),
+    outcome: 'cancelled'
+  };
+}
+
+async function rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal) {
+  if (movedToFinal) await removeManagedHomeIfSafe(homePath);
+  if (backupHomePath) await fs.promises.rename(backupHomePath, homePath);
+}
+
 // Best practice: each account gets its own OAuth grant via an isolated
 // `codex login` (CodexBar/tokscale model), so it never shares a refresh-token
 // lineage with the user's live Codex CLI login.
-async function addCodexManagedAccount(onOutput) {
+async function addCodexManagedAccount(onOutput, options = {}) {
   await fs.promises.mkdir(codexManagedRoot(), { recursive: true });
   const tempHome = path.join(codexManagedRoot(), `pending-${crypto.randomUUID()}`);
   await fs.promises.mkdir(tempHome, { recursive: true });
+  let backupHomePath = '';
+  let movedToFinal = false;
+  let accountCommitted = false;
   try {
-    const result = await runCodexLogin({ homePath: tempHome, onOutput }, { env: process.env });
+    const result = await runCodexLogin({ homePath: tempHome, onOutput, signal: options.signal }, { env: process.env });
     if (result.outcome !== 'success') {
       return { ok: false, error: codexLoginErrorMessage(result), outcome: result.outcome };
     }
+    if (options.signal?.aborted) return cancelledCodexLoginResult();
     let auth;
     try {
       auth = JSON.parse(await fs.promises.readFile(path.join(tempHome, 'auth.json'), 'utf8'));
@@ -422,15 +743,71 @@ async function addCodexManagedAccount(onOutput) {
     if (!identity.accountKey && !identity.email) {
       return { ok: false, error: 'Could not identify the Codex account after sign-in.' };
     }
+    if (options.signal?.aborted) return cancelledCodexLoginResult();
     const existing = findExistingCodexAccount(normalizeCodexManagedAccounts(settings.codexManagedAccounts), identity);
-    const homePath = path.join(codexManagedRoot(), codexAccountId(identity, existing));
+    const homePath = codexManagedHomePath(codexAccountId(identity, existing));
+    if (!homePath) return { ok: false, error: 'The saved Codex account path is invalid.' };
     if (path.resolve(homePath) !== path.resolve(tempHome)) {
-      await removeManagedHomeIfSafe(homePath);
-      await fs.promises.rename(tempHome, homePath);
+      if (options.signal?.aborted) return cancelledCodexLoginResult();
+      const candidateBackupPath = `${homePath}.backup-${crypto.randomUUID()}`;
+      try {
+        await fs.promises.rename(homePath, candidateBackupPath);
+        backupHomePath = candidateBackupPath;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+      if (options.signal?.aborted) {
+        await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
+        backupHomePath = '';
+        return cancelledCodexLoginResult();
+      }
+      try {
+        await fs.promises.rename(tempHome, homePath);
+        movedToFinal = true;
+      } catch (error) {
+        await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
+        backupHomePath = '';
+        throw error;
+      }
+      if (options.signal?.aborted) {
+        await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
+        backupHomePath = '';
+        movedToFinal = false;
+        return cancelledCodexLoginResult();
+      }
     }
-    return { ok: true, account: commitCodexManagedAccount(identity, homePath, existing) };
+    if (options.signal?.aborted) {
+      await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
+      backupHomePath = '';
+      movedToFinal = false;
+      return cancelledCodexLoginResult();
+    }
+    const previousAccounts = settings.codexManagedAccounts;
+    options.onCommit?.();
+    let account;
+    try {
+      account = commitCodexManagedAccount(identity, homePath, existing, { restart: false });
+      if (backupHomePath) {
+        await removeManagedHomeIfSafe(backupHomePath);
+        backupHomePath = '';
+      }
+      accountCommitted = true;
+    } catch (error) {
+      settings.codexManagedAccounts = previousAccounts;
+      try {
+        saveSettings();
+      } catch (rollbackError) {
+        console.warn('Could not restore Codex account settings:', rollbackError?.message || rollbackError);
+      }
+      await rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal);
+      backupHomePath = '';
+      movedToFinal = false;
+      throw error;
+    }
+    startMode();
+    return { ok: true, account };
   } finally {
-    await removeManagedHomeIfSafe(tempHome).catch(() => {});
+    if (!accountCommitted) await removeManagedHomeIfSafe(tempHome).catch(() => {});
   }
 }
 
@@ -458,12 +835,73 @@ function setCodexManagedAccountEnabled(id, enabled) {
   return { ok: true, accounts: codexAccountsForRenderer() };
 }
 
+async function switchCodexSystemAccount(id) {
+  const accountId = String(id || '').trim();
+  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
+  const account = accounts.find((entry) => entry.id === accountId);
+  if (!account) return { ok: false, error: 'Account not found' };
+  if (account.enabled === false) return { ok: false, error: 'Account is disabled' };
+
+  let targetMaterial;
+  try {
+    targetMaterial = await readCodexAuthMaterial(account.authPath || path.join(account.homePath, 'auth.json'));
+  } catch (error) {
+    return { ok: false, error: `Could not read the selected Codex account credentials: ${error?.message || error}` };
+  }
+  if (!hasCodexIdentity(targetMaterial.identity)) {
+    return { ok: false, error: 'Could not identify the selected Codex account credentials.' };
+  }
+
+  try {
+    await preserveLiveCodexAuthAsManagedAccount(targetMaterial.identity);
+    await writeCodexAuthFile(liveCodexAuthPath(process.env), targetMaterial.data);
+    const refreshedAccounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
+    const refreshed = refreshedAccounts.find((entry) => entry.id === account.id) || account;
+    commitCodexManagedAccount(targetMaterial.identity, refreshed.homePath, refreshed, {
+      enabled: refreshed.enabled !== false
+    });
+    const activeAccountId = codexAccountId(targetMaterial.identity, refreshed);
+    const accountsForRenderer = codexAccountsForRenderer();
+    return {
+      ok: true,
+      activeAccountId,
+      activeAccount: accountsForRenderer.find((entry) => entry.id === activeAccountId) || null,
+      accounts: accountsForRenderer
+    };
+  } catch (error) {
+    return { ok: false, error: `Could not switch the local Codex account: ${error?.message || error}` };
+  }
+}
+
+async function refreshCodexManagedAccountLimits(id) {
+  const accountId = String(id || '').trim();
+  const accounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
+  const account = accounts.find((entry) => entry.id === accountId);
+  if (!account) return { ok: false, error: 'Account not found' };
+  if (account.enabled === false) return { ok: false, error: 'Account is disabled' };
+  try {
+    const summary = await collectLimitsOnce({
+      ...settings,
+      limitsEnabled: true,
+      limitProviders: 'codex',
+      includeLiveCodexAccount: false,
+      codexManagedAccounts: [account]
+    }, { env: process.env });
+    const stableSummary = mergeCodexTransientWindows(latestStats?.limits, summary);
+    return {
+      ok: true,
+      providers: (stableSummary.providers || []).filter((provider) => provider?.provider === 'codex')
+    };
+  } catch (error) {
+    return { ok: false, error: `Could not refresh Codex account limits: ${error?.message || error}` };
+  }
+}
+
 function migrateLimitProviders(value) {
-  const normalized = parseLimitProviders(value).join(',');
-  // Upgrade: users who had the old 2-provider or 4-provider full defaults get the new default (which includes opencode).
-  if (normalized === 'claude,codex') return defaultLimitProviders();
-  if (normalized === 'claude,codex,cursor,antigravity') return defaultLimitProviders();
-  return normalized;
+  // Saved provider selections are user intent. Normalize ids, but do not expand
+  // older defaults into today's full provider list because the saved shape is
+  // indistinguishable from a deliberate "only these providers" choice.
+  return parseLimitProviders(value).join(',');
 }
 
 function migrateLimitProviderOrder(value) {
@@ -900,6 +1338,7 @@ function readSettings() {
     if (saved.hiddenHomeModules !== undefined) {
       merged.hiddenHomeModules = normalizeHiddenHomeModules(saved.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST);
     }
+    merged.showHomeLimitBars = parseBoolean(merged.showHomeLimitBars, false);
     if (saved.homeLimitProviderOrder !== undefined) {
       merged.homeLimitProviderOrder = migrateHomeLimitProviderOrder(saved.homeLimitProviderOrder);
     }
@@ -909,11 +1348,19 @@ function readSettings() {
     if (saved.historyEnabled !== undefined) {
       merged.historyEnabled = parseBoolean(saved.historyEnabled, false);
     }
+    if (saved.projectsEnabled !== undefined) {
+      merged.projectsEnabled = parseBoolean(saved.projectsEnabled, true);
+    }
+    if (saved.sessionUsageArchiveEnabled !== undefined) {
+      merged.sessionUsageArchiveEnabled = parseBoolean(saved.sessionUsageArchiveEnabled, true);
+    }
     if (saved.wslScanEnabled !== undefined) {
       merged.wslScanEnabled = parseBoolean(saved.wslScanEnabled, true);
     }
     merged.collectionMode = normalizeCollectionMode(merged.collectionMode);
     merged.collectionIntervalMs = normalizeCollectionIntervalMs(merged.collectionIntervalMs);
+    merged.syncUploadIntervalMs = normalizeSyncUploadIntervalMs(merged.syncUploadIntervalMs);
+    merged.reduceMotion = motionPreferenceApi.normalize(merged.reduceMotion);
     if (saved.serviceProviderDisplayOrder !== undefined) {
       merged.serviceProviderDisplayOrder = String(saved.serviceProviderDisplayOrder || '');
     }
@@ -924,6 +1371,7 @@ function readSettings() {
       merged.serviceStatusRefreshMs = normalizeServiceStatusRefreshMs(saved.serviceStatusRefreshMs);
     }
     merged.codexManagedAccounts = normalizeCodexManagedAccounts(merged.codexManagedAccounts);
+    merged.mimoManagedAccounts = normalizeMimoManagedAccounts(merged.mimoManagedAccounts);
     if (saved.windowBehavior === undefined && saved.alwaysOnTop !== undefined) {
       merged.windowBehavior = saved.alwaysOnTop ? 'floating' : 'normal';
     }
@@ -962,17 +1410,23 @@ function saveSettings() {
 }
 
 function loginItemEnabledHere() {
-  return app.isPackaged && process.platform !== 'linux';
+  if (!app.isPackaged) return false;
+  // Electron login items only cover macOS/Windows; on Linux we manage an XDG
+  // autostart entry ourselves, which needs the AppImage runtime ($APPIMAGE).
+  if (process.platform === 'linux') return linuxAutostart.autostartSupported();
+  return true;
 }
 
 function currentLoginItemState() {
   if (!loginItemEnabledHere()) return false;
+  if (process.platform === 'linux') return linuxAutostart.isAutostartEnabled();
   try { return Boolean(app.getLoginItemSettings().openAtLogin); }
   catch (_) { return false; }
 }
 
 function applyLoginItem(startAtLogin) {
   if (!loginItemEnabledHere()) return false;
+  if (process.platform === 'linux') return linuxAutostart.setAutostartEnabled(Boolean(startAtLogin));
   app.setLoginItemSettings({ openAtLogin: Boolean(startAtLogin) });
   return currentLoginItemState();
 }
@@ -1011,11 +1465,48 @@ function updateArchivedClientUsage(previousClients, nextClients) {
   settings.archivedClientUsage = archive;
 }
 
+function ensureSessionUsageArchiveLoaded() {
+  if (sessionUsageArchive) return sessionUsageArchive;
+  try {
+    sessionUsageArchive = readSessionUsageArchive();
+  } catch (error) {
+    console.log(`[session-archive] read failed: ${error.message}`);
+    sessionUsageArchive = normalizeSessionUsageArchive({});
+  }
+  return sessionUsageArchive;
+}
+
+function updateSessionUsageArchive(summary, now) {
+  const previous = ensureSessionUsageArchiveLoaded();
+  const next = captureSessionUsageArchive(previous, summary, now);
+  if (JSON.stringify(next) === JSON.stringify(previous)) return previous;
+  try {
+    writeSessionUsageArchive(next);
+    sessionUsageArchive = next;
+  } catch (error) {
+    console.log(`[session-archive] write failed: ${error.message}`);
+  }
+  return next;
+}
+
 function summaryWithArchivedClientUsage(summary) {
-  return applyArchivedClientUsage(summary, settings?.archivedClientUsage, {
+  const now = sessionUsageArchiveDate(summary);
+  const withArchivedClients = applyArchivedClientUsage(summary, settings?.archivedClientUsage, {
     activeClients: settings?.clients,
-    now: new Date()
+    now
   });
+  let visibleSummary = withArchivedClients;
+  if (settings?.sessionUsageArchiveEnabled === false) {
+    return settings?.projectsEnabled === false ? visibleSummary : applyProjectRollups(visibleSummary);
+  }
+  if (isExternalAgentActive()) {
+    sessionUsageArchive = null;
+    visibleSummary = applySessionUsageArchive(withArchivedClients, ensureSessionUsageArchiveLoaded(), { now });
+  } else {
+    const sessionArchive = updateSessionUsageArchive(summary, now);
+    visibleSummary = applySessionUsageArchive(withArchivedClients, sessionArchive, { now });
+  }
+  return settings?.projectsEnabled === false ? visibleSummary : applyProjectRollups(visibleSummary);
 }
 
 function applyMacActivationPolicy(state = {}) {
@@ -1079,8 +1570,9 @@ function applyNativeMaterial(source = settings) {
 }
 
 function withHistoryPreview(stats, devices) {
-  const history = settings?.historyEnabled === false ? aggregateHistory([], 0) : aggregateHistory(devices, 0);
+  const history = settings?.historyEnabled === false ? aggregateHistory([]) : aggregateHistory(devices);
   stats.historyPreview = historyPreview(history);
+  stats.historyRevision = historyRevision(history);
   return stats;
 }
 
@@ -1094,8 +1586,14 @@ let streamConnected = false;
 let streamFailure = null;
 let syncCollectorHandle = null;
 let lastCollectedDevice = null;
+let latestHubStats = null;
 let tray = null;
 let latestStats = null;
+let trayRefreshInFlight = false;
+let trayCodexActiveAccountId = '';
+let trayCodexPendingAccountId = '';
+let trayCodexPendingSince = 0;
+let trayCodexSwitchInFlight = false;
 const DEFAULT_EXPORT_INTERVAL_MS = 60 * 1000;
 let lastExportAt = 0;
 let lastAutoExport = { dir: null, signature: null };
@@ -1226,10 +1724,10 @@ async function postToHub(summary) {
     catch (error) { console.log(`[sync] cleanup of old deviceId ${stale} failed: ${error.message}`); }
   }
   const url = `${hubUrl.replace(/\/$/, '')}/api/ingest`;
-  const response = await fetch(url, {
-    method: 'POST',
+  const { response } = await postSyncPayload(fetch, url, {
     headers: { 'content-type': 'application/json', ...(secret ? { authorization: `Bearer ${secret}` } : {}) },
-    body: JSON.stringify({ ...summary, limits: syncLimits(summary.limits) })
+    summary,
+    logger: (message) => console.log(`[sync] ${message}`)
   });
   if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
   if (settings.lastPostedDeviceId !== summary.deviceId) {
@@ -1247,7 +1745,12 @@ function stopSyncCollector() {
 function startSyncCollector() {
   stopSyncCollector();
   if (!effectiveHubConfig().url) return;
-  syncCollectorHandle = startCollector({
+  const syncUploadScheduler = createSyncUploadScheduler({
+    intervalMs: syncUploadIntervalMs(),
+    upload: postToHub,
+    onError: (error) => console.log(`[sync-collector] post failed: ${error.message}`)
+  });
+  const collectorHandle = startCollector({
     clients: clientsCsvForSetting(settings.clients),
     allTimeSince: settings.allTimeSince || '2024-01-01',
     commandTimeoutMs: 120 * 1000,
@@ -1256,6 +1759,7 @@ function startSyncCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
+    projectsEnabled: settings.projectsEnabled !== false,
     historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
     watchDebounceMs: 1500,
@@ -1263,19 +1767,41 @@ function startSyncCollector() {
     wslScanEnabled: settings.wslScanEnabled !== false,
     limitProviders: settings.limitProviders ?? defaultLimitProviders(),
     limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
+    previousLimits: lastCollectedDevice?.limits,
     opencodeCookie: settings.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
     opencodeProfiles: settings.opencodeProfiles || {},
     deepseekApiKey: settings.deepseekApiKey || '',
     minimaxApiKey: settings.minimaxApiKey || '',
     copilotApiToken: settings.copilotApiToken || '',
     copilotEnterpriseHost: settings.copilotEnterpriseHost || '',
+    zaiApiKey: settings.zaiApiKey || '',
+    zaiApiRegion: settings.zaiApiRegion || 'global',
+    zaiTeamApiKey: settings.zaiTeamApiKey || '',
+    zaiTeamOrganizationId: settings.zaiTeamOrganizationId || '',
+    zaiTeamProjectId: settings.zaiTeamProjectId || '',
+    volcengineAccessKeyId: settings.volcengineAccessKeyId || '',
+    volcengineSecretAccessKey: settings.volcengineSecretAccessKey || '',
+    volcengineRegion: settings.volcengineRegion || '',
+    qoderCookie: settings.qoderCookie || '',
+    qoderSite: settings.qoderSite || 'global',
+    kimiApiKey: settings.kimiApiKey || '',
+    ollamaCookie: settings.ollamaCookie || '',
     codexManagedAccounts: codexManagedAccountsForCollector(),
+    mimoManagedAccounts: mimoManagedAccountsForCollector(),
     onUpdate: async (summary) => {
-      const visibleSummary = summaryWithArchivedClientUsage(summary);
+      if (isExternalAgentActive()) { sessionUsageArchive = null; return; }
+      const visibleSummary = {
+        ...summaryWithArchivedClientUsage(summary),
+        syncUploadIntervalMs: syncUploadIntervalMs()
+      };
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
-      if (isExternalAgentActive()) return;
+      const displayStats = composeLocalSyncStats(latestHubStats, lastCollectedDevice);
+      if (displayStats) {
+        updateDiscordRpc(displayStats, settings.currency);
+        sendPush({ event: 'stats', data: { type: 'stats', reason: 'local', stats: displayStats, at: new Date().toISOString() } });
+      }
       try {
-        await postToHub(visibleSummary);
+        await syncUploadScheduler.enqueue(visibleSummary);
       } catch (error) {
         console.log(`[sync-collector] post failed: ${error.message}`);
       }
@@ -1283,6 +1809,13 @@ function startSyncCollector() {
     onError: (error, reason) => console.log(`[sync-collector] ${reason}: ${error.message}`),
     logger: (msg) => console.log(`[sync-collector] ${msg}`)
   });
+  syncCollectorHandle = {
+    stop() {
+      syncUploadScheduler.stop();
+      collectorHandle.stop();
+    },
+    tick: collectorHandle.tick
+  };
 }
 
 // Host mode: this device's own usage goes straight into the embedded hub's store
@@ -1299,6 +1832,7 @@ function startHostCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
+    projectsEnabled: settings.projectsEnabled !== false,
     historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
     watchDebounceMs: 1500,
@@ -1306,24 +1840,42 @@ function startHostCollector() {
     wslScanEnabled: settings.wslScanEnabled !== false,
     limitProviders: settings.limitProviders ?? defaultLimitProviders(),
     limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
+    previousLimits: lastCollectedDevice?.limits,
     opencodeCookie: settings.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
     opencodeProfiles: settings.opencodeProfiles || {},
     deepseekApiKey: settings.deepseekApiKey || '',
     minimaxApiKey: settings.minimaxApiKey || '',
     copilotApiToken: settings.copilotApiToken || '',
     copilotEnterpriseHost: settings.copilotEnterpriseHost || '',
+    zaiApiKey: settings.zaiApiKey || '',
+    zaiApiRegion: settings.zaiApiRegion || 'global',
+    zaiTeamApiKey: settings.zaiTeamApiKey || '',
+    zaiTeamOrganizationId: settings.zaiTeamOrganizationId || '',
+    zaiTeamProjectId: settings.zaiTeamProjectId || '',
+    volcengineAccessKeyId: settings.volcengineAccessKeyId || '',
+    volcengineSecretAccessKey: settings.volcengineSecretAccessKey || '',
+    volcengineRegion: settings.volcengineRegion || '',
+    qoderCookie: settings.qoderCookie || '',
+    qoderSite: settings.qoderSite || 'global',
+    kimiApiKey: settings.kimiApiKey || '',
+    ollamaCookie: settings.ollamaCookie || '',
     codexManagedAccounts: codexManagedAccountsForCollector(),
+    mimoManagedAccounts: mimoManagedAccountsForCollector(),
     onUpdate: (summary) => {
+      if (isExternalAgentActive()) { sessionUsageArchive = null; return; }
       const visibleSummary = summaryWithArchivedClientUsage(summary);
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
-      if (isExternalAgentActive()) return;
       if (!embeddedHub) return;
       try {
         const stale = settings.lastPostedDeviceId;
         if (stale && stale !== visibleSummary.deviceId) {
           embeddedHub.hub.deleteDevice(stale);
         }
-        embeddedHub.hub.ingest({ ...visibleSummary, limits: syncLimits(visibleSummary.limits) });
+        const payload = syncPayload(visibleSummary);
+        if (payload.allTimeProjectsOmitted === true) {
+          console.log('[host-ingest] all-time project breakdown omitted to reduce the sync snapshot size');
+        }
+        embeddedHub.hub.ingest(payload);
         if (settings.lastPostedDeviceId !== visibleSummary.deviceId) {
           settings.lastPostedDeviceId = visibleSummary.deviceId;
           saveSettings();
@@ -1366,18 +1918,36 @@ function startHostStats() {
 // sync/host mode without depending on the hub (or a remote Worker) being
 // redeployed to preserve these fields.
 function injectLocalDeviceStatus(stats) {
-  if (!stats || !lastCollectedDevice || !Array.isArray(stats.devices)) return stats;
-  const device = stats.devices.find((entry) => entry.deviceId === lastCollectedDevice.deviceId);
-  if (!device) return stats;
-  if (lastCollectedDevice.clientStatus) device.clientStatus = lastCollectedDevice.clientStatus;
-  if (lastCollectedDevice.wslStatus) device.wslStatus = lastCollectedDevice.wslStatus;
+  if (!stats || !Array.isArray(stats.devices)) return stats;
+  if (lastCollectedDevice) {
+    const device = stats.devices.find((entry) => entry.deviceId === lastCollectedDevice.deviceId);
+    if (device) {
+      if (lastCollectedDevice.clientStatus) device.clientStatus = lastCollectedDevice.clientStatus;
+      if (lastCollectedDevice.wslStatus) device.wslStatus = lastCollectedDevice.wslStatus;
+    }
+  }
+  // syncPayload drops the unbounded allTime.sessions from uploads (#118), so a hub
+  // aggregate carries no all-time session detail and the TOTAL session view would fall back
+  // to a model list. Rebuild the list — the hub's cross-device month sessions as the
+  // immediate baseline (present on the first frame, before this restart's first local scan),
+  // then this machine's own full all-time sessions once collected (free, in-process). Carry
+  // it as a display-only sibling instead of mutating periods.allTime.sessions: the exporter
+  // writes periods verbatim under a lossless contract, so the export must keep the true
+  // aggregate. The renderer overlays this onto periods.allTime for the session view.
+  // Only sync/host mode needs this: in local mode periods.allTime.sessions already holds the
+  // full native list, so building the sibling there would just ship the unbounded map twice.
+  if (mode !== 'local' && stats.periods?.allTime) {
+    stats.allTimeSessionsView = mergedLocalAllTimeSessions(stats.periods, lastCollectedDevice);
+  }
   return stats;
 }
 
 function sendPush(payload) {
+  const previousHistoryRevision = statsHistoryRevision(latestStats);
   if (payload?.data?.stats) {
     injectLocalDeviceStatus(payload.data.stats);
     latestStats = payload.data.stats;
+    syncTrayCodexActiveAccount();
     updateTrayDisplay();
     if (settings.exportAutoEnabled && settings.exportDir && Date.now() - lastExportAt >= exportIntervalMs()) {
       lastExportAt = Date.now();
@@ -1388,6 +1958,19 @@ function sendPush(payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('stats:push', payload); } catch (_) {}
   }
+  if (payload?.data?.stats) {
+    const nextHistoryRevision = statsHistoryRevision(payload.data.stats);
+    if (nextHistoryRevision !== previousHistoryRevision && dashboardWindow && !dashboardWindow.isDestroyed()) {
+      try { dashboardWindow.webContents.send('dashboard:historyChanged'); } catch (_) {}
+    }
+  }
+}
+
+function statsHistoryRevision(stats) {
+  const revision = String(stats?.historyRevision || '').trim();
+  if (revision) return revision;
+  // Compatibility with an older remote hub that has not shipped revisions yet.
+  return JSON.stringify(stats?.historyPreview || null);
 }
 
 let rateCache = null;            // { rates, date, source, fetchedAt }
@@ -1433,14 +2016,24 @@ function updateTrayDisplay() {
   if (!tray || tray.isDestroyed()) return;
   const mode = settings?.trayContent || 'tokens';
   const currency = normalizeCurrency(settings?.currency);
-  const text = formatTrayText(latestStats, mode, currency);
+  const limitText = formatTrayText(latestStats, mode, currency, {
+    limitProviderOrder: settings?.limitProviderOrder,
+    limitProviders: settings?.limitProviders,
+    showLimitUsed: settings?.showLimitUsed
+  });
+  const barsImageMode = (mode === 'bars' || mode === 'barsSession' || mode === 'barsWeekly' || mode === 'barsAllSessions') && !limitText && providerTrayIcons[mode];
+  // A renderer-generated icon is cached in the main process. Only reuse it
+  // while the current stats still have quota text; otherwise it can outlive
+  // the provider data that generated it.
+  const trayImageMode = mode === 'limitsAllSessions' && Boolean(limitText) && providerTrayIcons[mode];
+  const text = trayImageMode ? '' : limitText;
   if (process.platform === 'darwin') tray.setTitle(text);
   // Tooltip always shows a useful summary, even in icon-only mode where setTitle is blank.
   const tip = formatTrayText(latestStats, 'both', currency);
   tray.setToolTip(`Token Monitor - ${tip}`);
   // Icon: rendered bars image in bar modes, otherwise the app icon.
   let icon = null;
-  if ((mode === 'bars' || mode === 'barsSession' || mode === 'barsWeekly' || mode === 'barsAllSessions') && providerTrayIcons[mode]) {
+  if (barsImageMode || trayImageMode) {
     icon = providerTrayIcons[mode];
   } else {
     const usageIconId = pickUsageTrayIconId(latestStats, mode, Object.keys(providerTrayIcons));
@@ -1475,6 +2068,7 @@ function startLocalCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
+    projectsEnabled: settings.projectsEnabled !== false,
     historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
     watchDebounceMs: 1500,
@@ -1482,13 +2076,27 @@ function startLocalCollector() {
     wslScanEnabled: settings.wslScanEnabled !== false,
     limitProviders: settings.limitProviders ?? defaultLimitProviders(),
     limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
+    previousLimits: lastCollectedDevice?.limits,
     opencodeCookie: settings.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
     opencodeProfiles: settings.opencodeProfiles || {},
     deepseekApiKey: settings.deepseekApiKey || '',
     minimaxApiKey: settings.minimaxApiKey || '',
     copilotApiToken: settings.copilotApiToken || '',
     copilotEnterpriseHost: settings.copilotEnterpriseHost || '',
+    zaiApiKey: settings.zaiApiKey || '',
+    zaiApiRegion: settings.zaiApiRegion || 'global',
+    zaiTeamApiKey: settings.zaiTeamApiKey || '',
+    zaiTeamOrganizationId: settings.zaiTeamOrganizationId || '',
+    zaiTeamProjectId: settings.zaiTeamProjectId || '',
+    volcengineAccessKeyId: settings.volcengineAccessKeyId || '',
+    volcengineSecretAccessKey: settings.volcengineSecretAccessKey || '',
+    volcengineRegion: settings.volcengineRegion || '',
+    qoderCookie: settings.qoderCookie || '',
+    qoderSite: settings.qoderSite || 'global',
+    kimiApiKey: settings.kimiApiKey || '',
+    ollamaCookie: settings.ollamaCookie || '',
     codexManagedAccounts: codexManagedAccountsForCollector(),
+    mimoManagedAccounts: mimoManagedAccountsForCollector(),
     onUpdate: (summary, reason) => {
       const visibleSummary = summaryWithArchivedClientUsage(summary);
       // History only rides along on gated ticks; carry the last known history
@@ -1573,8 +2181,9 @@ function parseSseChunk(chunk) {
   try { return { event, data: JSON.parse(dataLines.join('\n')) }; } catch (_) { return null; }
 }
 
-async function startStatsStream() {
+async function startStatsStream(options = {}) {
   stopStatsStream();
+  if (options.resetSnapshot) latestHubStats = null;
   const { url: hubUrl, secret } = effectiveHubConfig();
   if (!hubUrl) return;
   mode = 'sync';
@@ -1603,9 +2212,14 @@ async function startStatsStream() {
       while ((idx = buffer.indexOf('\n\n')) !== -1) {
         const chunk = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
-        const parsed = parseSseChunk(chunk);
+        let parsed = parseSseChunk(chunk);
         if (parsed) {
-          if (parsed.event === 'stats' && parsed.data?.stats) updateDiscordRpc(parsed.data.stats, settings.currency);
+          if (parsed.event === 'stats' && parsed.data?.stats) {
+            latestHubStats = parsed.data.stats;
+            const displayStats = composeLocalSyncStats(latestHubStats, lastCollectedDevice);
+            parsed = { ...parsed, data: { ...parsed.data, stats: displayStats } };
+            updateDiscordRpc(displayStats, settings.currency);
+          }
           sendPush(parsed);
         }
       }
@@ -1694,11 +2308,51 @@ function settingsForRenderer() {
     : copilotToken(process.env)
       ? 'env'
       : '';
+  const zaiApiKeySource = settings?.zaiApiKey
+    ? 'settings'
+    : zaiToken(process.env)
+      ? 'env'
+      : '';
+  const zaiTeamApiKeySource = settings?.zaiTeamApiKey
+    ? 'settings'
+    : zaiTeamToken(process.env)
+      ? 'env'
+      : '';
+  const volcengineCredentialsSource = volcengineCredentials({}, settings || {})
+    ? 'settings'
+    : volcengineCredentials(process.env)
+      ? 'env'
+      : '';
+  const qoderCookieSource = settings?.qoderCookie
+    ? 'settings'
+    : qoderCookie(process.env)
+      ? 'env'
+      : '';
+  const ollamaCookieSource = settings?.ollamaCookie
+    ? 'settings'
+    : ollamaSessionCookie(process.env)
+      ? 'env'
+      : '';
+  const kimiApiKeySource = settings?.kimiApiKey
+    ? 'settings'
+    : kimiToken(process.env)
+      ? 'env'
+      : '';
   return {
     ...settings,
     deepseekApiKey: '',
     minimaxApiKey: '',
     copilotApiToken: '',
+    zaiApiKey: '',
+    zaiApiRegion: normalizeZaiApiRegion(settings?.zaiApiRegion || 'global'),
+    zaiTeamApiKey: '',
+    zaiTeamOrganizationId: settings?.zaiTeamOrganizationId ? 'set' : '',
+    zaiTeamProjectId: settings?.zaiTeamProjectId ? 'set' : '',
+    volcengineAccessKeyId: settings?.volcengineAccessKeyId ? 'set' : '',
+    volcengineSecretAccessKey: '',
+    qoderCookie: settings?.qoderCookie ? 'set' : '',
+    kimiApiKey: '',
+    ollamaCookie: settings?.ollamaCookie ? 'set' : '',
     // Never ship OpenCode session cookies to the renderer; the UI only needs to
     // know whether a cookie is configured, not its value.
     opencodeCookie: settings?.opencodeCookie ? 'set' : '',
@@ -1706,12 +2360,25 @@ function settingsForRenderer() {
       ? { opencodeProfiles: redactOpencodeProfilesForRenderer(settings.opencodeProfiles) }
       : {}),
     codexManagedAccounts: codexAccountsForRenderer(),
+    mimoManagedAccounts: mimoAccountsForRenderer(),
     deepseekApiKeyConfigured: Boolean(currentDeepSeekApiKey()),
     deepseekApiKeySource,
     minimaxApiKeyConfigured: Boolean(currentMinimaxApiKey()),
     minimaxApiKeySource,
     copilotApiTokenConfigured: Boolean(currentCopilotApiToken()),
     copilotApiTokenSource,
+    zaiApiKeyConfigured: Boolean(currentZaiApiKey()),
+    zaiApiKeySource,
+    zaiTeamApiKeyConfigured: Boolean(currentZaiTeamApiKey()),
+    zaiTeamApiKeySource,
+    volcengineCredentialsConfigured: Boolean(currentVolcengineCredentials()),
+    volcengineCredentialsSource,
+    qoderCookieConfigured: Boolean(currentQoderCookie()),
+    qoderCookieSource,
+    ollamaCookieConfigured: Boolean(currentOllamaCookie()),
+    ollamaCookieSource,
+    kimiApiKeyConfigured: Boolean(currentKimiApiKey()),
+    kimiApiKeySource,
     currencyRatesEffective: effectiveRates || resolveEffectiveRates(rateCache?.rates || {}, settings?.currencyRates || {}),
     currencyRateInfo: rateCache ? { source: rateCache.source, date: rateCache.date, fetchedAt: rateCache.fetchedAt } : null,
     windowToggleShortcutStatus: currentWindowToggleShortcutStatus()
@@ -1730,6 +2397,11 @@ function pushSettingsToRenderer() {
   if (dashboardWindow && !dashboardWindow.isDestroyed()) {
     try { dashboardWindow.webContents.send('settings:push', payload); } catch (_) {}
   }
+}
+
+function sendMimoAccountsPush() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('mimo:accounts', mimoAccountsForRenderer()); } catch (_) {}
 }
 
 function unregisterWindowToggleShortcut() {
@@ -1760,6 +2432,163 @@ function handleTrayToggle() {
   else if (action === 'focusWindow') focusExistingWindow();
 }
 
+function trayMenuLocale() {
+  const preferredLanguages = typeof app.getPreferredSystemLanguages === 'function'
+    ? app.getPreferredSystemLanguages()
+    : [app.getLocale()];
+  return resolveLocale(settings?.language || 'auto', preferredLanguages);
+}
+
+function sendMainWindowEvent(channel, payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const send = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try { mainWindow.webContents.send(channel, payload); } catch (_) {}
+  };
+  if (mainWindow.webContents.isLoading()) mainWindow.webContents.once('did-finish-load', send);
+  else send();
+}
+
+async function refreshFromTray() {
+  if (trayRefreshInFlight) return;
+  trayRefreshInFlight = true;
+  try {
+    const stats = await fetchStats({ force: true });
+    // Collector ticks normally publish their own final snapshot. Only bridge the
+    // result when fetchStats returned a different object (for example, a remote hub
+    // fetch while an external headless agent owns collection).
+    if (stats && stats !== latestStats) {
+      sendPush({ event: 'stats', data: { stats, mode, reason: 'manual' } });
+    }
+  } catch (error) {
+    console.warn(`[tray] refresh failed: ${error.message}`);
+    showTrayRefreshError(error?.message || error);
+  } finally {
+    trayRefreshInFlight = false;
+  }
+}
+
+function setTrayContentFromMenu(value) {
+  const next = normalizeTrayContent(value, settings?.trayContent || 'tokens');
+  if (next === settings?.trayContent) return;
+  settings.trayContent = next;
+  saveSettings();
+  updateTrayDisplay();
+  pushSettingsToRenderer();
+}
+
+function setWindowPresentationFromMenu(value) {
+  if (value === 'tray') {
+    if (settings.trayMode) return;
+    settings.trayMode = true;
+    saveSettings();
+    syncFloatingBubbleAvailability();
+    enterTrayMode();
+    pushSettingsToRenderer();
+    return;
+  }
+
+  const previousTrayMode = settings.trayMode;
+  settings = normalizeWindowBehaviorSettings(settings, {
+    trayMode: false,
+    windowBehavior: value
+  });
+  saveSettings();
+  if (previousTrayMode) exitTrayMode();
+  else {
+    applyWindowSettings();
+    focusExistingWindow();
+  }
+  pushSettingsToRenderer();
+}
+
+function openSettingsFromTray() {
+  focusExistingWindow();
+  sendMainWindowEvent('settings:open');
+}
+
+function openViewFromTray(viewId) {
+  const normalized = String(viewId || '').trim().toLowerCase();
+  if (!TRAY_OPEN_VIEW_IDS.has(normalized)) return;
+  focusExistingWindow();
+  sendMainWindowEvent('view:open', normalized);
+}
+
+function enabledTrayCodexAccounts() {
+  return sortCodexAccountsForDisplay(
+    codexAccountsForRenderer().filter((account) => account.enabled !== false)
+  );
+}
+
+function syncTrayCodexActiveAccount() {
+  const accounts = enabledTrayCodexAccounts();
+  const localDeviceId = settings?.deviceId || '';
+  const liveProvider = localLiveCodexProvider(latestStats, localDeviceId);
+  const selection = reconcileCodexAccountSelection({
+    detectedAccountId: codexAccountIdForProvider(accounts, liveProvider),
+    detectedAt: liveProvider?.updatedAt,
+    pendingAccountId: trayCodexPendingAccountId,
+    pendingSince: trayCodexPendingSince
+  });
+  trayCodexActiveAccountId = selection.activeAccountId;
+  trayCodexPendingAccountId = selection.pendingAccountId;
+  if (!trayCodexPendingAccountId) trayCodexPendingSince = 0;
+}
+
+function trayCodexMenuState() {
+  syncTrayCodexActiveAccount();
+  const accounts = enabledTrayCodexAccounts();
+  return {
+    accounts,
+    activeAccountId: trayCodexPendingAccountId || trayCodexActiveAccountId,
+    switching: trayCodexSwitchInFlight
+  };
+}
+
+function showTrayCodexSwitchError(error) {
+  const locale = trayMenuLocale();
+  const title = translate(locale, 'trayMenu.codexSwitchFailedTitle');
+  const body = translate(locale, 'trayMenu.codexSwitchFailedBody', { error: String(error || '') });
+  if (Notification.isSupported()) {
+    new Notification({ title, body }).show();
+  } else {
+    dialog.showErrorBox(title, body);
+  }
+}
+
+function showTrayRefreshError(error) {
+  const locale = trayMenuLocale();
+  const title = translate(locale, 'trayMenu.refreshFailedTitle');
+  const body = translate(locale, 'trayMenu.refreshFailedBody', { error: String(error || '') });
+  if (Notification.isSupported()) {
+    new Notification({ title, body }).show();
+  } else {
+    dialog.showErrorBox(title, body);
+  }
+}
+
+async function switchCodexAccountFromTray(accountId) {
+  if (trayCodexSwitchInFlight || !accountId) return;
+  const currentId = trayCodexPendingAccountId || trayCodexActiveAccountId;
+  if (accountId === currentId) return;
+  trayCodexSwitchInFlight = true;
+  try {
+    const result = await switchCodexSystemAccount(accountId);
+    if (!result?.ok) {
+      showTrayCodexSwitchError(result?.error);
+      return;
+    }
+    trayCodexActiveAccountId = result.activeAccountId || accountId;
+    trayCodexPendingAccountId = trayCodexActiveAccountId;
+    trayCodexPendingSince = Date.now();
+    pushSettingsToRenderer();
+  } catch (error) {
+    showTrayCodexSwitchError(error?.message || error);
+  } finally {
+    trayCodexSwitchInFlight = false;
+  }
+}
+
 function configureWindowToggleShortcut() {
   unregisterWindowToggleShortcut();
   const shortcut = normalizeWindowToggleShortcut(settings?.windowToggleShortcut);
@@ -1783,14 +2612,37 @@ function ensureTray() {
   if (!shouldCreateTray(settings)) return false;
   if (tray && !tray.isDestroyed()) return;
   tray = createTray({
+    getMenuState: () => {
+      const codex = trayCodexMenuState();
+      return {
+        appVersion: appVersion(),
+        refreshing: trayRefreshInFlight,
+        trayContent: settings?.trayContent || 'tokens',
+        trayMode: Boolean(settings?.trayMode),
+        windowBehavior: settings?.windowBehavior || 'floating',
+        codexAccounts: codex.accounts,
+        activeCodexAccountId: codex.activeAccountId,
+        codexSwitching: codex.switching,
+        maskAccountEmails: Boolean(settings?.maskLimitAccountEmails),
+        viewEnabled: {
+          home: true,
+          project: settings?.projectsEnabled !== false,
+          session: true,
+          limits: settings?.limitsEnabled !== false && parseLimitProviders(settings?.limitProviders).length > 0,
+          trends: settings?.historyEnabled !== false,
+          status: true
+        }
+      };
+    },
     onToggle: handleTrayToggle,
+    onOpenView: openViewFromTray,
+    onRefresh: () => { void refreshFromTray(); },
+    onSetTrayContent: setTrayContentFromMenu,
+    onSetWindowPresentation: setWindowPresentationFromMenu,
+    onSwitchCodexAccount: (accountId) => { void switchCodexAccountFromTray(accountId); },
+    onOpenSettings: openSettingsFromTray,
     onQuit: requestAppQuit,
-    onSwitchToWindowMode: () => {
-      settings.trayMode = false;
-      saveSettings();
-      exitTrayMode();
-      pushSettingsToRenderer();
-    }
+    translateMenu: (key, params) => translate(trayMenuLocale(), key, params)
   });
   updateTrayDisplay();
   return true;
@@ -1871,7 +2723,7 @@ function startMode() {
     }
     await stopEmbeddedHub();
     if (effectiveHubConfig().url) {
-      startStatsStream();
+      startStatsStream({ resetSnapshot: true });
       startSyncCollector();
     } else {
       startLocalCollector();
@@ -1973,7 +2825,8 @@ async function fetchStats(options = {}) {
   const url = `${hubUrl.replace(/\/$/, '')}/api/stats`;
   const response = await fetch(url, { headers: secret ? { authorization: `Bearer ${secret}` } : {} });
   if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
-  return injectLocalDeviceStatus(await response.json());
+  latestHubStats = await response.json();
+  return injectLocalDeviceStatus(composeLocalSyncStats(latestHubStats, lastCollectedDevice));
 }
 
 function managedPricingSidecarPath() {
@@ -2051,27 +2904,126 @@ async function downloadTokscaleFromNpm() {
 }
 
 let appUpdateCheckInFlight = false;
+let appUpdateCheckPromise = null;
 let appUpdateLastError = null;
 let appUpdateBackgroundTimer = null;
+let appUpdateNativeBusy = false;
+let appUpdateNativeConfigured = false;
+let appUpdateNativeState = {
+  phase: 'idle',
+  version: null,
+  progress: null,
+  error: null
+};
+
+function latestFromUpdaterInfo(info) {
+  if (!info || typeof info !== 'object') return null;
+  const version = semver.valid(info.version);
+  if (!version) return null;
+  return {
+    version,
+    tag: `v${version}`,
+    name: (typeof info.releaseName === 'string' && info.releaseName.trim()) ? info.releaseName : `v${version}`,
+    htmlUrl: `https://github.com/${GITHUB_REPO}/releases/tag/v${version}`,
+    publishedAt: typeof info.releaseDate === 'string' ? info.releaseDate : ''
+  };
+}
+
+function rememberLatestAppUpdate(latest, checkedAt = new Date().toISOString()) {
+  if (!latest) return null;
+  const merged = mergeLatestReleaseMetadata(settings?.appUpdate?.lastKnownLatest, latest);
+  settings.appUpdate = {
+    ...(settings.appUpdate || {}),
+    lastCheckedAt: checkedAt,
+    lastKnownLatest: merged
+  };
+  saveSettings();
+  return merged;
+}
+
+function setNativeAppUpdateState(patch = {}) {
+  appUpdateNativeState = { ...appUpdateNativeState, ...patch };
+  sendAppUpdatePush();
+}
+
+function configureNativeAppUpdater() {
+  if (appUpdateNativeConfigured) return;
+  appUpdateNativeConfigured = true;
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.logger = console;
+  autoUpdater.on('checking-for-update', () => {
+    setNativeAppUpdateState({ phase: 'checking', progress: null, error: null });
+  });
+  autoUpdater.on('update-available', (info) => {
+    const latest = rememberLatestAppUpdate(latestFromUpdaterInfo(info));
+    setNativeAppUpdateState({ phase: 'available', version: latest?.version || info?.version || null, progress: null, error: null });
+  });
+  autoUpdater.on('update-not-available', (info) => {
+    appUpdateNativeBusy = false;
+    const latest = rememberLatestAppUpdate(latestFromUpdaterInfo(info));
+    setNativeAppUpdateState({ phase: 'idle', version: latest?.version || null, progress: null, error: null });
+  });
+  autoUpdater.on('download-progress', (progress) => {
+    setNativeAppUpdateState({
+      phase: 'downloading',
+      progress: Number.isFinite(progress?.percent) ? Math.max(0, Math.min(100, progress.percent)) : null,
+      error: null
+    });
+  });
+  autoUpdater.on('update-downloaded', (info) => {
+    appUpdateNativeBusy = false;
+    const latest = latestFromUpdaterInfo(info);
+    setNativeAppUpdateState({ phase: 'downloaded', version: latest?.version || info?.version || appUpdateNativeState.version || null, progress: 100, error: null });
+  });
+  autoUpdater.on('error', (error) => {
+    appUpdateNativeBusy = false;
+    setNativeAppUpdateState({ phase: 'error', progress: null, error: error?.message || String(error || 'Update failed') });
+  });
+}
 
 function deriveAppUpdateState() {
   const block = settings?.appUpdate || {};
   const currentVersion = app.getVersion();
   const latest = block.lastKnownLatest || null;
   const dismissedVersion = block.dismissedVersion || null;
-  let hasUpdate = false;
-  if (latest && semver.valid(latest.version) && semver.valid(currentVersion)) {
-    hasUpdate = semver.gt(latest.version, currentVersion) && latest.version !== dismissedVersion;
-  }
+  const installSupport = appUpdateInstallSupport({ isPackaged: app.isPackaged, platform: process.platform, env: process.env });
+  const availability = deriveAppUpdateAvailability({
+    currentVersion,
+    latest,
+    dismissedVersion,
+    phase: appUpdateNativeState.phase,
+    downloadedVersion: appUpdateNativeState.version
+  });
   return {
     currentVersion,
     latest,
-    hasUpdate,
+    hasUpdate: availability.hasUpdate,
+    showUpdateNotice: availability.showUpdateNotice,
     dismissedVersion,
     lastCheckedAt: block.lastCheckedAt || null,
     checking: appUpdateCheckInFlight,
-    lastError: appUpdateLastError
+    lastError: appUpdateLastError,
+    installSupported: installSupport.supported,
+    installSupportReason: installSupport.reason,
+    installPhase: appUpdateNativeState.phase,
+    installProgress: appUpdateNativeState.progress,
+    installVersion: appUpdateNativeState.version,
+    installError: appUpdateNativeState.error,
+    downloaded: availability.downloaded,
+    installBusy: appUpdateNativeBusy || appUpdateNativeState.phase === 'checking' || appUpdateNativeState.phase === 'downloading'
   };
+}
+
+function restoreDismissedAppUpdate(version) {
+  const block = settings?.appUpdate || {};
+  if (!version || block.dismissedVersion !== version) return false;
+  settings.appUpdate = {
+    ...block,
+    dismissedVersion: null
+  };
+  saveSettings();
+  return true;
 }
 
 function sendAppUpdatePush() {
@@ -2080,7 +3032,20 @@ function sendAppUpdatePush() {
 }
 
 async function runAppUpdateCheck({ force = false } = {}) {
-  if (appUpdateCheckInFlight) return deriveAppUpdateState();
+  if (appUpdateCheckPromise) {
+    if (force) sendAppUpdatePush();
+    const activeResult = await appUpdateCheckPromise;
+    if (force) {
+      if (activeResult?.ok) {
+        if (activeResult.newer) restoreDismissedAppUpdate(activeResult.latest?.version);
+        appUpdateLastError = null;
+      } else {
+        appUpdateLastError = activeResult?.error || 'Update check failed';
+      }
+      sendAppUpdatePush();
+    }
+    return deriveAppUpdateState();
+  }
   const block = settings?.appUpdate || {};
   if (shouldSkipAppUpdateCheck({
     force,
@@ -2091,29 +3056,37 @@ async function runAppUpdateCheck({ force = false } = {}) {
   })) {
     return deriveAppUpdateState();
   }
-  appUpdateCheckInFlight = true;
-  appUpdateLastError = null;
-  if (force) sendAppUpdatePush();
-  try {
-    const result = await checkLatestRelease(app.getVersion());
-    if (result.ok) {
-      settings.appUpdate = {
-        ...(settings.appUpdate || {}),
-        lastCheckedAt: result.checkedAt,
-        lastKnownLatest: result.latest
-      };
-      saveSettings();
-      appUpdateLastError = null;
-    } else {
-      appUpdateLastError = force ? (result.error || 'Update check failed') : null;
-      if (!force) console.warn('App update check failed:', result.error);
+  const checkTask = (async () => {
+    appUpdateCheckInFlight = true;
+    appUpdateLastError = null;
+    if (force) sendAppUpdatePush();
+    let result;
+    try {
+      result = await checkLatestRelease(app.getVersion());
+      if (result.ok) {
+        rememberLatestAppUpdate(result.latest, result.checkedAt);
+        if (force && result.newer) restoreDismissedAppUpdate(result.latest?.version);
+        appUpdateLastError = null;
+      } else {
+        appUpdateLastError = force ? (result.error || 'Update check failed') : null;
+        if (!force) console.warn('App update check failed:', result.error);
+      }
+    } catch (error) {
+      const message = error.message || String(error);
+      appUpdateLastError = force ? message : null;
+      if (!force) console.warn('App update check threw:', error);
+      return { ok: false, newer: false, latest: null, error: message };
+    } finally {
+      appUpdateCheckInFlight = false;
+      sendAppUpdatePush();
     }
-  } catch (error) {
-    appUpdateLastError = force ? (error.message || String(error)) : null;
-    if (!force) console.warn('App update check threw:', error);
+    return result;
+  })();
+  appUpdateCheckPromise = checkTask;
+  try {
+    await checkTask;
   } finally {
-    appUpdateCheckInFlight = false;
-    sendAppUpdatePush();
+    if (appUpdateCheckPromise === checkTask) appUpdateCheckPromise = null;
   }
   return deriveAppUpdateState();
 }
@@ -2139,6 +3112,53 @@ function dismissAppUpdateVersion(version) {
   return deriveAppUpdateState();
 }
 
+async function downloadAndPrepareAppUpdate() {
+  const support = appUpdateInstallSupport({ isPackaged: app.isPackaged, platform: process.platform, env: process.env });
+  if (!support.supported) {
+    setNativeAppUpdateState({ phase: 'error', error: support.reason || 'unsupported-platform', progress: null });
+    return deriveAppUpdateState();
+  }
+  if (appUpdateNativeBusy) return deriveAppUpdateState();
+  const latest = settings?.appUpdate?.lastKnownLatest || null;
+  if (downloadedAppUpdateMatchesLatest({
+    phase: appUpdateNativeState.phase,
+    downloadedVersion: appUpdateNativeState.version,
+    latest
+  })) return deriveAppUpdateState();
+  restoreDismissedAppUpdate(latest?.version);
+  configureNativeAppUpdater();
+  appUpdateNativeBusy = true;
+  setNativeAppUpdateState({ phase: 'checking', progress: null, error: null });
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const info = result?.updateInfo || null;
+    const version = semver.valid(info?.version) || null;
+    if (!version || !semver.gt(version, app.getVersion())) {
+      appUpdateNativeBusy = false;
+      setNativeAppUpdateState({ phase: 'idle', version, progress: null, error: null });
+      return deriveAppUpdateState();
+    }
+    setNativeAppUpdateState({ phase: 'downloading', version, progress: 0, error: null });
+    await autoUpdater.downloadUpdate();
+  } catch (error) {
+    appUpdateNativeBusy = false;
+    setNativeAppUpdateState({ phase: 'error', progress: null, error: error?.message || String(error) });
+  }
+  return deriveAppUpdateState();
+}
+
+function installDownloadedAppUpdate() {
+  const latest = settings?.appUpdate?.lastKnownLatest || null;
+  if (!downloadedAppUpdateMatchesLatest({
+    phase: appUpdateNativeState.phase,
+    downloadedVersion: appUpdateNativeState.version,
+    latest
+  })) return deriveAppUpdateState();
+  quitRequested = true;
+  autoUpdater.quitAndInstall(false, true);
+  return deriveAppUpdateState();
+}
+
 function isAllowedExternalUrl(value) {
   let parsed;
   try { parsed = new URL(String(value || '')); }
@@ -2146,6 +3166,7 @@ function isAllowedExternalUrl(value) {
   if (parsed.protocol !== 'https:') return false;
   const enterpriseHost = settings?.copilotEnterpriseHost || process.env.COPILOT_ENTERPRISE_HOST || process.env.GITHUB_ENTERPRISE_HOST || '';
   if (isAllowedVerificationUrl(value, enterpriseHost)) return true;
+  if (isAllowedCodexLoginUrl(value)) return true;
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/junhoyeo/tokscale')) return true;
   if (parsed.hostname === 'www.npmjs.com' && parsed.pathname.startsWith('/package/@tokscale/')) return true;
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/Javis603/token-monitor')) return true;
@@ -2154,6 +3175,12 @@ function isAllowedExternalUrl(value) {
   if (parsed.hostname === 'platform.deepseek.com' && parsed.pathname.startsWith('/api_keys')) return true;
   if (parsed.hostname === 'platform.minimaxi.com') return true;
   if (parsed.hostname === 'platform.minimax.io') return true;
+  if (parsed.hostname === 'z.ai' || parsed.hostname === 'www.z.ai') return true;
+  if (parsed.hostname === 'bigmodel.cn' || parsed.hostname === 'www.bigmodel.cn') return true;
+  if (parsed.hostname === 'www.volcengine.com' || parsed.hostname === 'console.volcengine.com') return true;
+  if (parsed.hostname === 'qoder.com' || parsed.hostname === 'www.qoder.com' || parsed.hostname === 'qoder.com.cn' || parsed.hostname === 'www.qoder.com.cn') return true;
+  if ((parsed.hostname === 'ollama.com' || parsed.hostname === 'www.ollama.com') && (parsed.pathname === '/settings' || parsed.pathname === '/signin')) return true;
+  if ((parsed.hostname === 'kimi.com' || parsed.hostname === 'www.kimi.com') && parsed.pathname.startsWith('/code')) return true;
   if (STATUS_PAGE_HOSTS.has(parsed.hostname) && (parsed.pathname === '' || parsed.pathname === '/')) return true;
   return false;
 }
@@ -2330,12 +3357,18 @@ function replaceMainWindow(bounds, options = {}) {
   });
 }
 
+function discardFailedDashboardWindow(win, reason) {
+  if (!win || win !== dashboardWindow || win.isDestroyed()) return;
+  console.log(`[dashboard] ${reason}`);
+  win.destroy();
+}
+
 function createDashboardWindow() {
   if (dashboardWindow && !dashboardWindow.isDestroyed()) {
     // Reload so a reopened window always picks up the latest renderer + fresh history,
     // instead of showing whatever was loaded when it first opened.
+    dashboardWindow.hide();
     dashboardWindow.webContents.reload();
-    dashboardWindow.focus();
     return dashboardWindow;
   }
   const glass = nativeBlurEnabled();
@@ -2368,22 +3401,34 @@ function createDashboardWindow() {
     event.preventDefault();
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
   });
-  win.once('ready-to-show', () => win.show());
+  // Only dashboard:ready may reveal a healthy window. Slow hub history must not
+  // race a wall-clock fallback and expose the unprepared heatmap. Actual load or
+  // renderer failures discard the hidden window so the next open starts cleanly.
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return; // ERR_ABORTED is expected during reloads.
+    discardFailedDashboardWindow(win, `load failed: ${errorDescription}`);
+  });
+  win.webContents.on('render-process-gone', (_event, details) => {
+    discardFailedDashboardWindow(win, `renderer stopped: ${details.reason}`);
+  });
+  win.on('unresponsive', () => {
+    if (!win.isVisible()) discardFailedDashboardWindow(win, 'renderer became unresponsive while opening');
+  });
   win.on('closed', () => { dashboardWindow = null; });
   win.loadFile(path.join(__dirname, 'renderer', 'dashboard.html'))
-    .catch((error) => console.log(`[dashboard] load failed: ${error.message}`));
+    .catch((error) => discardFailedDashboardWindow(win, `load failed: ${error.message}`));
   return win;
 }
 
 async function getDashboardHistory() {
-  if (settings?.historyEnabled === false) return aggregateHistory([], 0);
+  if (settings?.historyEnabled === false) return aggregateHistory([]);
   if (mode === 'local') {
     // The local collector keeps localDevice.history current (watch + interval
     // ticks, with carry-forward), so read it directly — exactly as the hub
     // branch reads /api/history. Forcing a full collection tick here made the
     // fetch take seconds; on a quick close/reopen the response outlived the
     // renderer and was dropped, stranding the dashboard on its empty state.
-    return aggregateHistory(localDevice ? [localDevice] : [], 0);
+    return aggregateHistory(localDevice ? [localDevice] : []);
   }
   if (settings.hubMode === 'host' && embeddedHub) {
     // Host mode reads its own hub store in-process, so the dashboard history
@@ -2391,11 +3436,20 @@ async function getDashboardHistory() {
     return embeddedHub.hub.getHistory();
   }
   const { url: hubUrl, secret } = effectiveHubConfig();
-  if (!hubUrl) return aggregateHistory([], 0);
+  if (!hubUrl) return aggregateHistory([]);
   const url = `${hubUrl.replace(/\/$/, '')}/api/history`;
-  const response = await fetch(url, { headers: secret ? { authorization: `Bearer ${secret}` } : {} });
-  if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
-  return response.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, {
+      headers: secret ? { authorization: `Bearer ${secret}` } : {},
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 let cursorStatusCache = { value: null, at: 0 };
@@ -2478,6 +3532,19 @@ app.whenReady().then(() => {
   rateRefreshTimer = setInterval(() => { refreshExchangeRates(); }, 6 * 60 * 60 * 1000);
   setTimeout(() => { checkTokscaleNpm({ silent: true }); }, 2000);
   ipcMain.handle('settings:get', () => settingsForRenderer());
+  ipcMain.handle('sessionUsageArchive:clear', () => {
+    if (isExternalAgentActive()) return { ok: false, error: 'agentActive' };
+    try {
+      clearSessionUsageArchive();
+      sessionUsageArchive = normalizeSessionUsageArchive({});
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    } finally {
+      startMode();
+      pushSettingsToRenderer();
+    }
+  });
   ipcMain.handle('pricing:lookup', async (_event, modelId) => {
     try {
       return { ok: true, result: await lookupModelPricing(modelId) };
@@ -2498,14 +3565,29 @@ app.whenReady().then(() => {
     const previousLimitProviders = settings.limitProviders;
     const previousLimitsRefreshMs = settings.limitsRefreshMs;
     const previousHistoryEnabled = settings.historyEnabled;
+    const previousProjectsEnabled = settings.projectsEnabled;
+    const previousSessionUsageArchiveEnabled = settings.sessionUsageArchiveEnabled;
     const previousHistoryIntervalMs = settings.historyIntervalMs;
     const previousWslScanEnabled = settings.wslScanEnabled;
     const previousCollectionMode = settings.collectionMode;
     const previousCollectionIntervalMs = settings.collectionIntervalMs;
+    const previousSyncUploadIntervalMs = settings.syncUploadIntervalMs;
     const previousDeepSeekApiKey = settings.deepseekApiKey;
     const previousMinimaxApiKey = settings.minimaxApiKey;
     const previousCopilotApiToken = settings.copilotApiToken;
     const previousCopilotEnterpriseHost = settings.copilotEnterpriseHost;
+    const previousZaiApiKey = settings.zaiApiKey;
+    const previousZaiApiRegion = settings.zaiApiRegion;
+    const previousZaiTeamApiKey = settings.zaiTeamApiKey;
+    const previousZaiTeamOrganizationId = settings.zaiTeamOrganizationId;
+    const previousZaiTeamProjectId = settings.zaiTeamProjectId;
+    const previousVolcengineAccessKeyId = settings.volcengineAccessKeyId;
+    const previousVolcengineSecretAccessKey = settings.volcengineSecretAccessKey;
+    const previousVolcengineRegion = settings.volcengineRegion;
+    const previousQoderCookie = settings.qoderCookie;
+    const previousQoderSite = settings.qoderSite;
+    const previousKimiApiKey = settings.kimiApiKey;
+    const previousOllamaCookie = settings.ollamaCookie;
     const previousDiscordRpcEnabled = settings.discordRpcEnabled;
     const previousShowTrayIcon = settings.showTrayIcon;
     const previousTrayMode = settings.trayMode;
@@ -2516,14 +3598,28 @@ app.whenReady().then(() => {
     const normalizedCurrency = patch.currency !== undefined ? normalizeCurrency(patch.currency, settings.currency) : normalizeCurrency(settings.currency);
     const normalizedPatch = { ...patch, currency: normalizedCurrency };
     delete normalizedPatch.codexManagedAccounts;
+    delete normalizedPatch.mimoManagedAccounts;
     delete normalizedPatch.customModelPricing;
     if (patch.clients !== undefined) normalizedPatch.clients = clientsCsvForSetting(patch.clients, '');
     if (patch.deepseekApiKey !== undefined) normalizedPatch.deepseekApiKey = normalizeDeepSeekApiKey(patch.deepseekApiKey);
     if (patch.minimaxApiKey !== undefined) normalizedPatch.minimaxApiKey = normalizeMinimaxApiKey(patch.minimaxApiKey);
     if (patch.copilotApiToken !== undefined) normalizedPatch.copilotApiToken = normalizeCopilotApiToken(patch.copilotApiToken);
     if (patch.copilotEnterpriseHost !== undefined) normalizedPatch.copilotEnterpriseHost = normalizeCopilotEnterpriseHost(patch.copilotEnterpriseHost);
+    if (patch.zaiApiKey !== undefined) normalizedPatch.zaiApiKey = normalizeZaiApiKey(patch.zaiApiKey);
+    if (patch.zaiApiRegion !== undefined) normalizedPatch.zaiApiRegion = normalizeZaiApiRegion(patch.zaiApiRegion);
+    if (patch.zaiTeamApiKey !== undefined) normalizedPatch.zaiTeamApiKey = normalizeZaiTeamApiKey(patch.zaiTeamApiKey);
+    if (patch.zaiTeamOrganizationId !== undefined) normalizedPatch.zaiTeamOrganizationId = normalizeZaiTeamId(patch.zaiTeamOrganizationId);
+    if (patch.zaiTeamProjectId !== undefined) normalizedPatch.zaiTeamProjectId = normalizeZaiTeamId(patch.zaiTeamProjectId);
+    if (patch.volcengineAccessKeyId !== undefined) normalizedPatch.volcengineAccessKeyId = normalizeSecretSetting(patch.volcengineAccessKeyId);
+    if (patch.volcengineSecretAccessKey !== undefined) normalizedPatch.volcengineSecretAccessKey = normalizeSecretSetting(patch.volcengineSecretAccessKey);
+    if (patch.volcengineRegion !== undefined) normalizedPatch.volcengineRegion = normalizeVolcengineRegion(patch.volcengineRegion);
+    if (patch.qoderCookie !== undefined) normalizedPatch.qoderCookie = normalizeQoderCookie(patch.qoderCookie);
+    if (patch.qoderSite !== undefined) normalizedPatch.qoderSite = normalizeQoderSite(patch.qoderSite);
+    if (patch.kimiApiKey !== undefined) normalizedPatch.kimiApiKey = normalizeKimiApiKey(patch.kimiApiKey);
+    if (patch.ollamaCookie !== undefined) normalizedPatch.ollamaCookie = normalizeOllamaCookie(patch.ollamaCookie);
     if (patch.collectionMode !== undefined) normalizedPatch.collectionMode = normalizeCollectionMode(patch.collectionMode, settings.collectionMode);
     if (patch.collectionIntervalMs !== undefined) normalizedPatch.collectionIntervalMs = normalizeCollectionIntervalMs(patch.collectionIntervalMs, settings.collectionIntervalMs);
+    if (patch.syncUploadIntervalMs !== undefined) normalizedPatch.syncUploadIntervalMs = normalizeSyncUploadIntervalMs(patch.syncUploadIntervalMs, settings.syncUploadIntervalMs);
     settings = normalizeWindowBehaviorSettings({
       ...settings,
       ...normalizedPatch,
@@ -2536,9 +3632,11 @@ app.whenReady().then(() => {
       glassOpacity: Math.max(0, Math.min(100, Number(patch.glassOpacity ?? settings.glassOpacity ?? 68))),
       glassBlur: Math.max(0, Math.min(100, Number(patch.glassBlur ?? settings.glassBlur ?? 32))),
       systemGlass: patch.systemGlass ?? settings.systemGlass ?? true,
+      reduceMotion: motionPreferenceApi.normalize(patch.reduceMotion ?? settings.reduceMotion),
       showLiveDot: patch.showLiveDot ?? settings.showLiveDot ?? true,
       showToolIcons: patch.showToolIcons ?? settings.showToolIcons ?? true,
       titleIconOnly: parseBoolean(patch.titleIconOnly ?? settings.titleIconOnly, false),
+      showCompactTotalTokens: parseBoolean(patch.showCompactTotalTokens ?? settings.showCompactTotalTokens, false),
       floatingBubbleEnabled: parseBoolean(patch.floatingBubbleEnabled ?? settings.floatingBubbleEnabled, false),
       discordRpcEnabled: patch.discordRpcEnabled ?? settings.discordRpcEnabled ?? false,
       limitsEnabled: parseBoolean(patch.limitsEnabled ?? settings.limitsEnabled, true),
@@ -2551,20 +3649,24 @@ app.whenReady().then(() => {
       hiddenViews: patch.hiddenViews !== undefined ? normalizeHiddenViews(patch.hiddenViews, DEFAULT_VIEW_LIST) : normalizeHiddenViews(settings.hiddenViews, DEFAULT_VIEW_LIST),
       homeModuleOrder: patch.homeModuleOrder !== undefined ? normalizeHomeModuleOrder(patch.homeModuleOrder, DEFAULT_HOME_MODULE_LIST).join(',') : normalizeHomeModuleOrder(settings.homeModuleOrder, DEFAULT_HOME_MODULE_LIST).join(','),
       hiddenHomeModules: patch.hiddenHomeModules !== undefined ? normalizeHiddenHomeModules(patch.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST) : normalizeHiddenHomeModules(settings.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST),
+      showHomeLimitBars: parseBoolean(patch.showHomeLimitBars ?? settings.showHomeLimitBars, false),
       homeLimitProviderOrder: patch.homeLimitProviderOrder !== undefined ? migrateHomeLimitProviderOrder(patch.homeLimitProviderOrder) : (settings.homeLimitProviderOrder || ''),
       hiddenHomeLimitProviders: patch.hiddenHomeLimitProviders !== undefined ? normalizeHiddenLimitProviders(patch.hiddenHomeLimitProviders) : normalizeHiddenLimitProviders(settings.hiddenHomeLimitProviders),
       historyEnabled: parseBoolean(patch.historyEnabled ?? settings.historyEnabled, false),
+      projectsEnabled: parseBoolean(patch.projectsEnabled ?? settings.projectsEnabled, true),
       historyIntervalMs: normalizeHistoryIntervalMs(patch.historyIntervalMs ?? settings.historyIntervalMs),
+      sessionUsageArchiveEnabled: parseBoolean(patch.sessionUsageArchiveEnabled ?? settings.sessionUsageArchiveEnabled, true),
       wslScanEnabled: parseBoolean(patch.wslScanEnabled ?? settings.wslScanEnabled, true),
       collectionMode: normalizeCollectionMode(patch.collectionMode ?? settings.collectionMode),
       collectionIntervalMs: normalizeCollectionIntervalMs(patch.collectionIntervalMs ?? settings.collectionIntervalMs),
+      syncUploadIntervalMs: normalizeSyncUploadIntervalMs(patch.syncUploadIntervalMs ?? settings.syncUploadIntervalMs),
       serviceProviderDisplayOrder: patch.serviceProviderDisplayOrder !== undefined ? String(patch.serviceProviderDisplayOrder || '') : (settings.serviceProviderDisplayOrder || ''),
       hiddenServiceProviders: patch.hiddenServiceProviders !== undefined ? String(patch.hiddenServiceProviders || '') : (settings.hiddenServiceProviders || ''),
       serviceStatusRefreshMs: normalizeServiceStatusRefreshMs(patch.serviceStatusRefreshMs ?? settings.serviceStatusRefreshMs),
       limitsRefreshMs: normalizeLimitsRefreshMs(patch.limitsRefreshMs ?? settings.limitsRefreshMs),
       showLimitSource: parseBoolean(patch.showLimitSource ?? settings.showLimitSource, false),
+      maskLimitAccountEmails: parseBoolean(patch.maskLimitAccountEmails ?? settings.maskLimitAccountEmails, false),
       showLimitUsed: parseBoolean(patch.showLimitUsed ?? settings.showLimitUsed, false),
-      showActiveAccount: parseBoolean(patch.showActiveAccount ?? settings.showActiveAccount, false),
       zoomFactor: clampZoom(patch.zoomFactor ?? settings.zoomFactor),
       ...normalizeTrayModeSettings({
         showTrayIcon: patch.showTrayIcon ?? settings.showTrayIcon,
@@ -2581,6 +3683,17 @@ app.whenReady().then(() => {
       minimaxApiKey: patch.minimaxApiKey !== undefined ? normalizeMinimaxApiKey(patch.minimaxApiKey) : (settings.minimaxApiKey || ''),
       copilotApiToken: patch.copilotApiToken !== undefined ? normalizeCopilotApiToken(patch.copilotApiToken) : (settings.copilotApiToken || ''),
       copilotEnterpriseHost: patch.copilotEnterpriseHost !== undefined ? normalizeCopilotEnterpriseHost(patch.copilotEnterpriseHost) : (settings.copilotEnterpriseHost || ''),
+      zaiApiKey: patch.zaiApiKey !== undefined ? normalizeZaiApiKey(patch.zaiApiKey) : (settings.zaiApiKey || ''),
+      zaiApiRegion: patch.zaiApiRegion !== undefined ? normalizeZaiApiRegion(patch.zaiApiRegion) : normalizeZaiApiRegion(settings.zaiApiRegion || 'global'),
+      zaiTeamApiKey: patch.zaiTeamApiKey !== undefined ? normalizeZaiTeamApiKey(patch.zaiTeamApiKey) : (settings.zaiTeamApiKey || ''),
+      zaiTeamOrganizationId: patch.zaiTeamOrganizationId !== undefined ? normalizeZaiTeamId(patch.zaiTeamOrganizationId) : (settings.zaiTeamOrganizationId || ''),
+      zaiTeamProjectId: patch.zaiTeamProjectId !== undefined ? normalizeZaiTeamId(patch.zaiTeamProjectId) : (settings.zaiTeamProjectId || ''),
+      volcengineAccessKeyId: patch.volcengineAccessKeyId !== undefined ? normalizeSecretSetting(patch.volcengineAccessKeyId) : (settings.volcengineAccessKeyId || ''),
+      volcengineSecretAccessKey: patch.volcengineSecretAccessKey !== undefined ? normalizeSecretSetting(patch.volcengineSecretAccessKey) : (settings.volcengineSecretAccessKey || ''),
+      volcengineRegion: patch.volcengineRegion !== undefined ? normalizeVolcengineRegion(patch.volcengineRegion) : (settings.volcengineRegion || ''),
+      qoderCookie: patch.qoderCookie !== undefined ? normalizeQoderCookie(patch.qoderCookie) : (settings.qoderCookie || ''),
+      qoderSite: patch.qoderSite !== undefined ? normalizeQoderSite(patch.qoderSite) : normalizeQoderSite(settings.qoderSite || 'global'),
+      ollamaCookie: patch.ollamaCookie !== undefined ? normalizeOllamaCookie(patch.ollamaCookie) : (settings.ollamaCookie || ''),
       customModelPricing: patch.customModelPricing !== undefined
         ? normalizeCustomPricingSetting(patch.customModelPricing)
         : normalizeCustomPricingSetting(settings.customModelPricing)
@@ -2625,14 +3738,29 @@ app.whenReady().then(() => {
       settings.limitProviders !== previousLimitProviders ||
       settings.limitsRefreshMs !== previousLimitsRefreshMs ||
       settings.historyEnabled !== previousHistoryEnabled ||
+      settings.projectsEnabled !== previousProjectsEnabled ||
+      settings.sessionUsageArchiveEnabled !== previousSessionUsageArchiveEnabled ||
       settings.historyIntervalMs !== previousHistoryIntervalMs ||
       settings.wslScanEnabled !== previousWslScanEnabled ||
       settings.collectionMode !== previousCollectionMode ||
       settings.collectionIntervalMs !== previousCollectionIntervalMs ||
+      (settings.hubMode === 'client' && settings.syncUploadIntervalMs !== previousSyncUploadIntervalMs) ||
       settings.deepseekApiKey !== previousDeepSeekApiKey ||
       settings.minimaxApiKey !== previousMinimaxApiKey ||
       settings.copilotApiToken !== previousCopilotApiToken ||
-      settings.copilotEnterpriseHost !== previousCopilotEnterpriseHost
+      settings.copilotEnterpriseHost !== previousCopilotEnterpriseHost ||
+      settings.zaiApiKey !== previousZaiApiKey ||
+      settings.zaiApiRegion !== previousZaiApiRegion ||
+      settings.zaiTeamApiKey !== previousZaiTeamApiKey ||
+      settings.zaiTeamOrganizationId !== previousZaiTeamOrganizationId ||
+      settings.zaiTeamProjectId !== previousZaiTeamProjectId ||
+      settings.volcengineAccessKeyId !== previousVolcengineAccessKeyId ||
+      settings.volcengineSecretAccessKey !== previousVolcengineSecretAccessKey ||
+      settings.volcengineRegion !== previousVolcengineRegion ||
+      settings.qoderCookie !== previousQoderCookie ||
+      settings.qoderSite !== previousQoderSite ||
+      settings.kimiApiKey !== previousKimiApiKey ||
+      settings.ollamaCookie !== previousOllamaCookie
     ) {
       startMode();
     }
@@ -2744,6 +3872,10 @@ app.whenReady().then(() => {
   ipcMain.handle('tray:setIcons', (_event, icons) => {
     if (!icons || typeof icons !== 'object') return false;
     for (const [id, dataUrl] of Object.entries(icons)) {
+      if (dataUrl === null) {
+        delete providerTrayIcons[id];
+        continue;
+      }
       if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png')) continue;
       const img = nativeImage.createFromDataURL(dataUrl);
       if (img.isEmpty()) continue;
@@ -2803,6 +3935,10 @@ app.whenReady().then(() => {
     loginItemSupported: loginItemEnabledHere(),
     loginItemOpenAtLogin: currentLoginItemState()
   }));
+  ipcMain.handle('clipboard:write', (_event, text) => {
+    clipboard.writeText(String(text || ''));
+    return true;
+  });
   ipcMain.handle('app:openExternal', (_event, url) => {
     if (!isAllowedExternalUrl(url)) return { ok: false, error: 'url not in allowlist' };
     return shell.openExternal(url)
@@ -2810,6 +3946,13 @@ app.whenReady().then(() => {
       .catch((error) => ({ ok: false, error: error.message }));
   });
   ipcMain.handle('app:openUserData', () => shell.openPath(app.getPath('userData')));
+  ipcMain.handle('mimo:accounts', () => mimoAccountsForRenderer());
+  ipcMain.handle('mimo:addAccount', (_event, cookieHeader) => addMimoManagedAccount(cookieHeader));
+  ipcMain.handle('mimo:openConsole', () => shell.openExternal(MIMO_PLATFORM_CONSOLE_URL)
+    .then(() => ({ ok: true }))
+    .catch((error) => ({ ok: false, error: error.message })));
+  ipcMain.handle('mimo:setAccountEnabled', (_event, id, enabled) => setMimoManagedAccountEnabled(id, enabled));
+  ipcMain.handle('mimo:removeAccount', async (_event, id) => removeMimoManagedAccount(id));
   ipcMain.handle('tokscale:getStatus', () => getTokscaleStatus());
   ipcMain.handle('tokscale:checkNpm', () => checkTokscaleNpm());
   ipcMain.handle('tokscale:downloadFromNpm', () => downloadTokscaleFromNpm());
@@ -2821,6 +3964,8 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('appUpdate:getState', () => deriveAppUpdateState());
   ipcMain.handle('appUpdate:checkNow', () => runAppUpdateCheck({ force: true }));
+  ipcMain.handle('appUpdate:download', () => downloadAndPrepareAppUpdate());
+  ipcMain.handle('appUpdate:install', () => installDownloadedAppUpdate());
   ipcMain.handle('appUpdate:dismiss', (_event, version) => dismissAppUpdateVersion(version));
   ipcMain.handle('cursor:loginManual', async (_event, raw) => {
     const token = normalizeManualCookie(raw);
@@ -2834,6 +3979,13 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, error: err.message };
     }
+  });
+  ipcMain.handle('ollama:validateCookie', async (_event, raw) => {
+    const cookie = normalizeOllamaCookie(raw);
+    if (!cookie) return { ok: false, status: 'notConfigured' };
+    const provider = await fetchOllamaLimits({ ollamaCookie: cookie }, { bypassValidationCache: true });
+    rememberOllamaValidation(cookie, provider);
+    return { ok: provider.status === 'ok', status: provider.status };
   });
   ipcMain.handle('opencode:saveCookie', async (_event, raw) => {
     const cookie = opencodeWeb.sanitizeCookieHeader(raw);
@@ -3020,18 +4172,61 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('codex:accounts', () => codexAccountsForRenderer());
   ipcMain.handle('codex:setAccountEnabled', (_event, id, enabled) => setCodexManagedAccountEnabled(id, enabled));
-  ipcMain.handle('codex:addAccount', async (event) => {
-    if (codexLoginInFlight) return { ok: false, error: 'A Codex sign-in is already in progress.' };
-    codexLoginInFlight = true;
+  ipcMain.handle('codex:addAccount', async (event, request = {}) => {
+    const flowId = String(request?.flowId || '').trim();
+    if (codexLoginController) return { ok: false, error: 'A Codex sign-in is already in progress.', flowId };
+    const controller = new AbortController();
+    codexLoginController = controller;
+    codexLoginFlowId = flowId;
+    codexLoginCanCancel = true;
+    let streamed = '';
+    const sendStatus = (payload) => {
+      if (codexLoginController !== controller) return;
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('codex:loginStatus', {
+          ...payload,
+          flowId
+        });
+      }
+    };
     try {
-      return await addCodexManagedAccount((text) => {
-        if (!event.sender.isDestroyed()) event.sender.send('codex:loginOutput', text);
+      const result = await addCodexManagedAccount((text) => {
+        streamed = (streamed + String(text || '')).slice(-8000);
+        sendStatus({
+          phase: 'output',
+          text: String(text || ''),
+          loginUrl: codexLoginUrlFromOutput(streamed)
+        });
+      }, {
+        signal: controller.signal,
+        onCommit: () => {
+          if (codexLoginController === controller) codexLoginCanCancel = false;
+        }
       });
+      if (codexLoginController !== controller) {
+        return { ok: false, error: codexLoginErrorMessage({ outcome: 'cancelled' }), outcome: 'cancelled', flowId };
+      }
+      return { ...result, flowId };
     } finally {
-      codexLoginInFlight = false;
+      if (codexLoginController === controller) {
+        codexLoginController = null;
+        codexLoginFlowId = '';
+        codexLoginCanCancel = false;
+      }
     }
   });
+  ipcMain.handle('codex:cancelLogin', (_event, request = {}) => {
+    const flowId = String(request?.flowId || '').trim();
+    if (flowId && codexLoginFlowId && flowId !== codexLoginFlowId) return { ok: true, cancelled: false };
+    const controller = codexLoginController;
+    if (!controller) return { ok: true, cancelled: false };
+    if (!codexLoginCanCancel) return { ok: false, cancelled: false, tooLate: true };
+    controller?.abort();
+    return { ok: true, cancelled: true };
+  });
   ipcMain.handle('codex:removeAccount', async (_event, id) => removeCodexManagedAccount(id));
+  ipcMain.handle('codex:switchSystemAccount', async (_event, id) => switchCodexSystemAccount(id));
+  ipcMain.handle('codex:refreshAccountLimits', async (_event, id) => refreshCodexManagedAccountLimits(id));
   ipcMain.handle('copilot:signIn', async (event, request = {}) => {
     if (copilotLoginController) return { ok: false, error: 'A GitHub Copilot sign-in is already in progress.', flowId: copilotLoginFlowId };
     const controller = new AbortController();
@@ -3092,6 +4287,13 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('dashboard:open', () => { createDashboardWindow(); return true; });
   ipcMain.handle('dashboard:getHistory', () => getDashboardHistory());
+  ipcMain.on('dashboard:ready', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win !== dashboardWindow || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
   ipcMain.on('dashboard:minimize', (event) => { BrowserWindow.fromWebContents(event.sender)?.minimize(); });
   ipcMain.on('dashboard:close', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

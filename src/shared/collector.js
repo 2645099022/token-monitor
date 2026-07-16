@@ -10,14 +10,17 @@ const { readJson, sharedDataDir } = require('./config');
 const { appVersion } = require('./appVersion');
 const { normalizeClientsCsv } = require('./clientTracking');
 const { tokscalePackageNameForPlatform, tokscalePlatformKey } = require('./tokscalePlatform');
+const { customPricingPath } = require('./tokscaleConfig');
 const { applyPeriodDelta, emptyPeriod, extractUsageFromTokscale, mergePeriods } = require('./usage');
 const { collectWslUsage: collectWslUsageImpl, emptyWslBundle, probeWslState: probeWslStateImpl } = require('./wslUsage');
-const { hermesProfileWatchDirs, resolveHermesHome, tokscaleEnvFromSpawnArgs } = require('./hermesProfiles');
-const { parseGraphResult, normalizeHistory } = require('./history');
+const { hermesProfileWatchDirs, resolveHermesHome } = require('./hermesProfiles');
+const { mergeHistories, parseGraphResult, normalizeHistory } = require('./history');
 const { collectLimitsOnce, createLimitsCollector } = require('./limitCollector');
 const cursorAuth = require('./cursorAuth');
 const { findSessionFiles, codexSessionFile } = require('./sessionFiles');
 const opencodeSession = require('./opencodeSession');
+const { buildPromaHistoryGraph, buildPromaPeriods, collectPromaRows } = require('./promaUsage');
+const { hashKey } = require('./hashKey');
 
 function toUnpackedPath(p) {
   // electron-builder asarUnpack stores real files at .../app.asar.unpacked/...
@@ -110,14 +113,10 @@ function parseJsonOutput(stdout) {
   throw new Error(`Could not parse tokscale JSON output: ${text.slice(0, 300)}`);
 }
 
-function spawnTokscaleJson(userArgs, commandTimeoutMs, spawnOpts = {}) {
+function spawnTokscaleJson(userArgs, commandTimeoutMs) {
   const { bin, prefixArgs, env } = tokscaleCommand();
-  const childEnv = tokscaleEnvFromSpawnArgs(env, userArgs, {
-    env,
-    homeDir: spawnOpts.homeDir || os.homedir()
-  });
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, [...prefixArgs, ...userArgs], { env: childEnv, windowsHide: true });
+    const child = spawn(bin, [...prefixArgs, ...userArgs], { env, windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timeout = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`tokscale timed out after ${commandTimeoutMs}ms`)); }, commandTimeoutMs);
@@ -132,18 +131,96 @@ function spawnTokscaleJson(userArgs, commandTimeoutMs, spawnOpts = {}) {
   });
 }
 
+// A few tools surface as one umbrella client in our tracked-client list but as
+// several client ids inside tokscale. Antigravity is the case today: tokscale 4.x
+// reads the CLI (`agy`) from its own parse-local id `antigravity-cli` (no
+// `antigravity sync`), separate from the IDE-backed `antigravity`. Widen the
+// tokscale --client filter so those sub-source rows aren't filtered out;
+// extractUsageFromTokscale's normalizeClientName folds them back into the umbrella
+// id. Unknown ids are dropped silently by tokscale, so this is safe on any 4.x.
+const TOKSCALE_CLIENT_ALIASES = { antigravity: ['antigravity-cli'] };
+
+function tokscaleClientFilter(clients) {
+  const ordered = [];
+  const seen = new Set();
+  for (const id of String(clients ?? '').split(',').map((value) => value.trim()).filter(Boolean)) {
+    if (!seen.has(id)) { seen.add(id); ordered.push(id); }
+    for (const alias of TOKSCALE_CLIENT_ALIASES[id] || []) {
+      if (!seen.has(alias)) { seen.add(alias); ordered.push(alias); }
+    }
+  }
+  return ordered.join(',');
+}
+
 function runTokscale({ clients, flags, commandTimeoutMs }) {
-  return spawnTokscaleJson(['--json', '--client', clients, '--group-by', 'client,session,model', ...flags], commandTimeoutMs);
+  return spawnTokscaleJson(['--json', '--client', tokscaleClientFilter(clients), '--group-by', 'client,session,model', ...flags], commandTimeoutMs);
 }
 
 function runTokscaleGraph({ clients, commandTimeoutMs }) {
-  return spawnTokscaleJson(['graph', '--client', clients, '--no-spinner'], commandTimeoutMs);
+  return spawnTokscaleJson(['graph', '--client', tokscaleClientFilter(clients), '--no-spinner'], commandTimeoutMs);
 }
 
 function lookupModelPricing(modelId, commandTimeoutMs = 15000) {
   const id = String(modelId || '').trim();
   if (!id) return Promise.reject(new Error('lookupModelPricing: modelId is required'));
   return spawnTokscaleJson(['pricing', id, '--json', '--no-spinner'], commandTimeoutMs);
+}
+
+const PROMA_PRICING_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const PROMA_PRICING_LOOKUP_TIMEOUT_MS = 3000;
+const promaPricingCache = new Map();
+
+function promaPricingRevision() {
+  try { return fs.statSync(customPricingPath()).mtimeMs; } catch (_) { return 0; }
+}
+
+function normalizePromaPricing(result) {
+  const source = result?.pricing;
+  if (!source || typeof source !== 'object') return null;
+  const pick = (key) => {
+    const value = Number(source[key]);
+    return Number.isFinite(value) && value >= 0 ? value : undefined;
+  };
+  const pricing = {
+    inputCostPerToken: pick('inputCostPerToken'),
+    outputCostPerToken: pick('outputCostPerToken'),
+    cacheReadInputTokenCost: pick('cacheReadInputTokenCost'),
+    cacheCreationInputTokenCost: pick('cacheCreationInputTokenCost')
+  };
+  return pricing.inputCostPerToken !== undefined || pricing.outputCostPerToken !== undefined ? pricing : null;
+}
+
+async function resolvePromaPricing(rows, options = {}) {
+  const lookup = options.lookupModelPricing || lookupModelPricing;
+  const revision = options.pricingRevision ?? promaPricingRevision();
+  const nowMs = options.nowMs ?? Date.now();
+  // Pricing is supplementary: never let a missing catalog entry hold up the
+  // live usage refresh for the normal tokscale command timeout.
+  const commandTimeoutMs = options.commandTimeoutMs || PROMA_PRICING_LOOKUP_TIMEOUT_MS;
+  const pricingByModel = {};
+  const modelIds = [...new Set((Array.isArray(rows) ? rows : [])
+    .map((row) => String(row?.model || '').trim().toLowerCase()).filter(Boolean))];
+  for (const modelId of modelIds) {
+    const cached = promaPricingCache.get(modelId);
+    if (cached && cached.revision === revision && nowMs - cached.at < PROMA_PRICING_CACHE_TTL_MS) {
+      if (cached.pricing) pricingByModel[modelId] = cached.pricing;
+      continue;
+    }
+    let pricing = null;
+    try {
+      pricing = normalizePromaPricing(await lookup(modelId, commandTimeoutMs));
+    } catch (_) {
+      // An unknown model, offline lookup, or custom channel must remain
+      // cost-unavailable instead of inheriting an unrelated catalog price.
+    }
+    promaPricingCache.set(modelId, { at: nowMs, revision, pricing });
+    if (pricing) pricingByModel[modelId] = pricing;
+  }
+  return pricingByModel;
+}
+
+function resetPromaPricingCache() {
+  promaPricingCache.clear();
 }
 
 function localTodayKey(date = new Date()) {
@@ -209,14 +286,82 @@ function timestampFromJsonLine(line) {
   }
 }
 
+const projectPathCache = new Map();
+
+function projectPathFromJsonl(filePath) {
+  let text;
+  let cacheKey;
+  try {
+    const stat = fs.statSync(filePath);
+    cacheKey = `${stat.size}:${stat.mtimeMs}`;
+    const cached = projectPathCache.get(filePath);
+    if (cached?.key === cacheKey) return cached.value;
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const size = Math.min(256 * 1024, fs.fstatSync(fd).size);
+      const buffer = Buffer.alloc(size);
+      fs.readSync(fd, buffer, 0, size, 0);
+      text = buffer.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch (_) { return ''; }
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      const payload = obj.payload && typeof obj.payload === 'object' ? obj.payload : obj;
+      const value = payload.cwd || payload.project_path || payload.projectPath || payload.workingDirectory || payload.working_directory;
+      if (typeof value === 'string' && value.trim()) {
+        const result = value.trim();
+        projectPathCache.set(filePath, { key: cacheKey, value: result });
+        return result;
+      }
+    } catch (_) { /* skip partial or non-JSON lines */ }
+  }
+  projectPathCache.set(filePath, { key: cacheKey, value: '' });
+  return '';
+}
+
+function normalizeProjectPath(value) {
+  let normalized = String(value || '').trim().replace(/\\/g, '/');
+  if (!normalized) return '';
+  const windows = /^[a-z]:\//i.test(normalized) || normalized.startsWith('//');
+  const root = normalized === '/' || /^[a-z]:\/$/i.test(normalized);
+  if (!root) normalized = normalized.replace(/\/+$/, '');
+  return windows ? normalized.toLowerCase() : normalized;
+}
+
+function projectIdentity(value) {
+  const normalized = normalizeProjectPath(value);
+  if (!normalized) return {};
+  const root = normalized === '/' || /^[a-z]:\/$/i.test(normalized);
+  let displayPath = String(value || '').trim().replace(/\\/g, '/');
+  if (!root) displayPath = displayPath.replace(/\/+$/, '');
+  const label = root ? (normalized === '/' ? '/' : `${normalized[0].toUpperCase()}:\\`) : displayPath.split('/').pop();
+  return { projectId: hashKey('project', normalized), projectLabel: label };
+}
+
+// Keyed by path -> { key: `size:mtimeMs`, value }, mirroring projectPathCache.
+// The tail timestamp only moves when the transcript grows, so a mtime match lets
+// a full-tick decoration skip re-reading every idle session (issue: periodic UI
+// stutter once project tracking made this run on every session each tick).
+const jsonlTimestampCache = new Map();
+
 function lastJsonlTimestamp(filePath) {
+  let stat;
+  try { stat = fs.statSync(filePath); } catch (_) { return ''; }
+  const cacheKey = `${stat.size}:${stat.mtimeMs}`;
+  const cached = jsonlTimestampCache.get(filePath);
+  if (cached?.key === cacheKey) return cached.value;
   const tail = readFileTail(filePath);
   const lines = tail.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let value = '';
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const timestamp = timestampFromJsonLine(lines[index]);
-    if (timestamp) return timestamp;
+    if (timestamp) { value = timestamp; break; }
   }
-  try { return fs.statSync(filePath).mtime.toISOString(); } catch (_) { return ''; }
+  if (!value) value = stat.mtime.toISOString();
+  jsonlTimestampCache.set(filePath, { key: cacheKey, value });
+  return value;
 }
 
 function sessionRefsForPeriods(periods) {
@@ -232,27 +377,40 @@ function sessionRefsForPeriods(periods) {
 
 function sessionTimestampMap(periods, home = os.homedir(), deps = {}) {
   const refs = sessionRefsForPeriods(periods);
+  const metadata = deps.metadataCache || new Map();
+  const resolvedSessionKeys = deps.resolvedSessionKeys || new Set();
+  const attemptedSessionKeys = deps.attemptedSessionKeys || new Set();
   const byClient = new Map();
   for (const ref of refs.values()) {
+    const key = `${ref.client}:${ref.sessionId}`;
+    if (resolvedSessionKeys.has(key)) continue;
+    if (!deps.retryMisses && attemptedSessionKeys.has(key)) continue;
     if (!byClient.has(ref.client)) byClient.set(ref.client, new Set());
     byClient.get(ref.client).add(ref.sessionId);
   }
 
-  const metadata = new Map();
   const applyFile = (client, sessionId, filePath) => {
     const startedAt = timestampFromSessionId(sessionId);
     const lastUsedAt = lastJsonlTimestamp(filePath) || startedAt;
-    metadata.set(`${client}:${sessionId}`, { startedAt, lastUsedAt });
+    const identity = projectIdentity(projectPathFromJsonl(filePath));
+    const key = `${client}:${sessionId}`;
+    metadata.set(key, { startedAt, lastUsedAt, ...identity });
+    if (identity.projectId) resolvedSessionKeys.add(key);
   };
 
   // OpenCode has no transcript file — its timestamps come from the opencode.db `session` table.
   const opencodeIds = byClient.get('opencode') || new Set();
   if (opencodeIds.size > 0) {
-    const readOpencodeMeta = deps.readOpencodeMeta || ((ids) => opencodeSession.readSessionMeta(ids));
+    const readOpencodeMeta = deps.readOpencodeMeta || (deps.scopedHome
+      ? (ids) => opencodeSession.readSessionMetaForHome(ids, home, deps.opencodeDeps)
+      : (ids) => opencodeSession.readSessionMeta(ids, deps.opencodeDeps));
     for (const [sessionId, meta] of readOpencodeMeta(opencodeIds)) {
       const startedAt = meta.startedAt || '';
       const lastUsedAt = meta.lastUsedAt || startedAt;
-      if (startedAt || lastUsedAt) metadata.set(`opencode:${sessionId}`, { startedAt, lastUsedAt });
+      const identity = projectIdentity(meta.projectPath);
+      const key = `opencode:${sessionId}`;
+      if (startedAt || lastUsedAt || identity.projectId) metadata.set(key, { startedAt, lastUsedAt, ...identity });
+      if (identity.projectId) resolvedSessionKeys.add(key);
     }
   }
 
@@ -271,12 +429,39 @@ function sessionTimestampMap(periods, home = os.homedir(), deps = {}) {
 
   for (const ref of refs.values()) {
     const key = `${ref.client}:${ref.sessionId}`;
+    if (resolvedSessionKeys.has(key)) continue;
     if (metadata.has(key)) continue;
     const timestamp = timestampFromSessionId(ref.sessionId);
     if (timestamp) metadata.set(key, { startedAt: timestamp, lastUsedAt: timestamp });
+    if (!['claude', 'codex', 'opencode'].includes(ref.client)) resolvedSessionKeys.add(key);
   }
+  for (const ref of refs.values()) attemptedSessionKeys.add(`${ref.client}:${ref.sessionId}`);
 
   return metadata;
+}
+
+// Copy freshly decorated identities/timestamps from `today` onto the same session
+// in the delta-derived periods. Used on watch ticks, where month/allTime are not
+// re-decorated: a session that started today is absent from the anchor, so its
+// project label would otherwise be missing from the broader-period breakdown.
+function propagateTodayProjects(today, periods) {
+  for (const [key, session] of Object.entries(today?.sessions || {})) {
+    if (!session) continue;
+    for (const period of periods) {
+      const target = period?.sessions?.[key];
+      if (!target) continue;
+      if (session.projectId && !target.projectId) {
+        target.projectId = session.projectId;
+        target.projectLabel = session.projectLabel;
+      }
+      if (session.startedAt && (!target.startedAt || Date.parse(session.startedAt) < Date.parse(target.startedAt))) {
+        target.startedAt = session.startedAt;
+      }
+      if (session.lastUsedAt && (!target.lastUsedAt || Date.parse(session.lastUsedAt) > Date.parse(target.lastUsedAt))) {
+        target.lastUsedAt = session.lastUsedAt;
+      }
+    }
+  }
 }
 
 function applySessionTimestamps(periods, home, deps = {}) {
@@ -287,6 +472,8 @@ function applySessionTimestamps(periods, home, deps = {}) {
       if (!meta) continue;
       if (meta.startedAt && (!session.startedAt || Date.parse(meta.startedAt) < Date.parse(session.startedAt))) session.startedAt = meta.startedAt;
       if (meta.lastUsedAt && (!session.lastUsedAt || Date.parse(meta.lastUsedAt) > Date.parse(session.lastUsedAt))) session.lastUsedAt = meta.lastUsedAt;
+      if (meta.projectId) session.projectId = meta.projectId;
+      if (meta.projectLabel) session.projectLabel = meta.projectLabel;
     }
   }
 }
@@ -357,18 +544,22 @@ function normalizeHistoryIntervalMs(value) {
 async function collectHistoryOnce(options) {
   const clients = normalizeClientsCsv(options.clients);
   if (options.historyEnabled === false) return null;
-  if (!clients) return null;
+  const histories = [];
   const runGraph = options.runGraph || runTokscaleGraph;
   const capDays = Number.isFinite(options.capDays) ? options.capDays : HISTORY_CAP_DAYS;
   const todayKey = options.todayKey || localTodayKey();
-  try {
-    const graphJson = await runGraph({ clients, commandTimeoutMs: options.commandTimeoutMs || HISTORY_TIMEOUT_MS });
-    const history = normalizeHistory(parseGraphResult(graphJson), { capDays, todayKey });
-    return history.daily.length || history.monthly.length ? history : null;
-  } catch (error) {
-    if (typeof options.logger === 'function') options.logger(`tokscale graph failed: ${error.message}`);
-    return null;
+  if (clients) {
+    try {
+      const graphJson = await runGraph({ clients, commandTimeoutMs: options.commandTimeoutMs || HISTORY_TIMEOUT_MS });
+      histories.push(normalizeHistory(parseGraphResult(graphJson), { capDays, todayKey }));
+    } catch (error) {
+      if (typeof options.logger === 'function') options.logger(`tokscale graph failed: ${error.message}`);
+    }
   }
+  if (options.promaGraph) histories.push(normalizeHistory(parseGraphResult(options.promaGraph), { capDays, todayKey }));
+  if (histories.length === 0) return null;
+  const history = histories.length === 1 ? histories[0] : mergeHistories(histories, { todayKey });
+  return history.daily.length || history.monthly.length ? history : null;
 }
 
 function shouldIncludeHistory(nowMs, lastHistoryAtMs, historyIntervalMs, force, enabled = true) {
@@ -391,35 +582,99 @@ async function collectUsageOnce(options) {
   // tokscale binary resolution, which is genuinely platform-bound).
   const platformValue = options.platform || process.platform;
   const normalizedClients = normalizeClientsCsv(clients);
+  const projectsEnabled = options.projectsEnabled !== false;
+  const localSessionMetadataDeps = {
+    ...(options.sessionMetadataDeps || {}),
+    metadataCache: new Map(),
+    resolvedSessionKeys: new Set(),
+    attemptedSessionKeys: new Set()
+  };
+  const decorateLocalPeriods = (periods, { retryMisses = false } = {}) => applySessionTimestamps(
+    periods,
+    options.homeDir || os.homedir(),
+    { ...localSessionMetadataDeps, retryMisses }
+  );
+  // tokscale doesn't know about Proma yet — filter it out of the subprocess
+  // calls so --client doesn't reject an unknown value. Proma is parsed
+  // separately below and merged back in.
+  const tokscaleClients = normalizedClients ? normalizedClients.split(',').filter((c) => c !== 'proma').join(',') : normalizedClients;
+  const includesProma = normalizedClients.split(',').includes('proma');
   let today = emptyPeriod();
   let month = emptyPeriod();
   let allTime = emptyPeriod();
   const anchor = options.todayOnlyAnchor;
   const anchorUsed = Boolean(anchor && anchor.dateKey === localTodayKey(collectedAt));
+  let promaPeriods = null;
+  let promaRows = null;
+  let promaPricing = null;
   if (normalizedClients) {
-    await maybeSyncCursor(normalizedClients, options.logger);
-    await maybeSyncAntigravity(normalizedClients, options.logger, options.homeDir || os.homedir());
+    await maybeSyncCursor(tokscaleClients, options.logger);
+    await maybeSyncAntigravity(tokscaleClients, options.logger, options.homeDir || os.homedir());
+    if (includesProma) {
+      try {
+        promaRows = collectPromaRows();
+        promaPricing = await resolvePromaPricing(promaRows, {
+          lookupModelPricing: options.lookupModelPricing,
+          commandTimeoutMs: options.pricingTimeoutMs ?? Math.min(commandTimeoutMs || PROMA_PRICING_LOOKUP_TIMEOUT_MS, PROMA_PRICING_LOOKUP_TIMEOUT_MS),
+          pricingRevision: options.pricingRevision
+        });
+        const promaJson = buildPromaPeriods({ now: collectedAt, allTimeSince, rows: promaRows, pricingByModel: promaPricing });
+        promaPeriods = {
+          today: extractUsageFromTokscale(promaJson.today),
+          month: extractUsageFromTokscale(promaJson.month),
+          allTime: extractUsageFromTokscale(promaJson.allTime)
+        };
+      } catch (err) {
+        if (typeof options.logger === 'function') options.logger(`proma parse failed: ${err.message}`);
+      }
+    }
     if (anchorUsed) {
       // Anchored tick (watch-triggered): every tokscale period scan costs the
       // same full load + filter, so scan only --today and update the broader
       // windows exactly via applyPeriodDelta — one spawn instead of three.
-      const todayJson = await runTokscaleFn({ clients: normalizedClients, flags: ['--today'], commandTimeoutMs });
-      today = extractUsageFromTokscale(todayJson);
+      if (tokscaleClients) {
+        const todayJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs });
+        today = extractUsageFromTokscale(todayJson);
+      }
+      // The persisted anchor contains every Windows-side client, including
+      // locally parsed Proma. Include its fresh today usage before deriving
+      // broader windows so base + (fresh today - anchor today) stays exact.
+      if (promaPeriods) today = mergePeriods(today, promaPeriods.today);
       month = applyPeriodDelta(anchor.month, today, anchor.today);
       allTime = applyPeriodDelta(anchor.allTime, today, anchor.today);
-    } else {
+    } else if (tokscaleClients) {
       // Serial on purpose: concurrent scans triple the peak CPU/IO load, which
       // is what let the issue #15 self-trigger loop spike tokscale past 500% CPU.
-      const todayJson = await runTokscaleFn({ clients: normalizedClients, flags: ['--today'], commandTimeoutMs });
+      const todayJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs });
       today = extractUsageFromTokscale(todayJson);
+      if (projectsEnabled && typeof options.onProgress === 'function') decorateLocalPeriods({ today });
       try { if (typeof options.onProgress === 'function') options.onProgress({ today, updatedAt: new Date().toISOString() }); } catch (_) {}
-      const monthJson = await runTokscaleFn({ clients: normalizedClients, flags: ['--month'], commandTimeoutMs });
+      const monthJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--month'], commandTimeoutMs });
       month = extractUsageFromTokscale(monthJson);
+      if (projectsEnabled && typeof options.onProgress === 'function') decorateLocalPeriods({ today, month });
       try { if (typeof options.onProgress === 'function') options.onProgress({ today, month, updatedAt: new Date().toISOString() }); } catch (_) {}
-      const allTimeJson = await runTokscaleFn({ clients: normalizedClients, flags: ['--since', allTimeSince], commandTimeoutMs });
+      const allTimeJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--since', allTimeSince], commandTimeoutMs });
       allTime = extractUsageFromTokscale(allTimeJson);
     }
-    applySessionTimestamps({ today, month, allTime }, options.homeDir || os.homedir());
+    if (projectsEnabled) {
+      if (anchorUsed) {
+        // Watch tick: `today` is a fresh scan and must be decorated, but month/
+        // allTime are derived from the last full-scan anchor and already carry each
+        // session's project label + timestamps through applyPeriodDelta. Decorating
+        // them again would re-stat every historical session file every few seconds
+        // (the perceived UI stutter). Decorate only today, then propagate its freshly
+        // resolved identities onto sessions that started today (absent from the anchor).
+        decorateLocalPeriods({ today }, { retryMisses: true });
+        propagateTodayProjects(today, [month, allTime]);
+      } else {
+        decorateLocalPeriods({ today, month, allTime }, { retryMisses: true });
+      }
+    }
+    if (promaPeriods && !anchorUsed) {
+      today = mergePeriods(today, promaPeriods.today);
+      month = mergePeriods(month, promaPeriods.month);
+      allTime = mergePeriods(allTime, promaPeriods.allTime);
+    }
   }
 
   // WSL contribution (Windows only; no-op elsewhere). Full tick scans running WSL
@@ -439,11 +694,19 @@ async function collectUsageOnce(options) {
   if (normalizedClients && options.wslScanEnabled !== false) {
     if (options.refreshWsl) {
       const wslResult = await collectWsl({
-        clients: normalizedClients,
+        clients: tokscaleClients,
+        trackedClients: normalizedClients,
         allTimeSince,
+        now: collectedAt,
         commandTimeoutMs,
         runTokscale: runTokscaleFn,
-        logger: options.logger
+        resolvePromaPricing: (rows) => resolvePromaPricing(rows, {
+          lookupModelPricing: options.lookupModelPricing,
+          commandTimeoutMs: options.pricingTimeoutMs ?? Math.min(commandTimeoutMs || PROMA_PRICING_LOOKUP_TIMEOUT_MS, PROMA_PRICING_LOOKUP_TIMEOUT_MS),
+          pricingRevision: options.pricingRevision
+        }),
+        logger: options.logger,
+        decoratePeriods: projectsEnabled ? (periods, home) => applySessionTimestamps(periods, home, { scopedHome: true }) : undefined
       });
       wslBundle = wslResult.bundle;
       wslDetected = wslResult.detected;
@@ -451,11 +714,19 @@ async function collectUsageOnce(options) {
       wslBundle = options.wslAnchor;
     } else if (!anchorUsed) {
       const wslResult = await collectWsl({
-        clients: normalizedClients,
+        clients: tokscaleClients,
+        trackedClients: normalizedClients,
         allTimeSince,
+        now: collectedAt,
         commandTimeoutMs,
         runTokscale: runTokscaleFn,
-        logger: options.logger
+        resolvePromaPricing: (rows) => resolvePromaPricing(rows, {
+          lookupModelPricing: options.lookupModelPricing,
+          commandTimeoutMs: options.pricingTimeoutMs ?? Math.min(commandTimeoutMs || PROMA_PRICING_LOOKUP_TIMEOUT_MS, PROMA_PRICING_LOOKUP_TIMEOUT_MS),
+          pricingRevision: options.pricingRevision
+        }),
+        logger: options.logger,
+        decoratePeriods: projectsEnabled ? (periods, home) => applySessionTimestamps(periods, home, { scopedHome: true }) : undefined
       });
       wslBundle = wslResult.bundle;
       wslDetected = wslResult.detected;
@@ -466,8 +737,8 @@ async function collectUsageOnce(options) {
   allTime = mergePeriods(windowsPeriods.allTime, wslBundle.allTime);
 
   // WSL attribution (Windows only; null elsewhere). detected = markers found,
-  // withData = tools tokscale actually returned tokens for. The gap is the
-  // diagnostic (e.g. Hermes detected but unreadable over 9P).
+  // withData = clients whose WSL scan or local parser returned tokens. The gap
+  // is the diagnostic (e.g. Hermes detected but unreadable over 9P).
   //
   // Like wslBundle, this is FROZEN between full scans: anchored watch ticks
   // (which skip the WSL scan) reuse the snapshot via options.wslStatus instead
@@ -503,6 +774,7 @@ async function collectUsageOnce(options) {
     updatedAt: collectedAt.toISOString(),
     agentVersion,
     ...(agentRuntime ? { agentRuntime } : {}),
+    projectsEnabled,
     trackedClients: normalizedClients ? normalizedClients.split(',') : [],
     clientStatus: deriveClientStatus(normalizedClients, allTime),
     wslStatus,
@@ -515,7 +787,8 @@ async function collectUsageOnce(options) {
     summary.history = null;
   } else if (options.includeHistory) {
     const history = await collectHistoryOnce({
-      clients: normalizedClients,
+      clients: tokscaleClients,
+      promaGraph: includesProma ? buildPromaHistoryGraph({ rows: promaRows || collectPromaRows(), pricingByModel: promaPricing || {} }) : null,
       historyEnabled: options.historyEnabled,
       commandTimeoutMs: options.historyTimeoutMs,
       capDays: options.historyCapDays,
@@ -537,6 +810,15 @@ function dirExists(dir) {
   try { return fs.statSync(dir).isDirectory(); } catch (_) { return false; }
 }
 
+function hasCopilotChatSessions(workspaceRoot) {
+  try {
+    return fs.readdirSync(workspaceRoot, { withFileTypes: true })
+      .some((entry) => entry.isDirectory() && dirExists(path.join(workspaceRoot, entry.name, 'chatSessions')));
+  } catch (_) {
+    return false;
+  }
+}
+
 // Per-client data-dir candidates, keyed by client. Drives the detection-status
 // derivation and (minus the self-synced clients below) the chokidar watch list.
 function clientWatchCandidates(clientsCsv) {
@@ -555,7 +837,19 @@ function clientWatchCandidates(clientsCsv) {
   add('kimi', path.join(home, '.kimi', 'sessions'), path.join(process.env.KIMI_CODE_HOME || path.join(home, '.kimi-code'), 'sessions'));
   add('qwen', path.join(home, '.qwen', 'projects'));
   add('grok', path.join(process.env.GROK_HOME || path.join(home, '.grok'), 'sessions'));
-  add('copilot', path.join(home, '.copilot', 'otel'));
+  // Tokscale 4.5.2 also parses VS Code Copilot Chat JSONL under each
+  // workspaceStorage/*/chatSessions directory. Watch the workspaceStorage roots
+  // so newly created workspaces are picked up; watchIgnoreMatcher prunes every
+  // sibling except chatSessions + workspace.json to keep polling bounded.
+  const copilotWorkspaceRoots = [
+    path.join(home, 'Library', 'Application Support', 'Code', 'User', 'workspaceStorage'),
+    path.join(home, '.config', 'Code', 'User', 'workspaceStorage'),
+    ...(process.platform === 'win32'
+      ? [path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Code', 'User', 'workspaceStorage')]
+      : []),
+    path.join(home, 'AppData', 'Roaming', 'Code', 'User', 'workspaceStorage')
+  ];
+  add('copilot', path.join(home, '.copilot', 'otel'), ...new Set(copilotWorkspaceRoots));
   add('pi', path.join(home, '.pi', 'agent', 'sessions'), path.join(home, '.omp', 'agent', 'sessions'));
   // Zed: tokscale reads the XdgData root on every platform AND the native macOS
   // (Application Support) / Windows (LOCALAPPDATA) roots (see tokscale scanner.rs
@@ -598,9 +892,12 @@ function clientWatchCandidates(clientsCsv) {
   // refreshes via the periodic full tick; the WSL marker stays the broader
   // `.workbuddy` so a db-only WSL home is still scanned.
   add('workbuddy', path.join(home, '.workbuddy', 'projects'));
-  // Kiro (AWS): tokscale reads three home-relative roots — the CLI sessions dir,
-  // the Kiro IDE globalStorage root (native macOS / Linux / Windows), and the
-  // kiro-cli sqlite dir. None falls back to a host-absolute path under --home
+  // Proma — session transcripts at ~/.proma/agent-sessions/*.jsonl
+  add('proma', path.join(home, '.proma', 'agent-sessions'));
+  // Kiro (AWS): tokscale reads home-relative roots — the sessions tree used by
+  // both CLI and IDE, the Kiro IDE globalStorage root (native macOS / Linux /
+  // Windows), and the kiro-cli sqlite dir. None falls back to a host-absolute
+  // path under --home
   // (unlike Zed), so all are safe to watch cross-platform for seconds-level
   // refresh and a correct waiting/missing status.
   //
@@ -621,7 +918,7 @@ function clientWatchCandidates(clientsCsv) {
   // (APPDATA || home AppData\Roaming mirrors how cline resolves the Windows root.)
   add(
     'kiro',
-    path.join(home, '.kiro', 'sessions', 'cli'),
+    path.join(home, '.kiro', 'sessions'),
     path.join(home, 'Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
     path.join(home, '.config', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
     path.join(home, '.config', 'kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
@@ -643,13 +940,28 @@ function clientWatchCandidates(clientsCsv) {
 // Watching them turns every tick into the trigger for the next one (issue #15).
 const SELF_SYNCED_CLIENTS = new Set(['cursor', 'antigravity']);
 
+// The Antigravity CLI's parse-local data dir (honors GEMINI_CLI_HOME like tokscale).
+// It belongs to the umbrella `antigravity` client but, unlike that client's IDE
+// sync cache, is written by `agy` and never by us — so it is both watchable and a
+// real presence signal, sharing this single source of truth.
+function antigravityCliDataDir() {
+  const geminiHome = process.env.GEMINI_CLI_HOME || path.join(os.homedir(), '.gemini');
+  return path.join(geminiHome, 'antigravity-cli', 'conversations');
+}
+
 function watchPathsForClients(clientsCsv) {
   const candidates = [];
   for (const [client, dirs] of Object.entries(clientWatchCandidates(clientsCsv))) {
     if (SELF_SYNCED_CLIENTS.has(client)) continue;
     candidates.push(...dirs);
   }
-  return candidates.filter(dirExists);
+  // antigravity is self-synced (its IDE cache is written by our sync and must stay
+  // watch-excluded), but its CLI data dir is safe to watch (no self-trigger loop)
+  // and gives the seconds-level refresh the sync path can't. tokscaleClientFilter
+  // pulls the antigravity-cli rows in on the tick.
+  const enabled = new Set(String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
+  if (enabled.has('antigravity')) candidates.push(antigravityCliDataDir());
+  return [...new Set(candidates.filter(dirExists))];
 }
 
 // Inside a Hermes home dir tokscale only reads the SQLite db; the rest is the
@@ -664,28 +976,57 @@ function watchPathsForClients(clientsCsv) {
 const HERMES_DB_FILES = new Set(['state.db', 'state.db-wal', 'state.db-shm']);
 
 function watchIgnoreMatcher(clientsCsv) {
-  const roots = (clientWatchCandidates(clientsCsv).hermes || []).map((dir) => path.resolve(dir));
-  if (roots.length === 0) return undefined;
-  const rootSet = new Set(roots);
+  const candidates = clientWatchCandidates(clientsCsv);
+  const hermesRoots = (candidates.hermes || []).map((dir) => path.resolve(dir));
+  const hermesRootSet = new Set(hermesRoots);
+  const copilotRoots = (candidates.copilot || [])
+    .filter((dir) => path.basename(dir) === 'workspaceStorage')
+    .map((dir) => path.resolve(dir));
+  if (hermesRoots.length === 0 && copilotRoots.length === 0) return undefined;
   return (target) => {
     const resolved = path.resolve(target);
     // Every explicit watch root stays watched — the home dir AND each profile
     // dir. A profile dir lives under the home root, so the child-prune below
     // would otherwise ignore it (basename isn't a db file) before we recognise
     // it as a watch root in its own right, silencing profile-db change events.
-    if (rootSet.has(resolved)) return false;
-    for (const root of roots) {
+    if (hermesRootSet.has(resolved)) return false;
+    for (const root of hermesRoots) {
       if (resolved.startsWith(root + path.sep)) return !HERMES_DB_FILES.has(path.basename(resolved));
     }
-    return false; // non-Hermes paths are never ignored
+    for (const root of copilotRoots) {
+      if (resolved === root) return false;
+      if (!resolved.startsWith(root + path.sep)) continue;
+      const parts = path.relative(root, resolved).split(path.sep);
+      if (parts.length === 1) return false; // workspace hash dir
+      if (parts[1] === 'chatSessions') return false;
+      if (parts.length === 2 && parts[1] === 'workspace.json') return false;
+      return true;
+    }
+    return false; // paths outside the bounded Hermes/Copilot roots are never ignored
   };
 }
 
 // Whether each tracked client has at least one data directory on disk.
 function clientDataDirPresence(clientsCsv) {
   const presence = {};
-  for (const [client, dirs] of Object.entries(clientWatchCandidates(clientsCsv))) {
+  const candidates = clientWatchCandidates(clientsCsv);
+  for (const [client, dirs] of Object.entries(candidates)) {
     presence[client] = dirs.some(dirExists);
+  }
+  // workspaceStorage is shared by every VS Code extension. Count it as Copilot
+  // presence only when at least one workspace contains the chatSessions source
+  // Tokscale actually parses; the broader root is watched solely to catch a new
+  // workspace appearing after startup.
+  if (Object.prototype.hasOwnProperty.call(presence, 'copilot')) {
+    presence.copilot = (candidates.copilot || []).some((dir) => (
+      path.basename(dir) === 'workspaceStorage' ? hasCopilotChatSessions(dir) : dirExists(dir)
+    ));
+  }
+  // antigravity's watch candidate is only the IDE sync cache, so fold its separate
+  // CLI data dir into the umbrella presence too — otherwise a CLI-only user with no
+  // countable usage yet reads `missing` instead of `waiting`.
+  if (Object.prototype.hasOwnProperty.call(presence, 'antigravity') && dirExists(antigravityCliDataDir())) {
+    presence.antigravity = true;
   }
   return presence;
 }
@@ -723,10 +1064,10 @@ function wslPeriodsForPreview(wslAnchor, anchorDateKey, todayKey) {
   };
 }
 
-function configFingerprint(clientsCsv, allTimeSince) {
+function configFingerprint(clientsCsv, allTimeSince, projectsEnabled = true) {
   // Deterministic string that captures the config inputs anchor correctness
   // depends on. When this changes, the persisted anchor is invalidated.
-  return `${normalizeClientsCsv(clientsCsv)}|${allTimeSince}`;
+  return `${normalizeClientsCsv(clientsCsv)}|${allTimeSince}|projects:${projectsEnabled !== false ? 'on' : 'off'}`;
 }
 
 // Force a full scan at least this often even when the anchor is otherwise
@@ -769,7 +1110,7 @@ function startCollector(options) {
   try {
     const saved = readJson(anchorPath, null);
     if (saved && saved.dateKey === localTodayKey()) {
-      const fp = configFingerprint(clients, allTimeSince);
+      const fp = configFingerprint(clients, allTimeSince, options.projectsEnabled);
       if (saved.configFingerprint === fp) {
         anchor = { dateKey: saved.dateKey, today: saved.today, month: saved.month, allTime: saved.allTime };
         // Don't restore a persisted WSL snapshot when WSL scanning is now off —
@@ -880,7 +1221,7 @@ function startCollector(options) {
             allTime: anchor.allTime,
             wslBundle: wslAnchor,
             wslStatus: wslStatusAnchor,
-            configFingerprint: configFingerprint(clients, allTimeSince),
+            configFingerprint: configFingerprint(clients, allTimeSince, options.projectsEnabled),
             fullScanAt: new Date().toISOString()
           }));
         } catch (_) {}
@@ -993,6 +1334,8 @@ function startCollector(options) {
 
 module.exports = {
   applySessionTimestamps,
+  projectIdentity,
+  projectPathFromJsonl,
   collectHistoryOnce,
   collectUsageOnce,
   clientDataDirPresence,
@@ -1009,8 +1352,11 @@ module.exports = {
   sessionTimestampMap,
   locateBundledBinary,
   lookupModelPricing,
+  normalizePromaPricing,
   readDownloadedPointer,
   resolvePlatformBinary,
+  resolvePromaPricing,
+  resetPromaPricingCache,
   shouldIncludeHistory,
   startCollector,
   tokscaleCommand,

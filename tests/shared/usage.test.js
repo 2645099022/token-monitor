@@ -65,8 +65,96 @@ test('mergeDeviceRecord allows explicit empty limits to clear stale provider sta
   assert.deepEqual(merged.limits.providers, []);
 });
 
+test('aggregateDevices does not let an orphaned stale device id override the current limits state', () => {
+  const oldDevice = recordWithLimits({
+    deviceId: 'old-device-id',
+    updatedAt: '2026-07-08T13:08:54.000Z',
+    receivedAt: '2026-07-08T13:08:54.000Z',
+    limits: {
+      updatedAt: '2026-07-08T13:04:49.000Z',
+      refreshMs: 300000,
+      providers: [{
+        provider: 'codex',
+        accountKey: 'sha256:old-codex',
+        status: 'ok',
+        source: 'rpc',
+        updatedAt: '2026-07-08T13:04:49.000Z',
+        windows: [
+          { kind: 'session', usedPercent: 59, resetsAt: '2026-07-08T15:37:24.000Z', windowMinutes: 300 },
+          { kind: 'weekly', usedPercent: 54, resetsAt: '2026-07-14T04:16:57.000Z', windowMinutes: 10080 }
+        ]
+      }]
+    }
+  });
+  const currentDevice = recordWithLimits({
+    deviceId: 'current-device-id',
+    updatedAt: '2026-07-10T02:58:40.000Z',
+    receivedAt: '2026-07-10T02:58:41.000Z',
+    limits: {
+      updatedAt: '2026-07-10T02:55:17.000Z',
+      refreshMs: 300000,
+      providers: [{
+        provider: 'codex',
+        status: 'notConfigured',
+        updatedAt: '2026-07-10T02:55:17.000Z',
+        windows: []
+      }]
+    }
+  });
+
+  const aggregate = aggregateDevices(
+    [oldDevice, currentDevice],
+    10 * 60 * 1000,
+    Date.parse('2026-07-10T03:00:00.000Z')
+  );
+
+  assert.equal(aggregate.devices.find((device) => device.deviceId === 'old-device-id').stale, true);
+  assert.equal(aggregate.devices.find((device) => device.deviceId === 'current-device-id').stale, false);
+  assert.equal(aggregate.limits.providers.length, 1);
+  assert.equal(aggregate.limits.providers[0].provider, 'codex');
+  assert.equal(aggregate.limits.providers[0].status, 'notConfigured');
+  assert.equal(aggregate.limits.providers[0].sourceDeviceId, 'current-device-id');
+  assert.deepEqual(aggregate.limits.providers[0].windows, []);
+});
+
+test('aggregateDevices keeps interval-synced devices and limits fresh through their upload window', () => {
+  const device = recordWithLimits({ syncUploadIntervalMs: 20 * 60 * 1000 });
+  const active = aggregateDevices(
+    [device],
+    10 * 60 * 1000,
+    Date.parse('2026-05-27T00:30:00.000Z')
+  );
+
+  assert.equal(active.devices[0].syncUploadIntervalMs, 20 * 60 * 1000);
+  assert.equal(active.devices[0].stale, false);
+  assert.equal(active.limits.providers[0].stale, false);
+
+  const stale = aggregateDevices(
+    [device],
+    10 * 60 * 1000,
+    Date.parse('2026-05-27T00:41:00.000Z')
+  );
+  assert.equal(stale.devices[0].stale, true);
+  assert.equal(stale.limits.providers[0].stale, true);
+});
+
+test('aggregateDevices keeps device staleness disabled when staleAfterMs is zero', () => {
+  const aggregate = aggregateDevices(
+    [recordWithLimits({ syncUploadIntervalMs: 20 * 60 * 1000 })],
+    0,
+    Date.parse('2026-05-27T02:00:00.000Z')
+  );
+
+  assert.equal(aggregate.devices[0].stale, false);
+});
+
 test('mergeDeviceRecord supports limitsOnly updates without wiping usage periods', () => {
-  const existing = recordWithLimits();
+  const existing = recordWithLimits({
+    projectsEnabled: false,
+    allTimeProjectsOmitted: true,
+    allTimeProjectsIncomplete: true,
+    syncUploadIntervalMs: 20 * 60 * 1000
+  });
   const incoming = {
     deviceId: 'macbook',
     receivedAt: '2026-05-27T00:02:00.000Z',
@@ -81,6 +169,68 @@ test('mergeDeviceRecord supports limitsOnly updates without wiping usage periods
   const merged = mergeDeviceRecord(existing, incoming);
   assert.equal(merged.periods.today.totalTokens, 1);
   assert.equal(merged.limits.providers[0].status, 'unauthorized');
+  assert.equal(merged.projectsEnabled, false);
+  assert.equal(merged.allTimeProjectsOmitted, true);
+  assert.equal(merged.allTimeProjectsIncomplete, true);
+  assert.equal(merged.syncUploadIntervalMs, 20 * 60 * 1000);
+});
+
+test('normal device updates replace all-time project diagnostics', () => {
+  const existing = recordWithLimits({ allTimeProjectsOmitted: true, allTimeProjectsIncomplete: true });
+  const merged = mergeDeviceRecord(existing, {
+    deviceId: 'macbook',
+    updatedAt: '2026-05-27T00:03:00.000Z',
+    allTime: {
+      totalTokens: 10,
+      projects: { app: { label: 'App', tokens: 10, costUsd: 0.1, clients: { codex: 10 } } }
+    }
+  });
+
+  assert.equal(Object.hasOwn(merged, 'allTimeProjectsOmitted'), false);
+  assert.equal(Object.hasOwn(merged, 'allTimeProjectsIncomplete'), false);
+  assert.equal(merged.periods.allTime.projects.app.tokens, 10);
+});
+
+test('aggregateDevices merges project rollups and exposes incomplete-device diagnostics', () => {
+  const aggregate = aggregateDevices([
+    {
+      deviceId: 'a',
+      allTimeProjectsOmitted: true,
+      allTime: {
+        totalTokens: 100,
+        projects: { app: { label: 'App', tokens: 60, costUsd: 0.3333333, clients: { codex: 60 } } }
+      }
+    },
+    {
+      deviceId: 'b',
+      allTime: {
+        totalTokens: 200,
+        projects: { APP: { label: 'APP', tokens: 140, costUsd: 0.6666666, clients: { claude: 140 } } }
+      }
+    }
+  ], 60000);
+
+  assert.equal(aggregate.projectsIncomplete, true);
+  assert.equal(aggregate.devices.find((device) => device.deviceId === 'a').allTimeProjectsOmitted, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(aggregate.periods.allTime.projects.app)), {
+    label: 'APP',
+    tokens: 200,
+    costUsd: 1,
+    clients: { codex: 60, claude: 140 }
+  });
+});
+
+test('stale project omissions remain incomplete while stale all-time usage is aggregated', () => {
+  const aggregate = aggregateDevices([{
+    deviceId: 'stale',
+    receivedAt: '2026-07-13T00:00:00.000Z',
+    allTimeProjectsOmitted: true,
+    allTime: { totalTokens: 100 }
+  }], 10 * 60 * 1000, Date.parse('2026-07-13T01:00:00.000Z'));
+
+  assert.equal(aggregate.devices[0].stale, true);
+  assert.equal(aggregate.periods.allTime.totalTokens, 100);
+  assert.equal(aggregate.projectsIncomplete, true);
 });
 
 test('mergeDeviceRecord keeps widget Copilot limits when a headless agent reports no local token', () => {
@@ -202,6 +352,7 @@ test('mergeDeviceRecord preserves usage for clients omitted by the active tracke
           totalTokens: 100,
           costUsd: 1.25,
           messageCount: 4,
+          projectLabel: 'Shared App',
           models: { 'claude-3-5-sonnet': 100 },
           modelCosts: { 'claude-3-5-sonnet': 1.25 }
         },
@@ -229,7 +380,18 @@ test('mergeDeviceRecord preserves usage for clients omitted by the active tracke
       models: { 'gpt-5': 75 },
       modelCosts: { 'gpt-5': 0.5 },
       clientModels: { codex: { 'gpt-5': 75 } },
-      clientModelCosts: { codex: { 'gpt-5': 0.5 } }
+      clientModelCosts: { codex: { 'gpt-5': 0.5 } },
+      sessions: {
+        'codex:c2': {
+          client: 'codex',
+          sessionId: 'c2',
+          totalTokens: 75,
+          costUsd: 0.5,
+          projectLabel: 'shared app',
+          models: { 'gpt-5': 75 },
+          modelCosts: { 'gpt-5': 0.5 }
+        }
+      }
     }
   };
 
@@ -243,6 +405,124 @@ test('mergeDeviceRecord preserves usage for clients omitted by the active tracke
   assert.equal(merged.periods.today.clientModels.hermes['claude-3-5-sonnet'], 100);
   assert.equal(merged.periods.today.sessions['hermes:h1'].totalTokens, 100);
   assert.equal(merged.periods.today.sessions['codex:c1'], undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(merged.periods.today.projects['shared app'])), {
+    label: 'Shared App',
+    tokens: 175,
+    costUsd: 1.75,
+    clients: { codex: 75, hermes: 100 }
+  });
+});
+
+test('mergeDeviceRecord marks unrecoverable all-time project attribution incomplete', () => {
+  const existing = {
+    deviceId: 'macbook',
+    projectsEnabled: true,
+    trackedClients: ['codex', 'hermes'],
+    allTime: {
+      totalTokens: 150,
+      costUsd: 1.5,
+      clients: { codex: 50, hermes: 100 },
+      clientCosts: { codex: 0.5, hermes: 1 },
+      projects: { legacy: { label: 'Legacy App', tokens: 100, costUsd: 1, clients: { hermes: 100 } } }
+    }
+  };
+  const incoming = {
+    deviceId: 'macbook',
+    projectsEnabled: true,
+    trackedClients: ['codex'],
+    allTime: {
+      totalTokens: 75,
+      costUsd: 0.75,
+      clients: { codex: 75 },
+      clientCosts: { codex: 0.75 },
+      projects: { current: { label: 'Current App', tokens: 75, costUsd: 0.75, clients: { codex: 75 } } }
+    }
+  };
+
+  const merged = mergeDeviceRecord(existing, incoming);
+  const aggregate = aggregateDevices([merged], 60000);
+
+  assert.equal(merged.periods.allTime.totalTokens, 175);
+  assert.equal(merged.periods.allTime.clients.hermes, 100);
+  assert.equal(Object.hasOwn(merged.periods.allTime.projects, 'legacy'), false);
+  assert.equal(merged.allTimeProjectsIncomplete, true);
+  assert.equal(aggregate.projectsIncomplete, true);
+  assert.equal(aggregate.devices[0].allTimeProjectsIncomplete, true);
+});
+
+test('mergeDeviceRecord converts a prior omitted rollup into incomplete preserved history', () => {
+  const existing = {
+    deviceId: 'macbook',
+    projectsEnabled: true,
+    allTimeProjectsOmitted: true,
+    trackedClients: ['codex', 'hermes'],
+    allTime: {
+      totalTokens: 150,
+      clients: { codex: 50, hermes: 100 },
+      clientCosts: { codex: 0.5, hermes: 1 }
+    }
+  };
+  const incoming = {
+    deviceId: 'macbook',
+    projectsEnabled: true,
+    trackedClients: ['codex'],
+    allTime: {
+      totalTokens: 75,
+      clients: { codex: 75 },
+      clientCosts: { codex: 0.75 },
+      projects: { current: { label: 'Current App', tokens: 75, costUsd: 0.75, clients: { codex: 75 } } }
+    }
+  };
+
+  const merged = mergeDeviceRecord(existing, incoming);
+
+  assert.equal(Object.hasOwn(merged, 'allTimeProjectsOmitted'), false);
+  assert.equal(merged.allTimeProjectsIncomplete, true);
+});
+
+test('mergeDeviceRecord does not restore project metadata when tracking is disabled', () => {
+  const existing = {
+    deviceId: 'macbook',
+    projectsEnabled: true,
+    trackedClients: ['codex', 'hermes'],
+    today: {
+      totalTokens: 100,
+      clients: { hermes: 100 },
+      sessions: {
+        'hermes:h1': { client: 'hermes', sessionId: 'h1', totalTokens: 100, projectId: 'sha256:old', projectLabel: 'Old App' }
+      }
+    },
+    allTime: {
+      totalTokens: 100,
+      clients: { hermes: 100 },
+      projects: { old: { label: 'Old App', tokens: 100, costUsd: 1, clients: { hermes: 100 } } }
+    }
+  };
+  const incoming = {
+    deviceId: 'macbook',
+    projectsEnabled: false,
+    trackedClients: ['codex'],
+    today: {
+      totalTokens: 50,
+      clients: { codex: 50 },
+      sessions: {
+        'codex:c1': { client: 'codex', sessionId: 'c1', totalTokens: 50, projectId: 'sha256:new', projectLabel: 'New App' }
+      }
+    },
+    allTime: { totalTokens: 50, clients: { codex: 50 } }
+  };
+
+  const merged = mergeDeviceRecord(existing, incoming);
+  const aggregate = aggregateDevices([merged], 60000);
+
+  assert.equal(merged.projectsEnabled, false);
+  assert.deepEqual(Object.keys(merged.periods.today.projects), []);
+  assert.deepEqual(Object.keys(merged.periods.allTime.projects), []);
+  assert.equal(merged.periods.today.sessions['codex:c1'].projectLabel, '');
+  assert.equal(merged.periods.today.sessions['hermes:h1'].projectLabel, '');
+  assert.equal(Object.hasOwn(merged, 'allTimeProjectsIncomplete'), false);
+  assert.equal(aggregate.projectsIncomplete, true);
+  assert.equal(aggregate.devices[0].projectsEnabled, false);
 });
 
 test('mergeDeviceRecord preserves omitted-client day and month usage only inside matching calendar periods', () => {
@@ -591,6 +871,14 @@ test('aggregateDevices combines session usage across devices', () => {
   assert.equal(session.modelCosts['gpt-5'], 0.3);
 });
 
+test('aggregateDevices keeps a zero-usage live session unarchived in either merge order', () => {
+  const archived = { deviceId: 'archived', allTime: { sessions: { 'codex:s1': { client: 'codex', sessionId: 's1', totalTokens: 10, archived: true } } } };
+  const live = { deviceId: 'live', allTime: { sessions: { 'codex:s1': { client: 'codex', sessionId: 's1', totalTokens: 0 } } } };
+
+  assert.equal(aggregateDevices([live, archived], 0).periods.allTime.sessions['codex:s1'].archived, undefined);
+  assert.equal(aggregateDevices([archived, live], 0).periods.allTime.sessions['codex:s1'].archived, undefined);
+});
+
 const { normalizeDeviceRecord, aggregateHistory, carryDeviceHistory } = require('../../src/shared/usage');
 
 test('normalizeDeviceRecord carries a history field when present', () => {
@@ -623,8 +911,7 @@ test('mergeDeviceRecord clears prior history when incoming history is explicitly
   assert.deepEqual(merged.history, { daily: [], monthly: [], summary: {} });
 });
 
-test('aggregateHistory merges non-stale devices and skips stale ones', () => {
-  const now = Date.parse('2026-06-07T12:00:00.000Z');
+test('aggregateHistory retains stored history from stale devices', () => {
   const fresh = {
     deviceId: 'm1', receivedAt: '2026-06-07T11:59:00.000Z',
     history: { daily: [{ date: '2026-06-07', tokens: 10, cost: 1, perClient: { claude: { tokens: 10, cost: 1, messages: 1 } }, perModel: {} }],
@@ -635,14 +922,14 @@ test('aggregateHistory merges non-stale devices and skips stale ones', () => {
     history: { daily: [{ date: '2026-06-07', tokens: 999, cost: 99, perClient: {}, perModel: {} }],
       monthly: [{ month: '2026-06', tokens: 999, cost: 99, perClient: {}, perModel: {} }], summary: {} }
   };
-  const merged = aggregateHistory([fresh, stale], 10 * 60 * 1000, now);
+  const merged = aggregateHistory([fresh, stale]);
   assert.equal(merged.daily.length, 1);
-  assert.equal(merged.daily[0].tokens, 10);     // stale m2 excluded
-  assert.equal(merged.summary.totalTokens, 10);
+  assert.equal(merged.daily[0].tokens, 1009);
+  assert.equal(merged.summary.totalTokens, 1009);
 });
 
 test('aggregateHistory tolerates devices without history', () => {
-  const merged = aggregateHistory([{ deviceId: 'm1', receivedAt: new Date().toISOString() }], 10 * 60 * 1000);
+  const merged = aggregateHistory([{ deviceId: 'm1', receivedAt: new Date().toISOString() }]);
   assert.deepEqual(merged.daily, []);
 });
 
@@ -684,7 +971,7 @@ test('a history-less local tick keeps the trends dashboard populated', () => {
       monthly: [{ month: '2026-06', tokens: 5, cost: 1, perClient: {}, perModel: {} }], summary: {} }
   };
   const second = carryDeviceHistory(first, { deviceId: 'm1', receivedAt: '2026-06-08T00:05:00.000Z' });
-  const agg = aggregateHistory([second], 0);
+  const agg = aggregateHistory([second]);
   assert.equal(agg.daily.length, 1);
   assert.equal(agg.daily[0].tokens, 5);
 });
@@ -715,6 +1002,7 @@ test('aggregateDevices drops today usage once a device today window has ended', 
   const aggregate = aggregateDevices([staleSnapshotDevice()], 10 * 60 * 1000, Date.parse('2026-06-26T05:00:00.000Z'));
   assert.equal(aggregate.periods.today.totalTokens, 0);
   assert.equal(aggregate.periods.today.clients.codex, undefined);
+  assert.deepEqual(aggregate.devices[0].periodWindows, staleSnapshotDevice().periodWindows);
 });
 
 test('aggregateDevices keeps allTime from a device whose today window has ended', () => {

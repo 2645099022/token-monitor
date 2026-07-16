@@ -1,10 +1,12 @@
 'use strict';
 
-const clientLabels = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes', gemini: 'Gemini', cursor: 'Cursor', opencode: 'OpenCode', openclaw: 'OpenClaw', antigravity: 'Antigravity', cline: 'Cline', kimi: 'Kimi', qwen: 'Qwen', grok: 'Grok Build', copilot: 'GitHub Copilot', pi: 'Pi', zed: 'Zed', kilocode: 'Kilo Code', micode: 'MiMo Code', zcode: 'ZCode', kiro: 'Kiro', codebuddy: 'CodeBuddy', workbuddy: 'WorkBuddy' };
+const clientLabels = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes', gemini: 'Gemini', cursor: 'Cursor', opencode: 'OpenCode', openclaw: 'OpenClaw', antigravity: 'Antigravity', cline: 'Cline', kimi: 'Kimi', qwen: 'Qwen', grok: 'Grok Build', copilot: 'GitHub Copilot', pi: 'Pi', zed: 'Zed', kilocode: 'Kilo Code', micode: 'MiMo Code', zcode: 'ZCode', kiro: 'Kiro', codebuddy: 'CodeBuddy', workbuddy: 'WorkBuddy', proma: 'Proma' };
 const { clientColors, fallbackModelColors, modelVendorFor, modelColor } = window.TokenMonitorUsageCharts;
+const motionPreferenceApi = window.TokenMonitorMotionPreference;
+const reducedMotionMedia = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 const clientsWithIcon = new Set([
-  'claude', 'codex', 'gemini', 'cursor', 'opencode', 'openclaw', 'hermes', 'antigravity', 'cline', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro', 'codebuddy', 'workbuddy',
-  'xai', 'deepseek', 'meta', 'mistral', 'qwen', 'moonshot', 'zai', 'cohere', 'xiaomi', 'minimax'
+  'claude', 'codex', 'gemini', 'cursor', 'opencode', 'openclaw', 'hermes', 'antigravity', 'cline', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro', 'codebuddy', 'workbuddy', 'proma',
+  'xai', 'deepseek', 'meta', 'mistral', 'qwen', 'moonshot', 'zai', 'zaiteam', 'cohere', 'xiaomi', 'mimo', 'minimax', 'doubao', 'volcengine', 'qoder', 'ollama'
 ]);
 
 function osIconFor(platform) {
@@ -32,6 +34,7 @@ function iconKindFor(rowData, breakdown) {
       ? { kind: 'icon', iconClass: `row-icon-${rowData.client}` }
       : { kind: 'dot' };
   }
+  if (breakdown === 'project') return { kind: 'icon', iconClass: 'row-icon-project' };
   return clientsWithIcon.has(rowData.key)
     ? { kind: 'icon', iconClass: `row-icon-${rowData.key}` }
     : { kind: 'dot' };
@@ -57,7 +60,8 @@ const KNOWN_CLIENTS = [
   { id: 'zcode', label: 'ZCode' },
   { id: 'kiro', label: 'Kiro' },
   { id: 'codebuddy', label: 'CodeBuddy' },
-  { id: 'workbuddy', label: 'WorkBuddy' }
+  { id: 'workbuddy', label: 'WorkBuddy' },
+  { id: 'proma', label: 'Proma' }
 ];
 const LIMIT_PROVIDERS = [
   { id: 'claude', label: 'Claude', settingsLabel: 'Claude Code' },
@@ -67,13 +71,21 @@ const LIMIT_PROVIDERS = [
   { id: 'opencode', label: 'OpenCode' },
   { id: 'deepseek', label: 'DeepSeek' },
   { id: 'minimax', label: 'Minimax' },
+  { id: 'mimo', label: 'MiMo' },
   { id: 'grok', label: 'Grok' },
   { id: 'copilot', label: 'GitHub Copilot' },
-  { id: 'kiro', label: 'Kiro' }
+  { id: 'kiro', label: 'Kiro' },
+  { id: 'zai', label: 'GLM' },
+  { id: 'zaiteam', label: 'GLM Team' },
+  { id: 'volcengine', label: 'Volcengine' },
+  { id: 'qoder', label: 'Qoder' },
+  { id: 'kimi', label: 'Kimi' },
+  { id: 'ollama', label: 'Ollama' }
 ];
 const DEFAULT_LIMIT_PROVIDER_ORDER = LIMIT_PROVIDERS.map((provider) => provider.id).join(',');
 const limitProviderOrderApi = window.TokenMonitorLimitProviderOrder;
 const limitProviderPresentationApi = window.TokenMonitorLimitProviderPresentation;
+const accountIdentityApi = window.TokenMonitorAccountIdentity;
 const clientStatusPresentationApi = window.TokenMonitorClientStatusPresentation;
 const serviceStatusPresentationApi = window.TokenMonitorServiceStatusPresentation;
 const clientDisplayPreferencesApi = window.TokenMonitorClientDisplayPreferences;
@@ -86,6 +98,7 @@ const { limitFillPercent, limitModeSuffix } = window.TokenMonitorLimitDisplayMod
 const i18n = window.TokenMonitorI18n;
 const currencyApi = window.TokenMonitorCurrency;
 const sessionRowsApi = window.TokenMonitorSessionRows;
+const projectRowsApi = window.TokenMonitorProjectRows;
 const sessionDetailApi = window.TokenMonitorSessionDetail;
 const windowShortcutApi = window.TokenMonitorWindowShortcut;
 const LIMIT_REFRESH_OPTIONS = [60000, 120000, 300000, 900000, 1800000];
@@ -106,7 +119,9 @@ const LIMIT_CAPABILITY_TAG_KEYS = {
   'Pay-as-you-go': 'settings.limits.capability.payg',
   Subscription: 'settings.limits.capability.subscription',
   'Token Plan': 'settings.limits.capability.tokenPlan',
+  'Coding Plan': 'settings.limits.capability.codingPlan',
   'API key': 'settings.limits.capability.apiKey',
+  'AK/SK': 'settings.limits.capability.akSk',
   'GitHub OAuth': 'settings.limits.capability.githubOAuth',
   API: 'settings.limits.capability.api',
   'Add API key': 'settings.limits.status.addApiKey',
@@ -130,13 +145,14 @@ const LIMIT_CAPABILITY_TAG_KEYS = {
 };
 const deviceAccent = '#73bdf5';
 const deviceStaleColor = '#8c97a7';
-const baseBreakdownOrder = ['tool', 'device', 'model', 'session'];
+const baseBreakdownOrder = ['tool', 'device', 'model', 'project', 'session'];
 const VIEW_DISPLAY_OPTIONS = [
   { id: 'home', labelKey: 'views.home' },
   { id: 'tool', labelKey: 'views.tool' },
   { id: 'status', labelKey: 'views.status' },
   { id: 'device', labelKey: 'views.device' },
   { id: 'model', labelKey: 'views.model' },
+  { id: 'project', labelKey: 'views.project' },
   { id: 'session', labelKey: 'views.session' },
   { id: 'limits', labelKey: 'views.limits' },
   { id: 'trends', labelKey: 'views.trends' }
@@ -158,6 +174,7 @@ const VIEW_ICON_CLASSES = {
   status: 'view-icon-status',
   device: 'view-icon-device',
   model: 'view-icon-model',
+  project: 'view-icon-project',
   session: 'view-icon-session',
   limits: 'view-icon-limits',
   trends: 'view-icon-trends'
@@ -169,9 +186,12 @@ const SERVICE_STATUS_PLACEHOLDERS = [
   { id: 'deepseek', label: 'DeepSeek', pageUrl: 'https://status.deepseek.com' }
 ];
 const SERVICE_PROVIDER_OPTIONS = SERVICE_STATUS_PLACEHOLDERS.map((entry) => ({ id: entry.id, label: entry.label }));
+const TOKEN_MONITOR_REPOSITORY_URL = 'https://github.com/Javis603/token-monitor';
+const TOKEN_MONITOR_ISSUES_URL = `${TOKEN_MONITOR_REPOSITORY_URL}/issues/new/choose`;
 const serviceStatusProviderPreferencesApi = window.TokenMonitorServiceStatusProviderPreferences;
 const SETTINGS_SECTION_IDS = ['general', 'main', 'window', 'appearance', 'tools', 'limits', 'accounts', 'sync'];
 const REFRESH_BUTTON_FEEDBACK_MS = 700;
+const CODEX_PENDING_ACTIVE_GRACE_MS = 30000;
 const initialFloatingBubble = window.__TOKEN_MONITOR_INITIAL_FLOATING_BUBBLE__ || { collapsed: false, side: null };
 const initialViewState = window.__TOKEN_MONITOR_INITIAL_VIEW_STATE__ || {};
 let initialBreakdownPreferenceApplied = typeof initialViewState.breakdown === 'string';
@@ -181,15 +201,21 @@ function normalizeInitialViewValue(value, allowed, fallback) {
   return allowed.has(raw) ? raw : fallback;
 }
 
-const state = { period: normalizeInitialViewValue(initialViewState.period, viewPeriodValues, 'today'), appUpdate: null, breakdown: normalizeInitialViewValue(initialViewState.breakdown, viewBreakdownValues, 'home'), viewSwitcherOpen: false, viewSwitcherHasOpened: false, resetCreditsTooltipHasOpened: false, resetCreditsTooltipActive: false, resetCreditsTooltipRenderPending: false, settings: null, stats: null, homeHistory: null, homeHistoryBusy: false, homeHistoryRequested: false, homeHistoryPreviewKey: '', homeActivityScrollLeft: null, homeActivityFollowEnd: true, homeActivityResizeObserver: null, serviceStatus: null, serviceStatusBusy: false, serviceProvidersExpanded: false, trendSettingsExpanded: false, trendsActivating: false, homeSettingsExpanded: false, homeLimitSettingsExpanded: false, serviceStatusTicker: null, refreshTimer: null, refreshBusy: false, refreshFeedbackTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, streamFailure: null, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null, cursorAccount: { status: null, error: '' }, cursorAccountExpanded: false, codexAccountExpanded: false, codexAccountError: '', customPricingExpanded: false, opencodeProfileCount: 0, opencodeCookieExpanded: false, deepseekAccountExpanded: false, deepseekPendingCheckSince: 0, minimaxAccountExpanded: false, minimaxPendingCheckSince: 0, copilotAccountExpanded: false, copilotManualExpanded: false, copilotPendingCheckSince: 0, copilotSignInBusy: false, copilotSignInCancelable: false, copilotSignInFlowId: '', copilotAuthorizeMessage: '', copilotLoginStatus: '', copilotErrorMessage: '', floatingBubble: initialFloatingBubble, suppressInitialNumberAnimation: window.__TOKEN_MONITOR_SUPPRESS_INITIAL_NUMBER_ANIMATION__ === true, openSession: null, detailSort: 'time', recordingWindowShortcut: false, windowShortcutInvalid: false };
+const state = { period: normalizeInitialViewValue(initialViewState.period, viewPeriodValues, 'today'), appUpdate: null, breakdown: normalizeInitialViewValue(initialViewState.breakdown, viewBreakdownValues, 'home'), viewSwitcherOpen: false, viewSwitcherHasOpened: false, resetCreditsTooltipHasOpened: false, resetCreditsTooltipActive: false, resetCreditsTooltipRenderPending: false, settings: null, stats: null, homeHistory: null, homeHistoryBusy: false, homeHistoryRequested: false, homeHistoryPreviewKey: '', homeActivityScrollLeft: null, homeActivityFollowEnd: true, homeActivityResizeObserver: null, serviceStatus: null, serviceStatusBusy: false, serviceProvidersExpanded: false, trendSettingsExpanded: false, trendsActivating: false, homeSettingsExpanded: false, homeLimitSettingsExpanded: false, serviceStatusTicker: null, refreshTimer: null, refreshBusy: false, refreshFeedbackTimer: null, currentTotal: 0, rowSignature: '', streamConnected: false, streamFailure: null, mode: 'idle', appInfo: null, tokscaleStatus: null, tokscaleCheck: null, tokscaleBusy: false, hubInfo: null, cursorAccount: { status: null, error: '' }, cursorAccountExpanded: false, codexAccountExpanded: false, codexAccountError: '', codexSignInBusy: false, codexSignInFlowId: '', codexLoginUrl: '', codexLoginStatus: '', codexLoginOutput: '', codexActiveAccount: null, codexPendingActiveAccount: null, codexPendingActiveAccountUntil: 0, codexPendingActiveAccountTimer: null, codexSystemSwitchingAccountId: '', codexSystemSwitchErrorAccountId: '', codexSystemSwitchError: '', codexSwitchPopoverHasOpened: false, codexSwitchPopoverActive: false, codexSwitchPopoverRenderPending: false, customPricingExpanded: false, opencodeProfileCount: 0, opencodeCookieExpanded: false, deepseekAccountExpanded: false, deepseekPendingCheckSince: 0, minimaxAccountExpanded: false, minimaxPendingCheckSince: 0, zaiAccountExpanded: false, zaiPendingCheckSince: 0, zaiteamAccountExpanded: false, zaiteamPendingCheckSince: 0, volcengineAccountExpanded: false, volcenginePendingCheckSince: 0, qoderAccountExpanded: false, qoderPendingCheckSince: 0, kimiAccountExpanded: false, kimiPendingCheckSince: 0, ollamaAccountExpanded: false, ollamaPendingCheckSince: 0, mimoAccountExpanded: false, mimoAccountError: '', copilotAccountExpanded: false, copilotManualExpanded: false, copilotPendingCheckSince: 0, copilotSignInBusy: false, copilotSignInCancelable: false, copilotSignInFlowId: '', copilotAuthorizeMessage: '', copilotLoginStatus: '', copilotErrorMessage: '', floatingBubble: initialFloatingBubble, suppressInitialNumberAnimation: window.__TOKEN_MONITOR_SUPPRESS_INITIAL_NUMBER_ANIMATION__ === true, openSession: null, detailSort: 'time', recordingWindowShortcut: false, windowShortcutInvalid: false };
+state.appUpdateNotesPresentedVersion = '';
+state.periodMotionActive = false;
+state.animateBarsFromZero = false;
+state.animateChartsOnRender = true;
+let directBreakdownOverride = null;
+state.projectSettingsExpanded = false;
 state.settingsSections = Object.fromEntries(SETTINGS_SECTION_IDS.map((id) => [id, false]));
-const defaultAppearance = { glassOpacity: 68, glassBlur: 32, zoomFactor: 1, systemGlass: true, showLiveDot: true, showToolIcons: true, titleIconOnly: true, settingsInTitlebar: false };
+const defaultAppearance = { glassOpacity: 68, glassBlur: 32, zoomFactor: 1, systemGlass: true, reduceMotion: 'system', showLiveDot: true, showToolIcons: true, titleIconOnly: true, showCompactTotalTokens: false, settingsInTitlebar: false };
 let preferenceDrag = null;
 let viewSwitcherLongPressTimer = null;
 let viewSwitcherLongPressTriggered = false;
 let viewSwitcherHoverCloseTimer = null;
 const els = {
-  shell: document.querySelector('.shell'), status: document.getElementById('status'), liveDot: document.getElementById('liveDot'), totalTokens: document.getElementById('totalTokens'), cost: document.getElementById('cost'), homePanel: document.getElementById('homePanel'), breakdown: document.getElementById('breakdown'), serviceStatusPanel: document.getElementById('serviceStatusPanel'), limitsPanel: document.getElementById('limitsPanel'), trendsPanel: document.getElementById('trendsPanel'), viewSwitcher: document.getElementById('viewSwitcher'), pinButton: document.getElementById('pinButton'), settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'), languageInput: document.getElementById('languageInput'), currencyInput: document.getElementById('currencyInput'), currencyRateRow: document.getElementById('currencyRateRow'), currencyRateModeAuto: document.getElementById('currencyRateModeAuto'), currencyRateModeManual: document.getElementById('currencyRateModeManual'), currencyRateManualField: document.getElementById('currencyRateManualField'), currencyRateOverrideInput: document.getElementById('currencyRateOverrideInput'), currencyRateStatus: document.getElementById('currencyRateStatus'), hubUrlInput: document.getElementById('hubUrlInput'), secretInput: document.getElementById('secretInput'), deviceIdInput: document.getElementById('deviceIdInput'), limitProviderCheckboxes: document.getElementById('limitProviderCheckboxes'), limitsRefreshInput: document.getElementById('limitsRefreshInput'), showLimitSourceInput: document.getElementById('showLimitSourceInput'), showActiveAccountInput: document.getElementById('showActiveAccountInput'), showLimitUsedInput: document.getElementById('showLimitUsedInput'), systemGlassInput: document.getElementById('systemGlassInput'), liveDotInput: document.getElementById('liveDotInput'), toolIconsInput: document.getElementById('toolIconsInput'), floatingBubbleInput: document.getElementById('floatingBubbleInput'), floatingBubbleTriggerInput: document.getElementById('floatingBubbleTriggerInput'), floatingBubbleTriggerRow: document.getElementById('floatingBubbleTriggerRow'), floatingBubbleContentInput: document.getElementById('floatingBubbleContentInput'), floatingBubbleContentRow: document.getElementById('floatingBubbleContentRow'), floatingBubbleContent: document.getElementById('floatingBubbleContent'), discordRpcInput: document.getElementById('discordRpcInput'), windowBehaviorInput: document.getElementById('windowBehaviorInput'), showTrayIconInput: document.getElementById('showTrayIconInput'), trayModeInput: document.getElementById('trayModeInput'), trayContentInput: document.getElementById('trayContentInput'), windowToggleShortcutValue: document.getElementById('windowToggleShortcutValue'), windowToggleShortcutRecordButton: document.getElementById('windowToggleShortcutRecordButton'), windowToggleShortcutClearButton: document.getElementById('windowToggleShortcutClearButton'), windowToggleShortcutNote: document.getElementById('windowToggleShortcutNote'), glassInput: document.getElementById('glassInput'), blurInput: document.getElementById('blurInput'), zoomInput: document.getElementById('zoomInput'), resetGlassButton: document.getElementById('resetGlassButton'), resetDepthButton: document.getElementById('resetDepthButton'), resetZoomButton: document.getElementById('resetZoomButton'), saveSettingsButton: document.getElementById('saveSettingsButton'), clientDisplayList: document.getElementById('clientDisplayList'), wslScanInput: document.getElementById('wslScanInput'), wslScanRow: document.getElementById('wslScanRow'), wslPanel: document.getElementById('wslPanel'), openConfigButton: document.getElementById('openConfigButton'), exportAutoInput: document.getElementById('exportAutoInput'), exportAutoDetails: document.getElementById('exportAutoDetails'), exportAutoStatus: document.getElementById('exportAutoStatus'), exportDirLabel: document.getElementById('exportDirLabel'), exportPickDirButton: document.getElementById('exportPickDirButton'), exportIntervalInput: document.getElementById('exportIntervalInput'), exportNowButton: document.getElementById('exportNowButton'), refreshButton: document.getElementById('refreshButton'), minButton: document.getElementById('minButton'), closeButton: document.getElementById('closeButton'), floatingBubbleTab: document.getElementById('floatingBubbleTab')
+  shell: document.querySelector('.shell'), status: document.getElementById('status'), liveDot: document.getElementById('liveDot'), totalTokens: document.getElementById('totalTokens'), totalTokensCompact: document.getElementById('totalTokensCompact'), cost: document.getElementById('cost'), homePanel: document.getElementById('homePanel'), breakdown: document.getElementById('breakdown'), serviceStatusPanel: document.getElementById('serviceStatusPanel'), limitsPanel: document.getElementById('limitsPanel'), trendsPanel: document.getElementById('trendsPanel'), viewSwitcher: document.getElementById('viewSwitcher'), pinButton: document.getElementById('pinButton'), settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'), languageInput: document.getElementById('languageInput'), currencyInput: document.getElementById('currencyInput'), currencyRateRow: document.getElementById('currencyRateRow'), currencyRateModeAuto: document.getElementById('currencyRateModeAuto'), currencyRateModeManual: document.getElementById('currencyRateModeManual'), currencyRateManualField: document.getElementById('currencyRateManualField'), currencyRateOverrideInput: document.getElementById('currencyRateOverrideInput'), currencyRateStatus: document.getElementById('currencyRateStatus'), hubUrlInput: document.getElementById('hubUrlInput'), secretInput: document.getElementById('secretInput'), deviceIdInput: document.getElementById('deviceIdInput'), limitProviderCheckboxes: document.getElementById('limitProviderCheckboxes'), limitsRefreshInput: document.getElementById('limitsRefreshInput'), showLimitSourceInput: document.getElementById('showLimitSourceInput'), maskLimitAccountEmailsInput: document.getElementById('maskLimitAccountEmailsInput'), showLimitUsedInput: document.getElementById('showLimitUsedInput'), systemGlassInput: document.getElementById('systemGlassInput'), liveDotInput: document.getElementById('liveDotInput'), toolIconsInput: document.getElementById('toolIconsInput'), floatingBubbleInput: document.getElementById('floatingBubbleInput'), floatingBubbleTriggerInput: document.getElementById('floatingBubbleTriggerInput'), floatingBubbleTriggerRow: document.getElementById('floatingBubbleTriggerRow'), floatingBubbleContentInput: document.getElementById('floatingBubbleContentInput'), floatingBubbleContentRow: document.getElementById('floatingBubbleContentRow'), floatingBubbleContent: document.getElementById('floatingBubbleContent'), discordRpcInput: document.getElementById('discordRpcInput'), windowBehaviorInput: document.getElementById('windowBehaviorInput'), showTrayIconInput: document.getElementById('showTrayIconInput'), trayModeInput: document.getElementById('trayModeInput'), trayContentInput: document.getElementById('trayContentInput'), windowToggleShortcutValue: document.getElementById('windowToggleShortcutValue'), windowToggleShortcutRecordButton: document.getElementById('windowToggleShortcutRecordButton'), windowToggleShortcutClearButton: document.getElementById('windowToggleShortcutClearButton'), windowToggleShortcutNote: document.getElementById('windowToggleShortcutNote'), glassInput: document.getElementById('glassInput'), blurInput: document.getElementById('blurInput'), zoomInput: document.getElementById('zoomInput'), resetGlassButton: document.getElementById('resetGlassButton'), resetDepthButton: document.getElementById('resetDepthButton'), resetZoomButton: document.getElementById('resetZoomButton'), saveSettingsButton: document.getElementById('saveSettingsButton'), clientDisplayList: document.getElementById('clientDisplayList'), wslScanInput: document.getElementById('wslScanInput'), wslScanRow: document.getElementById('wslScanRow'), wslPanel: document.getElementById('wslPanel'), openConfigButton: document.getElementById('openConfigButton'), exportAutoInput: document.getElementById('exportAutoInput'), exportAutoDetails: document.getElementById('exportAutoDetails'), exportAutoStatus: document.getElementById('exportAutoStatus'), exportDirLabel: document.getElementById('exportDirLabel'), exportPickDirButton: document.getElementById('exportPickDirButton'), exportIntervalInput: document.getElementById('exportIntervalInput'), exportNowButton: document.getElementById('exportNowButton'), refreshButton: document.getElementById('refreshButton'), minButton: document.getElementById('minButton'), closeButton: document.getElementById('closeButton'), floatingBubbleTab: document.getElementById('floatingBubbleTab')
 };
 Object.assign(els, {
   floatingBubbleOptions: document.getElementById('floatingBubbleOptions'),
@@ -202,11 +228,17 @@ Object.assign(els, {
   hubSecretInput: document.getElementById('hubSecretInput'),
   hubSecretCopyButton: document.getElementById('hubSecretCopyButton'),
   hubSecretRegenButton: document.getElementById('hubSecretRegenButton'),
+  secretPasteButton: document.getElementById('secretPasteButton'),
   hubStatusRow: document.getElementById('hubStatusRow'),
   syncClientStatus: document.getElementById('syncClientStatus'),
   hubAddressList: document.getElementById('hubAddressList'),
+  syncUploadIntervalInput: document.getElementById('syncUploadIntervalInput'),
   collectionCadenceInput: document.getElementById('collectionCadenceInput'),
   collectionCadenceNote: document.getElementById('collectionCadenceNote'),
+  sessionUsageArchiveInput: document.getElementById('sessionUsageArchiveInput'),
+  sessionUsageArchiveStatus: document.getElementById('sessionUsageArchiveStatus'),
+  reduceMotionInput: document.getElementById('reduceMotionInput'),
+  clearSessionUsageArchiveButton: document.getElementById('clearSessionUsageArchiveButton'),
   startupGroup: document.getElementById('startupGroup'),
   startAtLoginInput: document.getElementById('startAtLoginInput'),
   startupNote: document.getElementById('startupNote'),
@@ -220,16 +252,30 @@ Object.assign(els, {
   downloadTokscaleButton: document.getElementById('downloadTokscaleButton'),
   resetTokscaleButton: document.getElementById('resetTokscaleButton'),
   openTokscaleLinkButton: document.getElementById('openTokscaleLinkButton'),
+  aboutVersion: document.getElementById('aboutVersion'),
+  openRepositoryButton: document.getElementById('openRepositoryButton'),
+  reportIssueButton: document.getElementById('reportIssueButton'),
   appUpdatePill: document.getElementById('appUpdatePill'),
   appUpdatePillAction: document.getElementById('appUpdatePillAction'),
   appUpdatePillLabel: document.getElementById('appUpdatePillLabel'),
   appUpdatePillDismiss: document.getElementById('appUpdatePillDismiss'),
+  appUpdatePopover: document.getElementById('appUpdatePopover'),
+  appUpdatePopoverTitle: document.getElementById('appUpdatePopoverTitle'),
+  appUpdatePopoverBody: document.getElementById('appUpdatePopoverBody'),
+  appUpdatePopoverAction: document.getElementById('appUpdatePopoverAction'),
+  appUpdatePopoverRelease: document.getElementById('appUpdatePopoverRelease'),
+  appUpdatePopoverClose: document.getElementById('appUpdatePopoverClose'),
   appUpdateInstalled: document.getElementById('appUpdateInstalled'),
   appUpdateLatest: document.getElementById('appUpdateLatest'),
   appUpdateCheckButton: document.getElementById('appUpdateCheckButton'),
   appUpdateViewReleaseButton: document.getElementById('appUpdateViewReleaseButton'),
+  appUpdateNotes: document.getElementById('appUpdateNotes'),
+  appUpdateNotesTitle: document.getElementById('appUpdateNotesTitle'),
+  appUpdateNotesBody: document.getElementById('appUpdateNotesBody'),
+  appUpdateReleaseNotesButton: document.getElementById('appUpdateReleaseNotesButton'),
   appUpdateMessage: document.getElementById('appUpdateMessage'),
   titleIconInput: document.getElementById('titleIconInput'),
+  showCompactTotalTokensInput: document.getElementById('showCompactTotalTokensInput'),
   settingsInTitlebarInput: document.getElementById('settingsInTitlebarInput'),
   resetClientDisplayOrderButton: document.getElementById('resetClientDisplayOrderButton'),
   showAllClientsButton: document.getElementById('showAllClientsButton'),
@@ -246,6 +292,16 @@ Object.assign(els, {
   appearanceSettingsSummary: document.getElementById('appearanceSettingsSummary'),
   themePresetChips: document.getElementById('themePresetChips'),
   themeColorGrid: document.getElementById('themeColorGrid'),
+  themeCodeInput: document.getElementById('themeCodeInput'),
+  applyThemeCodeButton: document.getElementById('applyThemeCodeButton'),
+  copyThemeCodeButton: document.getElementById('copyThemeCodeButton'),
+  themeCodeStatus: document.getElementById('themeCodeStatus'),
+  themeAdvancedGroup: document.getElementById('themeAdvancedGroup'),
+  themeAdvancedToggle: document.getElementById('themeAdvancedToggle'),
+  themeAdvancedDetails: document.getElementById('themeAdvancedDetails'),
+  themeVendorGroup: document.getElementById('themeVendorGroup'),
+  themeVendorToggle: document.getElementById('themeVendorToggle'),
+  themeVendorDetails: document.getElementById('themeVendorDetails'),
   vendorColorList: document.getElementById('vendorColorList'),
   resetThemeColorsButton: document.getElementById('resetThemeColorsButton'),
   resetVendorColorsButton: document.getElementById('resetVendorColorsButton'),
@@ -253,15 +309,32 @@ Object.assign(els, {
   sessionDetailHead: document.getElementById('session-detail-head')
 });
 
-document.addEventListener('click', (e) => {
-  const row = e.target.closest('.row.has-accordion');
-  if (row) {
-    const isExpanded = row.classList.contains('expanded');
-    document.querySelectorAll('.row.expanded').forEach(r => r.classList.remove('expanded'));
-    if (!isExpanded) {
-      row.classList.add('expanded');
-    }
+function toggleAccordionRow(row) {
+  const isExpanded = row.classList.contains('expanded');
+  document.querySelectorAll('.row.expanded').forEach((other) => {
+    other.classList.remove('expanded');
+    other.setAttribute('aria-expanded', 'false');
+  });
+  if (!isExpanded) {
+    row.classList.add('expanded');
+    row.setAttribute('aria-expanded', 'true');
   }
+}
+
+function setAttributeIfChanged(element, name, value) {
+  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
+document.addEventListener('click', (event) => {
+  const row = event.target.closest('.row.has-accordion');
+  if (row) toggleAccordionRow(row);
+});
+
+document.addEventListener('keydown', (event) => {
+  const row = event.target.closest('.row.has-accordion');
+  if (!row || (event.key !== 'Enter' && event.key !== ' ')) return;
+  event.preventDefault();
+  toggleAccordionRow(row);
 });
 
 document.addEventListener('pointerdown', (event) => {
@@ -376,11 +449,18 @@ function settingsSectionSummary(section) {
     const opencodeCount = state.opencodeProfileCount || 0;
     const deepseekLinked = deepseekAccountLinked();
     const minimaxLinked = minimaxAccountLinked();
+    const zaiLinked = externalProviderAccountLinked('zai');
+    const zaiteamLinked = externalProviderAccountLinked('zaiteam');
+    const volcengineLinked = externalProviderAccountLinked('volcengine');
+    const qoderLinked = externalProviderAccountLinked('qoder');
+    const kimiLinked = externalProviderAccountLinked('kimi');
+    const ollamaLinked = externalProviderAccountLinked('ollama');
+    const mimoLinked = mimoAccountLinked();
     const copilotLinked = copilotAccountLinked();
     const codexLinked = (state.settings?.codexManagedAccounts || []).length > 0;
     return t('settings.summary.accounts', {
-      linked: (codexLinked ? 1 : 0) + (cursorLinked ? 1 : 0) + (opencodeCount > 0 ? 1 : 0) + (deepseekLinked ? 1 : 0) + (minimaxLinked ? 1 : 0) + (copilotLinked ? 1 : 0),
-      total: 6
+      linked: (codexLinked ? 1 : 0) + (cursorLinked ? 1 : 0) + (opencodeCount > 0 ? 1 : 0) + (deepseekLinked ? 1 : 0) + (minimaxLinked ? 1 : 0) + (zaiLinked ? 1 : 0) + (zaiteamLinked ? 1 : 0) + (volcengineLinked ? 1 : 0) + (qoderLinked ? 1 : 0) + (kimiLinked ? 1 : 0) + (ollamaLinked ? 1 : 0) + (mimoLinked ? 1 : 0) + (copilotLinked ? 1 : 0),
+      total: 13
     });
   }
   if (section === 'limits') {
@@ -421,10 +501,54 @@ function formatNumber(value) { return Math.round(Number(value || 0)).toLocaleStr
 function formatCompact(value) {
   const num = Math.round(Number(value || 0));
   const abs = Math.abs(num);
-  if (abs >= 1e9) return `${(num / 1e9).toFixed(1).replace(/\.0$/, '')}B`;
-  if (abs >= 1e6) return `${(num / 1e6).toFixed(1).replace(/\.0$/, '')}M`;
-  if (abs >= 1e3) return `${(num / 1e3).toFixed(1).replace(/\.0$/, '')}K`;
-  return String(num);
+  const units = [
+    { divisor: 1e3, suffix: 'K' },
+    { divisor: 1e6, suffix: 'M' },
+    { divisor: 1e9, suffix: 'B' }
+  ];
+  let unitIndex = abs >= 1e9 ? 2 : abs >= 1e6 ? 1 : abs >= 1e3 ? 0 : -1;
+  if (unitIndex < 0) return String(num);
+
+  let unit = units[unitIndex];
+  let display = (num / unit.divisor).toFixed(1);
+  if (Math.abs(Number(display)) >= 1000 && unitIndex < units.length - 1) {
+    unit = units[unitIndex + 1];
+    display = (num / unit.divisor).toFixed(1);
+  }
+  return `${display.replace(/\.0$/, '')}${unit.suffix}`;
+}
+function updateTotalCompact(value) {
+  if (!els.totalTokensCompact) return;
+  const num = Math.round(Number(value || 0));
+  if (state.settings?.showCompactTotalTokens !== true || Math.abs(num) < 1000) {
+    hideTotalCompact();
+  } else {
+    els.totalTokensCompact.textContent = `≈ ${formatCompact(num)}`;
+    els.totalTokensCompact.classList.remove('hidden');
+  }
+  fitTotalNumber();
+}
+function hideTotalCompact() {
+  if (!els.totalTokensCompact) return;
+  els.totalTokensCompact.textContent = '';
+  els.totalTokensCompact.classList.add('hidden');
+}
+// Scale the exact total to fit the width it is actually given instead of clipping
+// it to an ellipsis. The compact chip (when shown) is flex:0 0 auto and claims its
+// width first, so the number's clientWidth is its allotted box while scrollWidth is
+// its natural width; the ratio is how far the font must shrink to stay whole.
+function totalNumberFontScale(availableWidth, naturalWidth, minScale = 0.5) {
+  if (!(naturalWidth > 0) || !(availableWidth > 0)) return 1;
+  return Math.min(1, Math.max(minScale, availableWidth / naturalWidth));
+}
+function fitTotalNumber() {
+  const el = els.totalTokens;
+  if (!el) return;
+  el.style.fontSize = '';
+  const base = parseFloat(getComputedStyle(el).fontSize);
+  if (!(base > 0)) return;
+  const scale = totalNumberFontScale(el.clientWidth, el.scrollWidth);
+  if (scale < 1) el.style.fontSize = `${Math.floor(base * scale)}px`;
 }
 function trendShortLabel(label, labelKey) {
   const value = String(label || '');
@@ -519,19 +643,124 @@ function formatUpdatedAge(value) {
 function versionText(value) {
   return value ? `v${value}` : 'unknown';
 }
+function appUpdateActionMode(s) {
+  if (!s) return '';
+  if (s.downloaded) return 'install';
+  if (!s.hasUpdate) return '';
+  if (s.installSupported) return 'download';
+  return s.latest?.htmlUrl ? 'release' : '';
+}
+function setAppUpdatePillDisclosure(available) {
+  const action = els.appUpdatePillAction;
+  if (available) {
+    action.setAttribute('aria-haspopup', 'dialog');
+    action.setAttribute('aria-controls', 'appUpdatePopover');
+    action.setAttribute('aria-expanded', String(els.appUpdatePopover.matches(':popover-open')));
+    return;
+  }
+  action.removeAttribute('aria-haspopup');
+  action.removeAttribute('aria-controls');
+  action.removeAttribute('aria-expanded');
+}
 function renderAppUpdatePill() {
   const s = state.appUpdate;
   const pill = els.appUpdatePill;
   if (!pill) return;
-  if (!s || !s.hasUpdate || !s.latest) {
+  const mode = appUpdateActionMode(s);
+  const version = s?.latest?.version || s?.installVersion || '';
+  if (!s || !mode || !version || !s.showUpdateNotice) {
     pill.classList.add('hidden');
     pill.setAttribute('title', '');
     els.appUpdatePillLabel.textContent = '';
+    setAppUpdatePillDisclosure(false);
     return;
   }
+  const hasReleaseNotes = mode !== 'install' && releaseNoteGroupsForCurrentLocale(s.latest).length > 0;
+  setAppUpdatePillDisclosure(hasReleaseNotes);
   pill.classList.remove('hidden');
-  pill.setAttribute('title', s.latest.name || `v${s.latest.version}`);
-  els.appUpdatePillLabel.textContent = `↑ v${s.latest.version}`;
+  els.appUpdatePillDismiss.classList.toggle('hidden', mode === 'install' || s.installBusy);
+  pill.setAttribute('title', mode === 'install' ? t('settings.appUpdate.ready') : (s.latest?.name || `v${version}`));
+  if (s.installPhase === 'downloading' && Number.isFinite(s.installProgress)) {
+    els.appUpdatePillLabel.textContent = `${Math.round(s.installProgress)}%`;
+  } else {
+    els.appUpdatePillLabel.textContent = mode === 'install'
+      ? `↻ ${t('settings.appUpdate.restart')}`
+      : `↑ v${version}`;
+  }
+}
+function releaseNoteGroupsForCurrentLocale(latest) {
+  const notes = latest?.releaseNotes;
+  if (!notes || typeof notes !== 'object') return [];
+  const preferred = currentLocale().startsWith('zh') ? notes.zh : notes.en;
+  if (Array.isArray(preferred) && preferred.length > 0) return preferred;
+  if (Array.isArray(notes.en) && notes.en.length > 0) return notes.en;
+  return Array.isArray(notes.zh) ? notes.zh : [];
+}
+function buildAppUpdateNoteGroupNodes(groups) {
+  return groups.map((group) => {
+    const section = document.createElement('section');
+    section.className = 'app-update-note-group';
+    const title = document.createElement('div');
+    title.className = 'app-update-note-title';
+    title.textContent = String(group?.title || '');
+    const list = document.createElement('ul');
+    for (const item of Array.isArray(group?.items) ? group.items : []) {
+      const row = document.createElement('li');
+      row.textContent = String(item || '');
+      list.append(row);
+    }
+    section.append(title, list);
+    return section;
+  });
+}
+function renderAppUpdatePopover(s) {
+  const version = s?.latest?.version || '';
+  const groups = releaseNoteGroupsForCurrentLocale(s?.latest);
+  const mode = appUpdateActionMode(s);
+  if (!version || groups.length === 0 || !mode) {
+    if (els.appUpdatePopover.matches(':popover-open')) els.appUpdatePopover.hidePopover();
+    els.appUpdatePopoverTitle.textContent = '';
+    els.appUpdatePopoverBody.replaceChildren();
+    return false;
+  }
+  els.appUpdatePopoverTitle.textContent = t('settings.appUpdate.whatsNew', { version });
+  els.appUpdatePopoverBody.replaceChildren(...buildAppUpdateNoteGroupNodes(groups));
+  els.appUpdatePopoverAction.textContent = mode === 'install'
+    ? t('settings.appUpdate.restart')
+    : mode === 'download'
+      ? t('settings.appUpdate.download')
+      : t('settings.appUpdate.viewRelease');
+  els.appUpdatePopoverAction.disabled = Boolean(s.installBusy);
+  els.appUpdatePopoverRelease.classList.toggle('hidden', !s.latest?.htmlUrl);
+  return true;
+}
+function positionAppUpdatePopover() {
+  const rect = els.appUpdatePill.getBoundingClientRect();
+  const width = Math.min(320, window.innerWidth - 24);
+  const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.right - width));
+  els.appUpdatePopover.style.width = `${width}px`;
+  els.appUpdatePopover.style.left = `${left}px`;
+  els.appUpdatePopover.style.bottom = `${Math.max(12, window.innerHeight - rect.top + 8)}px`;
+}
+function renderAppUpdateNotes(s) {
+  const version = s?.latest?.version || '';
+  const groups = releaseNoteGroupsForCurrentLocale(s?.latest);
+  const visible = Boolean(version && groups.length > 0);
+  els.appUpdateNotes.classList.toggle('hidden', !visible);
+  if (!visible) {
+    els.appUpdateNotes.open = false;
+    els.appUpdateNotesTitle.textContent = '';
+    els.appUpdateNotesBody.replaceChildren();
+    return;
+  }
+
+  els.appUpdateNotesTitle.textContent = t('settings.appUpdate.whatsNew', { version });
+  els.appUpdateNotesBody.replaceChildren(...buildAppUpdateNoteGroupNodes(groups));
+  els.appUpdateReleaseNotesButton.classList.toggle('hidden', !s.latest?.htmlUrl);
+  if (s.hasUpdate && state.appUpdateNotesPresentedVersion !== version) {
+    els.appUpdateNotes.open = true;
+    state.appUpdateNotesPresentedVersion = version;
+  }
 }
 function renderSettingsAppUpdateRow() {
   const s = state.appUpdate;
@@ -543,21 +772,43 @@ function renderSettingsAppUpdateRow() {
     els.appUpdateViewReleaseButton.classList.add('hidden');
     els.appUpdateMessage.textContent = '';
     els.appUpdateMessage.classList.remove('error');
+    renderAppUpdateNotes(null);
     return;
   }
   els.appUpdateInstalled.textContent = `v${s.currentVersion}`;
-  if (s.latest) {
-    els.appUpdateLatest.textContent = !s.hasUpdate && semverLikeEqual(s.latest.version, s.currentVersion)
-      ? t('settings.appUpdate.latestWithStatus', { version: s.latest.version, status: t('settings.appUpdate.upToDateShort') })
-      : `v${s.latest.version}`;
-    els.appUpdateViewReleaseButton.classList.toggle('hidden', !s.hasUpdate);
+  const displayVersion = s.latest?.version || s.installVersion || '';
+  if (displayVersion) {
+    els.appUpdateLatest.textContent = !s.hasUpdate && semverLikeEqual(displayVersion, s.currentVersion)
+      ? t('settings.appUpdate.latestWithStatus', { version: displayVersion, status: t('settings.appUpdate.upToDateShort') })
+      : `v${displayVersion}`;
+    const actionMode = appUpdateActionMode(s);
+    els.appUpdateViewReleaseButton.classList.toggle('hidden', !actionMode);
+    els.appUpdateViewReleaseButton.disabled = Boolean(s.installBusy);
+    els.appUpdateViewReleaseButton.textContent = actionMode === 'install'
+      ? t('settings.appUpdate.restart')
+      : actionMode === 'download'
+        ? t('settings.appUpdate.download')
+        : t('settings.appUpdate.viewRelease');
   } else {
     els.appUpdateLatest.textContent = s.lastCheckedAt ? t('settings.appUpdate.upToDate') : t('settings.common.notChecked');
     els.appUpdateViewReleaseButton.classList.add('hidden');
   }
-  els.appUpdateCheckButton.disabled = Boolean(s.checking);
+  els.appUpdateCheckButton.disabled = Boolean(s.checking || s.installBusy);
   els.appUpdateCheckButton.textContent = s.checking ? t('settings.appUpdate.checking') : t('settings.appUpdate.check');
-  if (s.lastError) {
+  renderAppUpdateNotes(s);
+  if (s.installPhase === 'downloading') {
+    const percent = Number.isFinite(s.installProgress) ? Math.round(s.installProgress) : 0;
+    els.appUpdateMessage.textContent = t('settings.appUpdate.downloading', { percent });
+    els.appUpdateMessage.classList.remove('error');
+  } else if (s.downloaded) {
+    els.appUpdateMessage.textContent = state.appInfo?.platform === 'win32'
+      ? t('settings.appUpdate.readyWindowsUnsigned')
+      : t('settings.appUpdate.ready');
+    els.appUpdateMessage.classList.remove('error');
+  } else if (s.installError) {
+    els.appUpdateMessage.textContent = t('settings.appUpdate.installError');
+    els.appUpdateMessage.classList.add('error');
+  } else if (s.lastError) {
     els.appUpdateMessage.textContent = t('settings.appUpdate.githubError');
     els.appUpdateMessage.classList.add('error');
   } else {
@@ -723,16 +974,247 @@ function cancelNumberAnimation() {
   if (numberAnimHandle) { cancelAnimationFrame(numberAnimHandle); numberAnimHandle = 0; }
 }
 
-function animateNumber(el, from, to, duration = 2200) {
+function animateNumber(el, from, to, duration = 1000, onDone = null) {
   cancelNumberAnimation();
+  if (prefersReducedMotion()) {
+    el.textContent = formatNumber(to);
+    if (typeof onDone === 'function') onDone();
+    return;
+  }
   const start = performance.now();
   const delta = to - from;
   function frame(now) {
     const progress = Math.min(1, (now - start) / duration);
     el.textContent = formatNumber(from + delta * easeOutQuart(progress));
-    numberAnimHandle = progress < 1 ? requestAnimationFrame(frame) : 0;
+    if (progress < 1) {
+      numberAnimHandle = requestAnimationFrame(frame);
+    } else {
+      numberAnimHandle = 0;
+      if (typeof onDone === 'function') onDone();
+    }
   }
   numberAnimHandle = requestAnimationFrame(frame);
+}
+
+const rowNumberAnimationHandles = new Map();
+
+function prefersReducedMotion() {
+  return motionPreferenceApi.shouldReduceMotion(state.settings?.reduceMotion, reducedMotionMedia?.matches);
+}
+
+function settleMotionAnimations() {
+  cancelNumberAnimation();
+  els.totalTokens.textContent = formatNumber(state.currentTotal);
+  updateTotalCompact(state.currentTotal);
+  for (const [el, handle] of rowNumberAnimationHandles) {
+    cancelAnimationFrame(handle);
+    const target = Number(el.dataset.motionTarget || el.dataset.motionValue || 0);
+    el.textContent = formatNumber(target);
+    el.dataset.motionValue = String(target);
+    delete el.dataset.motionTarget;
+  }
+  rowNumberAnimationHandles.clear();
+  for (const animation of document.getAnimations?.() || []) {
+    try { animation.finish(); } catch (_) { animation.cancel(); }
+  }
+}
+
+function applyReduceMotionPreference(value) {
+  const preference = motionPreferenceApi.normalize(value);
+  document.documentElement.dataset.reduceMotion = preference;
+  if (motionPreferenceApi.shouldReduceMotion(preference, reducedMotionMedia?.matches)) settleMotionAnimations();
+  return preference;
+}
+
+function captureBreakdownMotion() {
+  const snapshot = new Map();
+  for (const row of els.breakdown?.querySelectorAll('.row[data-key]') || []) {
+    const rect = row.getBoundingClientRect();
+    const fill = row.querySelector('.bar-fill');
+    const trackWidth = fill?.parentElement?.getBoundingClientRect().width || 0;
+    const fillWidth = fill?.getBoundingClientRect().width || 0;
+    snapshot.set(row.dataset.key, {
+      top: rect.top,
+      value: Number(row.querySelector('.row-value')?.dataset.motionValue || row.dataset.motionValue || 0),
+      barScale: trackWidth > 0 ? Math.max(0, Math.min(1, fillWidth / trackWidth)) : 0
+    });
+  }
+  return snapshot;
+}
+
+function animateRowNumber(el, from, to, duration = 420) {
+  const previousHandle = rowNumberAnimationHandles.get(el);
+  if (previousHandle) cancelAnimationFrame(previousHandle);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from === to || prefersReducedMotion()) {
+    el.textContent = formatNumber(to);
+    el.dataset.motionValue = String(Number(to) || 0);
+    delete el.dataset.motionTarget;
+    rowNumberAnimationHandles.delete(el);
+    return;
+  }
+  const startedAt = performance.now();
+  const delta = to - from;
+  el.textContent = formatNumber(from);
+  el.dataset.motionValue = String(from);
+  el.dataset.motionTarget = String(to);
+  function frame(now) {
+    if (prefersReducedMotion()) {
+      el.textContent = formatNumber(to);
+      el.dataset.motionValue = String(Number(to) || 0);
+      delete el.dataset.motionTarget;
+      rowNumberAnimationHandles.delete(el);
+      return;
+    }
+    const progress = Math.min(1, (now - startedAt) / duration);
+    const current = from + delta * easeOutQuart(progress);
+    el.textContent = formatNumber(current);
+    el.dataset.motionValue = String(current);
+    if (progress < 1) {
+      rowNumberAnimationHandles.set(el, requestAnimationFrame(frame));
+    } else {
+      delete el.dataset.motionTarget;
+      rowNumberAnimationHandles.delete(el);
+    }
+  }
+  rowNumberAnimationHandles.set(el, requestAnimationFrame(frame));
+}
+
+function animateBreakdownFrom(snapshot, { duration = 420 } = {}) {
+  if (prefersReducedMotion()) return;
+  let enteringIndex = 0;
+  for (const row of els.breakdown?.querySelectorAll('.row[data-key]') || []) {
+    const previous = snapshot.get(row.dataset.key);
+    const value = Number(row.dataset.motionValue || 0);
+    const fill = row.querySelector('.bar-fill');
+    const targetScale = Math.max(0, Math.min(1, Number(fill?.style.getPropertyValue('--bar-scale')) || 0));
+    if (previous) {
+      const deltaY = previous.top - row.getBoundingClientRect().top;
+      if (Math.abs(deltaY) > 0.5) {
+        row.animate([
+          { transform: `translate3d(0, ${deltaY}px, 0)` },
+          { transform: 'translate3d(0, 0, 0)' }
+        ], { duration: 280, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
+      }
+      animateBarBetween(fill, previous.barScale, targetScale, 0, duration);
+      animateRowNumber(row.querySelector('.row-value'), previous.value, value, duration);
+      continue;
+    }
+    row.animate([
+      { opacity: 0, transform: 'translate3d(0, 7px, 0)' },
+      { opacity: 1, transform: 'translate3d(0, 0, 0)' }
+    ], {
+      duration: 240,
+      delay: Math.min(enteringIndex, 6) * 18,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      fill: 'backwards'
+    });
+    const delay = Math.min(enteringIndex, 6) * 18;
+    animateBarBetween(fill, 0, targetScale, delay, Math.max(1, duration - delay));
+    animateRowNumber(row.querySelector('.row-value'), 0, value, duration);
+    enteringIndex += 1;
+  }
+}
+
+function animateBarBetween(fill, fromScale, toScale, delay = 0, duration = 420) {
+  if (!fill?.animate || Math.abs(toScale - fromScale) < 0.001) return;
+  for (const animation of fill.getAnimations()) animation.cancel();
+  fill.animate([
+    { transform: `scaleX(${fromScale})` },
+    { transform: `scaleX(${toScale})` }
+  ], {
+    duration,
+    delay,
+    easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+    fill: 'backwards'
+  });
+}
+
+function captureTrendBarMotion() {
+  const snapshot = new Map();
+  for (const bar of els.trendsPanel?.querySelectorAll('.spark-bar[data-motion-key]') || []) {
+    snapshot.set(bar.dataset.motionKey, { height: bar.getBoundingClientRect().height });
+  }
+  return snapshot;
+}
+
+function animateTrendBarsFrom(snapshot, { fromZero = false } = {}) {
+  if (prefersReducedMotion()) return;
+  const bars = Array.from(els.trendsPanel?.querySelectorAll('.spark-bar[data-motion-key]') || []);
+  bars.forEach((bar, index) => {
+    const previous = snapshot.get(bar.dataset.motionKey);
+    const targetHeight = bar.getBoundingClientRect().height;
+    const fromScale = fromZero || !previous
+      ? 0
+      : targetHeight > 0 ? previous.height / targetHeight : 1;
+    if (Math.abs(fromScale - 1) < 0.001) return;
+    bar.animate([
+      { transform: `scaleY(${fromScale})` },
+      { transform: 'scaleY(1)' }
+    ], {
+      duration: 420,
+      delay: previous && !fromZero ? 0 : Math.min(index, 14) * 14,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      fill: 'backwards'
+    });
+  });
+}
+
+const HOME_HISTORY_MOTION_MS = 920;
+const HOME_HEAT_CELL_MOTION_MS = 360;
+
+function animateHomeHistoryVisuals(activityScroll, activityCanvas, trendChart) {
+  if (!state.animateChartsOnRender) return;
+  state.animateChartsOnRender = false;
+  if (prefersReducedMotion()) return;
+
+  const heatCells = Array.from(activityCanvas?.querySelectorAll('.heat-base-layer .heat') || []);
+  const viewport = activityScroll?.getBoundingClientRect();
+  const visibleCells = heatCells.map((cell, index) => ({ cell, column: Math.floor(index / 7), rect: cell.getBoundingClientRect() }))
+    .filter(({ rect }) => viewport && rect.right > viewport.left && rect.left < viewport.right);
+  const firstVisibleColumn = visibleCells.length ? visibleCells[0].column : 0;
+  const lastVisibleColumn = visibleCells.length ? visibleCells[visibleCells.length - 1].column : firstVisibleColumn;
+  const heatColumnDelay = (HOME_HISTORY_MOTION_MS - HOME_HEAT_CELL_MOTION_MS) / Math.max(1, lastVisibleColumn - firstVisibleColumn);
+  visibleCells.forEach(({ cell, column }) => {
+    cell.animate([{ opacity: 0 }, { opacity: 1 }], {
+      duration: HOME_HEAT_CELL_MOTION_MS,
+      delay: (column - firstVisibleColumn) * heatColumnDelay,
+      easing: 'ease',
+      fill: 'backwards'
+    });
+  });
+
+  const line = trendChart?.querySelector('.area-line-stroke');
+  const fill = trendChart?.querySelector('.area-line-fill');
+  const length = line?.getTotalLength?.() || 0;
+  if (length > 0) {
+    line.animate([
+      { strokeDasharray: `${length} ${length}`, strokeDashoffset: length },
+      { strokeDasharray: `${length} ${length}`, strokeDashoffset: 0 }
+    ], {
+      duration: HOME_HISTORY_MOTION_MS,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      fill: 'backwards'
+    });
+  }
+  fill?.animate([
+    { clipPath: 'inset(0 100% 0 0)' },
+    { clipPath: 'inset(0 0 0 0)' }
+  ], {
+    duration: HOME_HISTORY_MOTION_MS,
+    easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+    fill: 'backwards'
+  });
+}
+
+function applyBarScale(fill, scale) {
+  const safeScale = Math.max(0, Math.min(1, Number(scale) || 0));
+  fill.style.setProperty('--bar-scale', String(safeScale));
+  if (!state.animateBarsFromZero || prefersReducedMotion() || !fill.animate) return;
+  for (const animation of fill.getAnimations()) animation.cancel();
+  fill.animate([
+    { transform: 'scaleX(0)' },
+    { transform: `scaleX(${safeScale})` }
+  ], { duration: 420, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
 }
 
 function rowWidth(value, max) {
@@ -753,7 +1235,7 @@ function rowTemplate(rowData) {
   return row;
 }
 
-function updateRow(row, { name, subtitle, detail, value, cost, max, color, stale, platform, local, client, kind, cacheReadTokens, outputTokens }) {
+function updateRow(row, { name, subtitle, detail, value, cost, max, color, barBackground, accordionRows, stale, platform, local, client, kind, cacheReadTokens, outputTokens }) {
   const width = rowWidth(value, max);
   const isExpanded = row.classList.contains('expanded');
   row.className = `row${kind ? ` ${kind}-row` : ''}${stale ? ' stale' : ''}${local ? ' local' : ''}`;
@@ -784,14 +1266,47 @@ function updateRow(row, { name, subtitle, detail, value, cost, max, color, stale
   const detailEl = row.querySelector('.row-detail');
   detailEl.textContent = detail || '';
   detailEl.classList.toggle('hidden', !detail);
-  row.querySelector('.row-value').textContent = formatNumber(value);
+  const valueEl = row.querySelector('.row-value');
+  valueEl.textContent = formatNumber(value);
+  valueEl.dataset.motionValue = String(Number(value) || 0);
+  row.dataset.motionValue = String(Number(value) || 0);
   row.querySelector('.row-cost').textContent = formatCost(cost || 0);
   const fill = row.querySelector('.bar-fill');
-  fill.style.background = color;
-  fill.style.width = `${width}%`;
+  fill.style.background = barBackground || color;
+  applyBarScale(fill, width / 100);
 
   const accordionInner = row.querySelector('.row-accordion-inner');
-  if ((cacheReadTokens !== undefined || outputTokens !== undefined) && value > 0 && kind !== 'session') {
+  if (Array.isArray(accordionRows) && accordionRows.length > 0) {
+    const accordionSignature = JSON.stringify(accordionRows.map((tool) => [tool.name, tool.value, Math.round(tool.percent), tool.color]));
+    if (accordionInner.dataset.signature !== accordionSignature) {
+      const content = document.createElement('div');
+      content.className = 'accordion-content project-tool-breakdown';
+      for (const tool of accordionRows) {
+        const item = document.createElement('div');
+        item.className = 'accordion-row project-tool-row';
+        const label = document.createElement('div');
+        label.className = 'accordion-label';
+        const mark = document.createElement('span');
+        mark.className = 'project-tool-mark';
+        mark.style.background = tool.color;
+        const text = document.createElement('span');
+        text.textContent = tool.name;
+        const percent = document.createElement('span');
+        percent.className = 'accordion-pct';
+        percent.textContent = `${Math.round(tool.percent)}%`;
+        label.append(mark, text, percent);
+        const tokens = document.createElement('span');
+        tokens.className = 'accordion-value';
+        tokens.textContent = formatNumber(tool.value);
+        item.append(label, tokens);
+        content.append(item);
+      }
+      accordionInner.replaceChildren(content);
+      accordionInner.dataset.signature = accordionSignature;
+    }
+    row.classList.add('has-accordion');
+    if (isExpanded) row.classList.add('expanded');
+  } else if ((cacheReadTokens !== undefined || outputTokens !== undefined) && value > 0 && kind !== 'session') {
     const cacheRead = cacheReadTokens || 0;
     const output = outputTokens || 0;
     const totalTokens = value || 0;
@@ -800,6 +1315,7 @@ function updateRow(row, { name, subtitle, detail, value, cost, max, color, stale
     const hitPct = inputTokens > 0 ? Math.round((cacheRead / inputTokens) * 100) : 0;
     const missPct = inputTokens > 0 ? 100 - hitPct : 0;
     
+    delete accordionInner.dataset.signature;
     accordionInner.innerHTML = `
       <div class="accordion-content">
         <div class="accordion-row">
@@ -819,9 +1335,21 @@ function updateRow(row, { name, subtitle, detail, value, cost, max, color, stale
     row.classList.add('has-accordion');
     if (isExpanded) row.classList.add('expanded');
   } else {
-    accordionInner.innerHTML = '';
+    accordionInner.replaceChildren();
+    delete accordionInner.dataset.signature;
     row.classList.remove('has-accordion');
     row.classList.remove('expanded');
+  }
+  if (row.classList.contains('has-accordion')) {
+    if (row.tabIndex !== 0) row.tabIndex = 0;
+    setAttributeIfChanged(row, 'role', 'button');
+    setAttributeIfChanged(row, 'aria-expanded', String(row.classList.contains('expanded')));
+    setAttributeIfChanged(row, 'aria-label', `${name}, ${t('dashboard.stat.totalTokens')}: ${formatNumber(value)}, ${t('dashboard.stat.totalCost')}: ${formatCost(cost || 0)}`);
+  } else {
+    if (row.hasAttribute('tabindex')) row.removeAttribute('tabindex');
+    if (row.hasAttribute('role')) row.removeAttribute('role');
+    if (row.hasAttribute('aria-expanded')) row.removeAttribute('aria-expanded');
+    if (row.hasAttribute('aria-label')) row.removeAttribute('aria-label');
   }
 }
 
@@ -835,24 +1363,41 @@ function applyHomeListMark(mark, iconKind, color) {
   mark.style.background = color;
 }
 
-function renderRows(rows) {
-  if (rows.length === 0) {
+function renderRows(rows, { showProjectIncompleteHint = false } = {}) {
+  if (rows.length === 0 && !showProjectIncompleteHint) {
     els.breakdown.replaceChildren();
     state.rowSignature = '';
     return;
   }
   const max = Math.max(1, ...rows.map((row) => row.value));
-  const signature = `${state.breakdown}\n${rows.map((row) => row.key).join('\n')}`;
-  const existing = new Map(Array.from(els.breakdown.children).map((child) => [child.dataset.key, child]));
+  const liveMotionSnapshot = !state.periodMotionActive && !state.animateBarsFromZero
+    ? captureBreakdownMotion()
+    : null;
+  const hintText = showProjectIncompleteHint ? t('projects.incomplete') : '';
+  const signature = JSON.stringify([state.breakdown, hintText, rows.map((row) => row.key)]);
+  const children = Array.from(els.breakdown.children);
+  const existingHint = children.find((child) => child.classList.contains('project-incomplete-hint'));
+  const existing = new Map(children.filter((child) => child !== existingHint).map((child) => [child.dataset.key, child]));
   if (signature !== state.rowSignature) {
-    els.breakdown.replaceChildren(...rows.map((row) => existing.get(row.key) || rowTemplate(row)));
+    const nodes = rows.map((row) => existing.get(row.key) || rowTemplate(row));
+    if (showProjectIncompleteHint) {
+      const hint = existingHint || document.createElement('p');
+      hint.className = 'project-incomplete-hint';
+      hint.setAttribute('role', 'status');
+      hint.textContent = hintText;
+      nodes.unshift(hint);
+    }
+    els.breakdown.replaceChildren(...nodes);
     state.rowSignature = signature;
   }
-  const current = new Map(Array.from(els.breakdown.children).map((child) => [child.dataset.key, child]));
+  const current = new Map(Array.from(els.breakdown.children)
+    .filter((child) => !child.classList.contains('project-incomplete-hint'))
+    .map((child) => [child.dataset.key, child]));
   for (const rowData of rows) {
     const row = current.get(rowData.key);
     if (row) updateRow(row, { ...rowData, max });
   }
+  if (liveMotionSnapshot) animateBreakdownFrom(liveMotionSnapshot, { duration: 600 });
 }
 
 function deviceLabel(device) {
@@ -916,17 +1461,29 @@ function sessionRowsForPeriod(period) {
     clientColors,
     modelColor,
     stableColor,
-    fallbackColors: fallbackModelColors
+    fallbackColors: fallbackModelColors,
+    archivedLabel: t('session.archived')
   });
   if (rows.length > 0) return rows.sort((a, b) => b.sortTime - a.sortTime || b.value - a.value || b.cost - a.cost || a.name.localeCompare(b.name));
   if (Number(period?.totalTokens || 0) === 0) return [];
   return modelRowsForPeriod(period);
 }
 
+function projectRowsForPeriod(period) {
+  return projectRowsApi.projectRowsForPeriod(period, {
+    clientLabels,
+    clientColors,
+    stableColor,
+    fallbackColors: fallbackModelColors,
+    unknownClientLabel: t('projects.unknownTool')
+  });
+}
+
 function rowsForPeriod(period) {
   if (state.breakdown === 'device') return deviceRowsForPeriod();
   if (state.breakdown === 'model') return modelRowsForPeriod(period);
   if (state.breakdown === 'session') return sessionRowsForPeriod(period);
+  if (state.breakdown === 'project') return projectRowsForPeriod(period);
   return toolRowsForPeriod(period);
 }
 
@@ -946,7 +1503,8 @@ function effectiveViewDisplayOrderValue() {
 
 function availableBreakdownIds() {
   const order = ['home', baseBreakdownOrder[0], 'status', 'trends', ...baseBreakdownOrder.slice(1)];
-  const available = state.settings?.historyEnabled === false ? order.filter((id) => id !== 'trends') : order;
+  let available = state.settings?.historyEnabled === false ? order.filter((id) => id !== 'trends') : order;
+  if (state.settings?.projectsEnabled === false) available = available.filter((id) => id !== 'project');
   return limitViewAvailable() ? [...available, 'limits'] : available;
 }
 
@@ -955,16 +1513,20 @@ function visibleBreakdownOrder() {
     views: VIEW_DISPLAY_OPTIONS,
     orderValue: effectiveViewDisplayOrderValue(),
     hiddenValue: state.settings?.hiddenViews,
-    availableIds: availableBreakdownIds()
+    availableIds: availableBreakdownIds(),
+    includeIds: directBreakdownOverride ? [directBreakdownOverride] : []
   });
 }
 
 function ensureBreakdownVisible() {
+  const availableIds = availableBreakdownIds();
+  if (directBreakdownOverride === state.breakdown && availableIds.includes(state.breakdown)) return;
+  directBreakdownOverride = null;
   const next = viewDisplayPreferencesApi.preferredViewId({
     views: VIEW_DISPLAY_OPTIONS,
     orderValue: effectiveViewDisplayOrderValue(),
     hiddenValue: state.settings?.hiddenViews,
-    availableIds: availableBreakdownIds(),
+    availableIds,
     currentId: state.breakdown
   });
   if (next !== state.breakdown) setBreakdown(next);
@@ -1014,8 +1576,9 @@ function limitProviderMeta(provider, provenance = null) {
 }
 
 function limitProviderPlan(provider) {
+  if (provider?.status && provider.status !== 'ok' && !provider.stale) return limitStatusLabel(provider.status, false);
   const label = String(provider?.accountLabel || '').trim();
-  if (label) return label;
+  if (label) return limitProviderPresentationApi.limitProviderDisplayLabel(label);
   return provider?.status && provider.status !== 'ok' ? limitStatusLabel(provider.status, false) : '';
 }
 
@@ -1037,6 +1600,15 @@ function enabledLimitProviderSet() {
   return new Set(configuredLimitProviderSelection());
 }
 
+function limitProviderSelectionIncluding(providerName) {
+  const selected = new Set(configuredLimitProviderSelection());
+  selected.add(providerName);
+  return LIMIT_PROVIDERS
+    .map((provider) => provider.id)
+    .filter((id) => selected.has(id))
+    .join(',');
+}
+
 function missingLimitProviderStatus() {
   return state.mode === 'sync' || String(state.settings?.hubUrl || '').trim() ? 'noSyncedData' : 'notConfigured';
 }
@@ -1055,15 +1627,15 @@ function formatLimitAmount(value) {
   return `$${number.toFixed(2)}`;
 }
 
-// "remaining/total" count for windows that expose absolute units (Kiro credits).
-// Trims trailing zeros so 49.91/50 and 18/50 both read cleanly. Empty when the
-// window has no used/limit pair.
-function formatLimitCount(window) {
+// Absolute count for windows that expose units (credits). It follows the same
+// display mode as percent bars: remaining/total in quota mode, used/total in
+// used mode.
+function formatLimitCount(window, showUsed = false) {
   const used = Number(window?.used);
   const limit = Number(window?.limit);
   if (!Number.isFinite(used) || !Number.isFinite(limit) || limit <= 0) return '';
   const trim = (n) => Number(Math.max(0, n).toFixed(2)).toString();
-  return `${trim(limit - used)}/${trim(limit)}`;
+  return `${trim(showUsed ? used : limit - used)}/${trim(limit)}`;
 }
 
 // One-line Overage value: "12.5 credits · $3.20" (credits used, then est. cost).
@@ -1085,24 +1657,29 @@ function formatCodexResetCreditsValue(resetCredits) {
   return `${count} reset${count === 1 ? '' : 's'}`;
 }
 
-function formatCodexResetCreditsExpiry(resetCredits) {
-  const date = resetCredits?.nextExpiresAt ? new Date(resetCredits.nextExpiresAt) : null;
-  if (!date || Number.isNaN(date.getTime())) return '';
-  const diffMs = date.getTime() - Date.now();
-  return diffMs <= 0 ? 'Next expires now' : `Next expires in ${formatDuration(diffMs)}`;
-}
-
 function codexResetCreditExpirationDates(resetCredits) {
   const values = Array.isArray(resetCredits?.expirations) ? resetCredits.expirations : [];
-  return values
+  const dates = values
     .map((value) => new Date(value))
     .filter((date) => !Number.isNaN(date.getTime()))
     .sort((a, b) => a.getTime() - b.getTime());
+  if (dates.length > 0) return dates;
+  const fallback = resetCredits?.nextExpiresAt ? new Date(resetCredits.nextExpiresAt) : null;
+  return fallback && !Number.isNaN(fallback.getTime()) ? [fallback] : [];
 }
 
 function codexResetCreditExpiryLabel(date) {
   const diffMs = date.getTime() - Date.now();
+  return diffMs <= 0 ? 'now' : formatDuration(diffMs);
+}
+
+function codexResetCreditExpiryDetailLabel(date) {
+  const diffMs = date.getTime() - Date.now();
   return diffMs <= 0 ? 'Expires now' : `Expires in ${formatDuration(diffMs)}`;
+}
+
+function codexResetCreditExpiryDateLabel(date) {
+  return new Intl.DateTimeFormat(currentLocale(), { month: 'numeric', day: 'numeric' }).format(date);
 }
 
 function resetCreditsTooltipShouldHoldRender() {
@@ -1116,10 +1693,22 @@ function flushPendingResetCreditsTooltipRender() {
   renderLimits();
 }
 
+function codexSwitchPopoverShouldHoldRender() {
+  if (!state.codexSwitchPopoverActive || !els.limitsPanel) return false;
+  return Boolean(els.limitsPanel.querySelector(
+    '.limit-account-switch-zone:hover, .limit-account-switch-zone:focus-within, .limit-account-active-zone:hover, .limit-account-active-zone:focus-within'
+  ));
+}
+
+function flushPendingCodexSwitchPopoverRender() {
+  if (!state.codexSwitchPopoverRenderPending || state.breakdown !== 'limits') return;
+  state.codexSwitchPopoverRenderPending = false;
+  renderLimits();
+}
+
 function codexResetCreditsNode(resetCredits) {
   const valueText = formatCodexResetCreditsValue(resetCredits);
   if (!valueText) return null;
-  const expiryText = formatCodexResetCreditsExpiry(resetCredits);
   const expirationDates = codexResetCreditExpirationDates(resetCredits);
   const item = document.createElement('div');
   item.className = 'limit-window limit-window-wide limit-window-note limit-reset-credits';
@@ -1129,13 +1718,28 @@ function codexResetCreditsNode(resetCredits) {
   value.className = 'limit-reset-credits-value';
   value.textContent = valueText;
   line.append(value);
-  if (expiryText) {
+  if (expirationDates.length > 0) {
     const expiryGroup = document.createElement('span');
     expiryGroup.className = 'limit-reset-credits-expiry-group';
-    const expiry = document.createElement('span');
-    expiry.className = 'limit-reset-credits-expiry';
-    expiry.textContent = expiryText;
-    expiryGroup.append(expiry);
+    const timeline = document.createElement('span');
+    timeline.className = 'limit-reset-credits-timeline';
+    const summaryParts = expirationDates.slice(0, 3).map(codexResetCreditExpiryLabel);
+    const hiddenExpirationCount = expirationDates.length - summaryParts.length;
+    if (hiddenExpirationCount > 0) summaryParts.push(`+${hiddenExpirationCount}`);
+    summaryParts.forEach((text, index) => {
+      const time = document.createElement('span');
+      time.className = 'limit-reset-credits-time';
+      if (index > 0) {
+        const separator = document.createElement('span');
+        separator.className = 'limit-reset-credits-separator';
+        separator.textContent = '·';
+        separator.setAttribute('aria-hidden', 'true');
+        time.append(separator);
+      }
+      time.append(document.createTextNode(text));
+      timeline.append(time);
+    });
+    expiryGroup.append(timeline);
     if (expirationDates.length > 1) {
       const infoWrap = document.createElement('span');
       infoWrap.className = 'limit-reset-credits-info-wrap';
@@ -1144,15 +1748,15 @@ function codexResetCreditsNode(resetCredits) {
       info.className = 'limit-reset-credits-info';
       info.textContent = 'i';
       info.tabIndex = 0;
-      info.setAttribute('aria-label', expirationDates.map((date, index) => `Reset ${index + 1}: ${codexResetCreditExpiryLabel(date)}`).join(', '));
+      info.setAttribute('aria-label', expirationDates.map((date, index) => `Reset ${index + 1}: ${codexResetCreditExpiryDetailLabel(date)}`).join(', '));
       const tooltip = document.createElement('span');
       tooltip.className = 'limit-reset-credits-tooltip';
       tooltip.setAttribute('role', 'tooltip');
-      expirationDates.forEach((date, index) => {
+      expirationDates.forEach((date) => {
         const row = document.createElement('span');
         row.className = 'limit-reset-credit-detail';
         const label = document.createElement('span');
-        label.textContent = `Reset ${index + 1}`;
+        label.textContent = codexResetCreditExpiryDateLabel(date);
         const tooltipExpiry = document.createElement('span');
         tooltipExpiry.textContent = codexResetCreditExpiryLabel(date);
         row.append(label, tooltipExpiry);
@@ -1180,7 +1784,7 @@ function codexResetCreditsNode(resetCredits) {
     line.append(expiryGroup);
   }
   item.append(line);
-  item.setAttribute('aria-label', ['Reset credits', valueText, expiryText].filter(Boolean).join(', '));
+  item.setAttribute('aria-label', ['Reset credits', valueText, expirationDates.map(codexResetCreditExpiryDetailLabel).join(', ')].filter(Boolean).join(', '));
   return item;
 }
 
@@ -1191,6 +1795,12 @@ function formatMoney(value, currency) {
   if (!Number.isFinite(number)) return '';
   const symbol = CURRENCY_SYMBOLS[String(currency || '').toUpperCase()] || '$';
   return `${symbol}${number.toFixed(2)}`;
+}
+
+function optionalFiniteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function formatLimitWindowValue(window, fillPercent, hasPercent, showUsed) {
@@ -1206,6 +1816,7 @@ function formatLimitWindowValue(window, fillPercent, hasPercent, showUsed) {
 }
 
 function formatHomeLimitWindowValue(window, showUsed) {
+  if (window?.planStatus === 'expired') return t('limits.mimo.planExpired');
   if (window?.kind === 'balance') {
     return `${formatMoney(window.amount, window.currency)} left`;
   }
@@ -1221,6 +1832,45 @@ function balanceRemainingWindow(balance) {
   return { remainingPercent };
 }
 
+function mimoTokenPlanWindowFromBalance(balance) {
+  if (!balance) return null;
+  if (balance.planStatus === 'expired') return null;
+  const used = optionalFiniteNumber(balance.planUsed);
+  const limit = optionalFiniteNumber(balance.planLimit);
+  const percent = optionalFiniteNumber(balance.planPercent);
+  const hasUsed = used !== null;
+  const hasLimit = limit !== null;
+  const hasPercent = percent !== null;
+  if (!hasUsed && !hasLimit && !hasPercent) return null;
+  const resolvedPercent = hasPercent
+    ? Math.max(0, Math.min(100, percent))
+    : (hasUsed && hasLimit && limit > 0 ? Math.max(0, Math.min(100, (used / limit) * 100)) : null);
+  return {
+    kind: 'billing',
+    label: 'Token Plan',
+    used: hasUsed ? used : null,
+    limit: hasLimit ? limit : null,
+    remaining: hasUsed && hasLimit ? Math.max(0, limit - used) : null,
+    usedPercent: resolvedPercent,
+    remainingPercent: resolvedPercent == null ? null : Math.max(0, Math.min(100, 100 - resolvedPercent)),
+    showMeter: true
+  };
+}
+
+function limitMeterNode(color, percent, tone = 1) {
+  const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  const meter = document.createElement('div');
+  meter.className = 'limit-meter';
+  meter.style.background = colorWithAlpha(color, 0.16);
+  const fill = document.createElement('div');
+  fill.className = 'limit-meter-fill';
+  applyBarScale(fill, safePercent / 100);
+  fill.style.background = color;
+  fill.style.opacity = tone;
+  meter.append(fill);
+  return meter;
+}
+
 function limitWindowNode(label, window, color, tone = 1, valueOverride = null, detailText = '') {
   const remaining = Number(window?.remainingPercent);
   const used = Number(window?.usedPercent);
@@ -1231,7 +1881,6 @@ function limitWindowNode(label, window, color, tone = 1, valueOverride = null, d
   // windows honour the used-mode flip.
   const showUsed = Boolean(state.settings?.showLimitUsed) && valueOverride == null;
   const fillPercent = limitFillPercent(remaining, used, showUsed);
-  const safePercent = Math.max(0, Math.min(100, fillPercent));
   const item = document.createElement('div');
   item.className = 'limit-window';
   const text = document.createElement('div');
@@ -1241,15 +1890,7 @@ function limitWindowNode(label, window, color, tone = 1, valueOverride = null, d
   const value = document.createElement('span');
   value.textContent = valueOverride != null ? valueOverride : formatLimitWindowValue(window, fillPercent, hasPercent, showUsed);
   text.append(name, value);
-  const meter = document.createElement('div');
-  meter.className = 'limit-meter';
-  meter.style.background = colorWithAlpha(color, 0.16);
-  const fill = document.createElement('div');
-  fill.className = 'limit-meter-fill';
-  fill.style.width = `${safePercent}%`;
-  fill.style.background = color;
-  fill.style.opacity = tone;
-  meter.append(fill);
+  const meter = limitMeterNode(color, fillPercent, tone);
   const reset = document.createElement('div');
   reset.className = 'limit-reset';
   const resetText = formatReset(window?.resetsAt) || window?.resetDescription || '';
@@ -1297,6 +1938,141 @@ function renderLimitProviderMark(id, color) {
   return mark;
 }
 
+function codexSwitchAccountForProvider(provider) {
+  if (!provider || provider.provider !== 'codex') return null;
+  if (!provider.accountKey && !provider.accountEmail) return null;
+  return (state.settings?.codexManagedAccounts || []).find((account) => {
+    if (account.enabled === false) return false;
+    return accountIdentityApi.codexAccountMatchesProvider(account, provider);
+  }) || null;
+}
+
+function codexProviderMatchesProvider(left, right) {
+  if (!left || !right || left.provider !== 'codex' || right.provider !== 'codex') return false;
+  const leftKey = String(left.accountKey || '').trim();
+  const rightKey = String(right.accountKey || '').trim();
+  if (leftKey && rightKey && leftKey === rightKey) return true;
+  const leftEmail = String(left.accountEmail || '').trim().toLowerCase();
+  const rightEmail = String(right.accountEmail || '').trim().toLowerCase();
+  return Boolean(leftEmail && rightEmail && leftEmail === rightEmail);
+}
+
+function codexActiveAccountMatchesProvider(provider) {
+  return accountIdentityApi.codexAccountMatchesProvider(state.codexActiveAccount, provider);
+}
+
+function codexAccountsShareIdentity(left, right) {
+  if (!left || !right) return false;
+  const leftKey = String(left.accountKey || '').trim();
+  const rightKey = String(right.accountKey || '').trim();
+  if (leftKey && rightKey) return leftKey === rightKey;
+  const leftEmail = String(left.email || left.accountEmail || '').trim().toLowerCase();
+  const rightEmail = String(right.email || right.accountEmail || '').trim().toLowerCase();
+  return Boolean(leftEmail && rightEmail && leftEmail === rightEmail);
+}
+
+// The account THIS device's Codex app/CLI is signed into is a purely local fact:
+// the local device's own record for it carries a live (non-managed) sourceDetail.
+// Read it from the local device's RAW limits, not the cross-device aggregate:
+// aggregateLimits() keeps one record per account by freshness, so after sync the
+// selected codex row can belong to a remote device signed into a *different*
+// account. Reading the aggregate would move the active marker onto that remote
+// login, or drop it entirely when every selected row is 'managed'. Legacy stats
+// without per-device rows fall back to the aggregate (localDeviceLimitsProviders
+// returns null there), mirroring localProviderStatus().
+function localLiveCodexProvider() {
+  return accountIdentityApi.localLiveCodexProvider(state.stats, state.settings?.deviceId || '');
+}
+
+function codexActiveAccountFromStats() {
+  const provider = localLiveCodexProvider();
+  if (!provider) return null;
+  return {
+    id: codexSwitchAccountForProvider(provider)?.id || '',
+    email: provider.accountEmail || '',
+    accountKey: provider.accountKey || '',
+    accountLabel: provider.accountLabel || ''
+  };
+}
+
+function clearCodexPendingActiveAccount() {
+  if (state.codexPendingActiveAccountTimer) {
+    clearTimeout(state.codexPendingActiveAccountTimer);
+    state.codexPendingActiveAccountTimer = null;
+  }
+  state.codexPendingActiveAccount = null;
+  state.codexPendingActiveAccountUntil = 0;
+}
+
+function scheduleCodexPendingActiveAccountExpiry() {
+  if (state.codexPendingActiveAccountTimer) clearTimeout(state.codexPendingActiveAccountTimer);
+  const delay = Math.max(0, state.codexPendingActiveAccountUntil - Date.now());
+  state.codexPendingActiveAccountTimer = setTimeout(() => {
+    state.codexPendingActiveAccountTimer = null;
+    applyCodexActiveAccountFromStats();
+    renderLimits();
+    renderCodexAccounts();
+    renderSettingsSummaries();
+  }, delay);
+}
+
+function setCodexPendingActiveAccount(account) {
+  if (!account) {
+    clearCodexPendingActiveAccount();
+    return;
+  }
+  state.codexPendingActiveAccount = account;
+  state.codexPendingActiveAccountUntil = Date.now() + CODEX_PENDING_ACTIVE_GRACE_MS;
+  scheduleCodexPendingActiveAccountExpiry();
+}
+
+function applyCodexActiveAccountFromStats() {
+  const activeAccount = codexActiveAccountFromStats();
+  if (state.codexPendingActiveAccount) {
+    const pendingAccount = state.codexPendingActiveAccount;
+    if (activeAccount && codexAccountsShareIdentity(pendingAccount, activeAccount)) {
+      clearCodexPendingActiveAccount();
+      state.codexActiveAccount = activeAccount;
+      return;
+    }
+    if (Date.now() < state.codexPendingActiveAccountUntil) {
+      state.codexActiveAccount = pendingAccount;
+      return;
+    }
+    clearCodexPendingActiveAccount();
+  }
+  state.codexActiveAccount = activeAccount;
+}
+
+function applyCodexAccountLimitsRefresh(providers) {
+  const refreshed = (providers || []).filter((provider) => provider?.provider === 'codex');
+  if (!refreshed.length || !state.stats?.limits) return;
+  const used = new Set();
+  const existingProviders = state.stats.limits.providers || [];
+  const nextProviders = existingProviders.map((provider) => {
+    if (provider?.provider !== 'codex') return provider;
+    const index = refreshed.findIndex((candidate, candidateIndex) => (
+      !used.has(candidateIndex) && codexProviderMatchesProvider(candidate, provider)
+    ));
+    if (index === -1) return provider;
+    used.add(index);
+    return refreshed[index];
+  });
+  refreshed.forEach((provider, index) => {
+    if (!used.has(index)) nextProviders.push(provider);
+  });
+  state.stats = {
+    ...state.stats,
+    limits: {
+      ...state.stats.limits,
+      providers: nextProviders
+    }
+  };
+  applyCodexActiveAccountFromStats();
+  renderLimits();
+  maybeUpdateBarsIcon();
+}
+
 function renderLimitProviderHead(id, label, provider, color, options = {}) {
   const head = document.createElement('div');
   head.className = 'limit-head';
@@ -1308,20 +2084,127 @@ function renderLimitProviderHead(id, label, provider, color, options = {}) {
   const title = document.createElement('span');
   title.className = 'limit-name-title';
   title.textContent = options.title || label;
-  name.append(title);
   const provenance = limitProviderProvenance(provider);
-  // Active-account marker — the local Codex login this device's app is signed
-  // into (only shown among several accounts). It hugs the email because "Active"
-  // describes the identity, not the "Updated" time; the email ellipsizes first
-  // so the badge never gets squeezed. Stays English like the panel's other
-  // labels (Session/Weekly/Updated). Off by default — gated on showActiveAccount.
-  if (state.settings?.showActiveAccount && options.accountTitle && limitProviderPresentationApi.isCodexLiveAccount(provider, provenance)) {
+  // The ✓ marks the account THIS device's Codex is signed into
+  // (state.codexActiveAccount, derived locally by codexActiveAccountFromStats).
+  // It only disambiguates rows in the multi-account group, so it's gated on
+  // showActiveBadge. Never re-derive "live" from the row being rendered — in
+  // sync mode that row can be a remote device's record for a different account,
+  // which would move the ✓ onto the wrong one.
+  const activeCodexAccount = options.showActiveBadge && codexActiveAccountMatchesProvider(provider);
+  const switchAccount = options.allowSystemSwitch && !activeCodexAccount ? codexSwitchAccountForProvider(provider) : null;
+  if (switchAccount && window.tokenMonitor?.codex?.switchSystemAccount) {
+    const switchZone = document.createElement('span');
+    const switchPopover = document.createElement('span');
+    const switchButton = document.createElement('button');
+    const switching = state.codexSystemSwitchingAccountId === switchAccount.id;
+    const failed = state.codexSystemSwitchErrorAccountId === switchAccount.id && state.codexSystemSwitchError;
+    switchZone.className = 'limit-account-switch-zone';
+    switchZone.classList.toggle('has-opened', state.codexSwitchPopoverHasOpened);
+    switchZone.classList.toggle('is-switching', Boolean(switching));
+    switchZone.classList.toggle('is-error', Boolean(failed));
+    switchPopover.className = 'limit-account-switch-popover';
+    switchButton.type = 'button';
+    switchButton.className = 'limit-account-switch-button';
+    switchButton.disabled = Boolean(state.codexSystemSwitchingAccountId);
+    switchButton.title = failed || t('limits.codex.switchAccountTitle', {
+      account: switchAccount.email || t('settings.codex.unnamedAccount')
+    });
+    switchButton.setAttribute('aria-label', switchButton.title);
+    switchButton.textContent = switching
+      ? t('limits.codex.switching')
+      : failed
+        ? t('limits.codex.switchFailedShort')
+        : t('limits.codex.switchAccount');
+    const markCodexSwitchPopoverOpened = () => {
+      state.codexSwitchPopoverHasOpened = true;
+      state.codexSwitchPopoverActive = true;
+      switchZone.classList.add('has-opened');
+    };
+    const releaseCodexSwitchPopover = () => {
+      requestAnimationFrame(() => {
+        if (switchZone.matches(':hover, :focus-within')) return;
+        state.codexSwitchPopoverActive = false;
+        flushPendingCodexSwitchPopoverRender();
+      });
+    };
+    switchZone.addEventListener('pointerenter', markCodexSwitchPopoverOpened);
+    switchZone.addEventListener('focusin', markCodexSwitchPopoverOpened);
+    switchZone.addEventListener('pointerleave', releaseCodexSwitchPopover);
+    switchZone.addEventListener('focusout', releaseCodexSwitchPopover);
+    switchButton.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (state.codexSystemSwitchingAccountId) return;
+      state.codexSystemSwitchingAccountId = switchAccount.id;
+      state.codexSystemSwitchErrorAccountId = '';
+      state.codexSystemSwitchError = '';
+      state.codexSwitchPopoverActive = false;
+      renderLimits();
+      try {
+        const result = await window.tokenMonitor.codex.switchSystemAccount(switchAccount.id);
+        if (!result?.ok) {
+          const message = result?.error || t('limits.codex.switchFailed');
+          state.codexSystemSwitchErrorAccountId = switchAccount.id;
+          state.codexSystemSwitchError = message;
+          state.codexAccountError = message;
+        } else {
+          state.codexAccountError = '';
+          state.settings.codexManagedAccounts = result.accounts || state.settings.codexManagedAccounts || [];
+          setCodexPendingActiveAccount(result.activeAccount || null);
+          state.codexActiveAccount = result.activeAccount;
+          renderLimits();
+          window.tokenMonitor.codex.refreshAccountLimits(switchAccount.id).then((refreshResult) => {
+            if (refreshResult?.ok) applyCodexAccountLimitsRefresh(refreshResult.providers || []);
+            else if (refreshResult?.error) console.log(`[codex] refresh account limits failed: ${refreshResult.error}`);
+          }).catch((refreshError) => {
+            console.log(`[codex] refresh account limits failed: ${refreshError?.message || refreshError}`);
+          });
+        }
+      } catch (error) {
+        const message = error?.message || t('limits.codex.switchFailed');
+        state.codexSystemSwitchErrorAccountId = switchAccount.id;
+        state.codexSystemSwitchError = message;
+        state.codexAccountError = message;
+      } finally {
+        state.codexSystemSwitchingAccountId = '';
+        renderLimits();
+        renderCodexAccounts();
+        renderSettingsSummaries();
+      }
+    });
+    switchPopover.append(switchButton);
+    switchZone.append(title, switchPopover);
+    name.append(switchZone);
+  } else if (activeCodexAccount) {
+    const activeZone = document.createElement('span');
     const badge = document.createElement('span');
+    const activePopover = document.createElement('span');
+    const activeHint = t('limits.codex.activeAccountHint');
+    activeZone.className = 'limit-account-active-zone';
+    activeZone.tabIndex = 0;
+    activeZone.setAttribute('aria-label', activeHint);
     badge.className = 'limit-live-badge';
-    badge.textContent = 'Active';
-    badge.title = 'Signed in to Codex on this device';
-    badge.setAttribute('aria-label', 'Signed in to Codex on this device');
-    name.append(badge);
+    badge.textContent = '\u2713';
+    activePopover.className = 'limit-account-active-popover';
+    activePopover.textContent = activeHint;
+    const markCodexActiveHintOpened = () => {
+      state.codexSwitchPopoverActive = true;
+    };
+    const releaseCodexActiveHint = () => {
+      requestAnimationFrame(() => {
+        if (activeZone.matches(':hover, :focus-within')) return;
+        state.codexSwitchPopoverActive = false;
+        flushPendingCodexSwitchPopoverRender();
+      });
+    };
+    activeZone.addEventListener('pointerenter', markCodexActiveHintOpened);
+    activeZone.addEventListener('focusin', markCodexActiveHintOpened);
+    activeZone.addEventListener('pointerleave', releaseCodexActiveHint);
+    activeZone.addEventListener('focusout', releaseCodexActiveHint);
+    activeZone.append(title, badge, activePopover);
+    name.append(activeZone);
+  } else {
+    name.append(title);
   }
   titleBlock.append(name);
   // The multi-account group header has no quota of its own, and its accounts can
@@ -1352,8 +2235,16 @@ function renderProviderWindows(provider, color) {
   if (provider.provider === 'codex') {
     const session = windowForKind(provider, 'session');
     const weekly = windowForKind(provider, 'weekly');
-    if (session) windows.append(limitWindowNode(session.label || 'Session', session, color, 0.95));
-    if (weekly) windows.append(limitWindowNode(weekly.label || 'Weekly', weekly, color, 0.68));
+    if (session) {
+      const sessionNode = limitWindowNode(session.label || 'Session', session, color, 0.95);
+      if (!weekly) sessionNode.classList.add('limit-window-wide');
+      windows.append(sessionNode);
+    }
+    if (weekly) {
+      const weeklyNode = limitWindowNode(weekly.label || 'Weekly', weekly, color, 0.68);
+      if (!session) weeklyNode.classList.add('limit-window-wide');
+      windows.append(weeklyNode);
+    }
     const resetNode = codexResetCreditsNode(provider.resetCredits);
     if (resetNode) windows.append(resetNode);
   } else if (provider.provider === 'cursor') {
@@ -1423,6 +2314,38 @@ function renderProviderWindows(provider, color) {
         windows.append(spendNode);
       }
     }
+  } else if (provider.provider === 'mimo') {
+    windows.classList.add('limit-windows-mimo');
+    const balance = provider.balance || null;
+    const tokenPlan = windowForKind(provider, 'billing') || mimoTokenPlanWindowFromBalance(balance);
+    if (tokenPlan) {
+      const node = limitWindowNode(tokenPlan.label || 'Token Plan', tokenPlan, color, 0.68);
+      node.classList.add('limit-window-wide');
+      windows.append(node);
+    } else if (balance?.planStatus === 'expired') {
+      const node = limitWindowNode('Token Plan', { showMeter: false }, color, 0.68, t('limits.mimo.planExpired'));
+      node.classList.add('limit-window-wide', 'limit-window-no-reset');
+      windows.append(node);
+    }
+    const amount = optionalFiniteNumber(balance?.amount);
+    const giftBalance = optionalFiniteNumber(balance?.giftBalance);
+    const cashBalance = optionalFiniteNumber(balance?.cashBalance);
+    if (amount !== null || giftBalance !== null || cashBalance !== null) {
+      const detailParts = [];
+      if (giftBalance !== null) detailParts.push(`Gift ${formatMoney(giftBalance, balance.currency)}`);
+      if (cashBalance !== null) detailParts.push(`Cash ${formatMoney(cashBalance, balance.currency)}`);
+      const balanceText = formatMoney(amount, balance.currency) || '—';
+      const balanceNode = limitWindowNode(
+        'Balance',
+        { showMeter: false },
+        color,
+        0.68,
+        balanceText,
+        detailParts.join(' · ')
+      );
+      balanceNode.classList.add('limit-window-wide', 'limit-window-no-reset');
+      windows.append(balanceNode);
+    }
   } else if (provider.provider === 'grok') {
     // Grok exposes a single Monthly billing window (no session/weekly). Render it
     // full-width so it doesn't share a row with an empty placeholder. This mirrors
@@ -1442,6 +2365,36 @@ function renderProviderWindows(provider, color) {
       node.classList.add('limit-window-wide');
       windows.append(node);
     }
+  } else if (provider.provider === 'zai' || provider.provider === 'zaiteam') {
+    const fiveHour = windowForKind(provider, 'session');
+    const weekly = windowForKind(provider, 'weekly');
+    const mcp = windowForKind(provider, 'billing');
+    if (fiveHour) {
+      const fiveHourNode = limitWindowNode('5-hour', fiveHour, color, 0.95);
+      if (!weekly) fiveHourNode.classList.add('limit-window-wide');
+      windows.append(fiveHourNode);
+    }
+    if (weekly) windows.append(limitWindowNode('Weekly', weekly, color, 0.68));
+    if (mcp) {
+      const mcpNode = limitWindowNode('MCP', mcp, color, 0.68);
+      mcpNode.classList.add('limit-window-wide');
+      windows.append(mcpNode);
+    }
+  } else if (provider.provider === 'volcengine') {
+    const session = windowForKind(provider, 'session');
+    const weekly = windowForKind(provider, 'weekly');
+    const monthly = windowForKind(provider, 'billing');
+    if (session) {
+      const sessionNode = limitWindowNode(session.label || '5-hour', session, color, 0.95);
+      if (!weekly && !monthly && session.label) sessionNode.classList.add('limit-window-wide');
+      windows.append(sessionNode);
+    }
+    if (weekly) windows.append(limitWindowNode('Weekly', weekly, color, 0.68));
+    if (monthly) {
+      const monthlyNode = limitWindowNode('Monthly', monthly, color, 0.68);
+      monthlyNode.classList.add('limit-window-wide');
+      windows.append(monthlyNode);
+    }
   } else if (provider.provider === 'kiro') {
     // Kiro exposes monthly credits (plus an optional bonus pool), both billing
     // windows. Render them full-width like Copilot's quota windows.
@@ -1455,11 +2408,42 @@ function renderProviderWindows(provider, color) {
         node.classList.add('limit-window-wide', 'limit-window-no-reset');
         windows.append(node);
       } else {
-        const node = limitWindowNode(billing?.label || 'Credits', billing, color, 0.68, null, formatLimitCount(billing));
+        const node = limitWindowNode(
+          billing?.label || 'Credits',
+          billing,
+          color,
+          0.68,
+          null,
+          formatLimitCount(billing, Boolean(state.settings?.showLimitUsed))
+        );
         node.classList.add('limit-window-wide');
         windows.append(node);
       }
     }
+  } else if (provider.provider === 'qoder') {
+    windows.classList.add('limit-windows-qoder');
+    const credits = windowForKind(provider, 'billing');
+    if (credits) {
+      const node = limitWindowNode(
+        credits?.label || 'Credits',
+        credits,
+        color,
+        0.68,
+        null,
+        formatLimitCount(credits, Boolean(state.settings?.showLimitUsed))
+      );
+      node.classList.add('limit-window-wide');
+      windows.append(node);
+    }
+  } else if (provider.provider === 'ollama') {
+    const session = windowForKind(provider, 'session');
+    const weekly = windowForKind(provider, 'weekly');
+    if (session) {
+      const node = limitWindowNode('Session', session, color, 0.95);
+      if (!weekly) node.classList.add('limit-window-wide');
+      windows.append(node);
+    }
+    if (weekly) windows.append(limitWindowNode('Weekly', weekly, color, 0.68));
   } else if (provider.provider === 'claude') {
     // Claude usually shows session + one all-models weekly, but can carry a second
     // model-scoped weekly (the temporary "Fable only" promo cap). Render every
@@ -1479,7 +2463,7 @@ function renderProviderWindows(provider, color) {
     // Default: render only the windows the provider actually has. Providers
     // that only expose a single window shouldn't leave a half-empty bar next to
     // the real one. (Grok is handled above; this branch covers minimax's
-    // 5h session + weekly pair and any future session/weekly provider.)
+    // session + weekly pair and any future session/weekly provider.)
     const session = windowForKind(provider, 'session');
     const weekly = windowForKind(provider, 'weekly');
     if (session) windows.append(limitWindowNode(session.label || 'Session', session, color, 0.95));
@@ -1503,7 +2487,7 @@ function renderLimitProviderRow(id, label, provider, color, options = {}) {
 
 function codexAccountTitle(provider, index) {
   const email = String(provider?.accountEmail || '').trim();
-  if (email) return email;
+  if (email) return state.settings?.maskLimitAccountEmails ? accountIdentityApi.maskEmailAddress(email) : email;
   // Never fall back to the plan label here — "Plus" as a title reads like an
   // account name. The plan still shows on the right via limitProviderPlan().
   return `Account ${index + 1}`;
@@ -1521,6 +2505,39 @@ function renderCodexAccountGroup(label, providers, color) {
   accountList.className = 'limit-account-list';
   providers.forEach((provider, index) => {
     accountList.append(renderLimitProviderRow('codex', codexAccountTitle(provider, index), provider, color, {
+      accountRow: true,
+      accountTitle: true,
+      allowSystemSwitch: true,
+      showActiveBadge: true,
+      showIcon: false
+    }));
+  });
+  row.append(head, accountList);
+  return row;
+}
+
+function mimoAccountTitle(provider, index) {
+  const email = String(provider?.accountEmail || '').trim();
+  if (email) return state.settings?.maskLimitAccountEmails ? accountIdentityApi.maskEmailAddress(email) : email;
+  return `Account ${index + 1}`;
+}
+
+function mimoSettingsAccountTitle(account, index) {
+  return String(account?.accountEmail || '').trim() || `Account ${index + 1}`;
+}
+
+function renderMimoAccountGroup(label, providers, color) {
+  const row = document.createElement('div');
+  row.className = `limit-row limit-row-group${providers.some((provider) => provider.stale) ? ' stale' : ''}`;
+  const groupProvider = { provider: 'mimo', status: 'ok', windows: [] };
+  const head = renderLimitProviderHead('mimo', label, groupProvider, color, {
+    planText: `${providers.length} accounts`,
+    hideMeta: true
+  });
+  const accountList = document.createElement('div');
+  accountList.className = 'limit-account-list';
+  providers.forEach((provider, index) => {
+    accountList.append(renderLimitProviderRow('mimo', mimoAccountTitle(provider, index), provider, color, {
       accountRow: true,
       accountTitle: true,
       showIcon: false
@@ -1552,11 +2569,15 @@ function renderOpenCodeAccountGroup(label, providers, color) {
 
 function renderLimits() {
   if (!els.limitsPanel) return;
-  if (resetCreditsTooltipShouldHoldRender()) {
-    state.resetCreditsTooltipRenderPending = true;
+  const holdResetCreditsTooltipRender = resetCreditsTooltipShouldHoldRender();
+  const holdCodexSwitchPopoverRender = codexSwitchPopoverShouldHoldRender();
+  if (holdResetCreditsTooltipRender || holdCodexSwitchPopoverRender) {
+    if (holdResetCreditsTooltipRender) state.resetCreditsTooltipRenderPending = true;
+    if (holdCodexSwitchPopoverRender) state.codexSwitchPopoverRenderPending = true;
     return;
   }
   state.resetCreditsTooltipRenderPending = false;
+  state.codexSwitchPopoverRenderPending = false;
   const limitsEnabled = state.settings?.limitsEnabled !== false;
   const enabled = enabledLimitProviderSet();
   const providers = providersByLimitProviderId(state.stats?.limits?.providers || []);
@@ -1576,7 +2597,7 @@ function renderLimits() {
     const visibleProviders = providerEntries.length > 0
       ? providerEntries
       : { provider: id, status: 'disabled', windows: [] };
-    const color = clientColors[id] || clientColors.default;
+    const color = id === 'mimo' ? clientColors.xiaomi : (clientColors[id] || clientColors.default);
     if (id === 'codex' && Array.isArray(visibleProviders) && visibleProviders.length > 1) {
       nodes.push(renderCodexAccountGroup(label, visibleProviders, color));
       continue;
@@ -1585,8 +2606,15 @@ function renderLimits() {
       nodes.push(renderOpenCodeAccountGroup(label, visibleProviders, color));
       continue;
     }
+    if (id === 'mimo' && Array.isArray(visibleProviders) && visibleProviders.length > 1) {
+      nodes.push(renderMimoAccountGroup(label, visibleProviders, color));
+      continue;
+    }
     const provider = Array.isArray(visibleProviders) ? visibleProviders[0] : visibleProviders;
-    nodes.push(renderLimitProviderRow(id, label, provider, color));
+    nodes.push(renderLimitProviderRow(id, label, provider, color, id === 'codex' ? {
+      accountTitle: true,
+      allowSystemSwitch: true
+    } : undefined));
   }
   els.limitsPanel.replaceChildren(...nodes);
 }
@@ -1870,7 +2898,7 @@ function exchangeNode(row, max) {
   wrap.querySelector('.detail-ex-sub').textContent = row.subtitle;
   wrap.querySelector('.detail-ex-value').textContent = formatNumber(row.value);
   wrap.querySelector('.detail-ex-cost').textContent = formatCost(row.cost);
-  wrap.querySelector('.bar-fill').style.width = `${rowWidth(row.value, max)}%`;
+  applyBarScale(wrap.querySelector('.bar-fill'), rowWidth(row.value, max) / 100);
 
   const turnsEl = wrap.querySelector('.detail-turns');
   for (const turn of row.turns) turnsEl.append(turnNode(turn));
@@ -1906,6 +2934,7 @@ let contentReadySignaled = false;
 
 function renderTrends() {
   const charts = window.TokenMonitorUsageCharts;
+  const previousBars = captureTrendBarMotion();
   const preview = state.stats?.historyPreview || { daily: [], monthly: [], summary: {} };
   const todayTotal = Number(state.stats?.periods?.today?.totalTokens || 0);
   const { points, metric, labelKey } = charts.selectPreviewSeries(preview, state.period);
@@ -1940,6 +2969,13 @@ function renderTrends() {
     + `<div class="trends-spark" role="button" tabindex="0" title="${t('trends.open')}">${svg}</div>`
     + `<div class="trends-axis"><span>${first}</span><span>${last}</span></div>`
     + `<div class="trends-stats">${statsHtml}</div>`;
+  const bars = Array.from(els.trendsPanel.querySelectorAll('.spark-bar'));
+  bars.forEach((bar, index) => {
+    bar.dataset.motionKey = String(finalPoints[index]?.[labelKey] || index);
+  });
+  const fromZero = state.animateChartsOnRender;
+  animateTrendBarsFrom(previousBars, { fromZero });
+  if (fromZero) state.animateChartsOnRender = false;
 }
 
 function viewLabelById(id) {
@@ -1971,6 +3007,25 @@ function openTrendSettings() {
   requestAnimationFrame(() => {
     document.getElementById('trendSettingsContainer')?.scrollIntoView({ block: 'nearest' });
   });
+}
+
+function openSettingsPanel() {
+  if (!els.settingsPanel) return;
+  if (state.viewSwitcherOpen) setViewSwitcherOpen(false);
+  els.settingsPanel.classList.remove('hidden');
+  els.shell.classList.add('settings-open');
+  els.shell.style.transform = 'translateZ(0)';
+  requestAnimationFrame(() => { els.shell.style.transform = ''; });
+}
+
+function openViewFromTray(viewId) {
+  if (!availableBreakdownIds().includes(viewId)) return;
+  if (state.viewSwitcherOpen) setViewSwitcherOpen(false);
+  stopWindowShortcutRecording();
+  els.settingsPanel?.classList.add('hidden');
+  els.shell.classList.remove('settings-open');
+  state.openSession = null;
+  renderBreakdownChange(viewId, { allowHidden: true });
 }
 
 async function loadHomeHistory() {
@@ -2086,7 +3141,8 @@ function renderViewSwitcher({ focusMenu = false, focusDisclosure = false } = {})
       return;
     }
     state.viewSwitcherOpen = false;
-    if (setBreakdown(nextBreakdown(state.breakdown))) render();
+    updateViewSwitcherOpenState();
+    renderBreakdownChange(nextBreakdown(state.breakdown));
   });
   current.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return;
@@ -2147,8 +3203,9 @@ function renderViewSwitcher({ focusMenu = false, focusDisclosure = false } = {})
     item.append(itemLabel);
     item.addEventListener('click', () => {
       state.viewSwitcherOpen = false;
-      if (setBreakdown(id)) render();
-      else renderViewSwitcher({ focusDisclosure: true });
+      updateViewSwitcherOpenState();
+      if (id === state.breakdown) renderViewSwitcher({ focusDisclosure: true });
+      else renderBreakdownChange(id);
     });
     menu.append(item);
   }
@@ -2186,13 +3243,13 @@ function homeModuleShell(kind, title, viewId, meta = '') {
   module.setAttribute('aria-label', title);
   module.addEventListener('click', (event) => {
     if (event.target.closest('.home-activity-scroll')) return;
-    if (setBreakdown(viewId)) render();
+    renderBreakdownChange(viewId);
   });
   module.addEventListener('keydown', (event) => {
     if (event.target !== module) return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
-    if (setBreakdown(viewId)) render();
+    renderBreakdownChange(viewId);
   });
   const head = document.createElement('div');
   head.className = 'home-module-head';
@@ -2291,15 +3348,26 @@ function renderHomeLimitModule() {
       label.textContent = homeLimitWindowLabel(window);
       const value = document.createElement('span');
       value.className = 'home-list-value';
-      value.textContent = window.value || formatHomeLimitWindowValue(window, Boolean(state.settings?.showLimitUsed));
+      const showUsed = Boolean(state.settings?.showLimitUsed);
+      value.textContent = window.value || formatHomeLimitWindowValue(window, showUsed);
+      if (state.settings?.showHomeLimitBars === true && window.remainingPercent != null) {
+        const remainingPercent = Math.max(0, Math.min(100, Number(window.remainingPercent) || 0));
+        if (remainingPercent < 20) {
+          value.classList.add('home-limit-value-critical');
+        } else if (remainingPercent < 50) {
+          value.classList.add('home-limit-value-low');
+          value.style.setProperty('--home-limit-accent', row.color);
+        }
+      }
       line.append(label, value);
+      metric.append(line);
       const resetAt = formatReset(window.resetsAt);
       const resetText = document.createElement('span');
       resetText.className = 'home-limit-reset';
       resetText.textContent = resetAt || (window.resetDescription
         ? t('home.reset', { value: window.resetDescription })
         : '\u00a0');
-      metric.append(line, resetText);
+      metric.append(resetText);
       windows.append(metric);
     }
     item.append(account, windows);
@@ -2444,8 +3512,17 @@ function applyHomeActivityScroll(scroller) {
   scroller.classList.toggle('is-scrolled', target > 2);
 }
 
-function setupHomeActivityScroller(scroller) {
+function setupHomeActivityScroller(scroller, onReady = null) {
   let drag = null;
+  let readySignaled = false;
+  const applySettledLayout = () => {
+    applyHomeActivityScroll(scroller);
+    if (readySignaled || typeof onReady !== 'function') return;
+    const svg = scroller.querySelector('.dash-heatmap');
+    if (scroller.clientWidth <= 0 || !svg || svg.getBoundingClientRect().width <= 0) return;
+    readySignaled = true;
+    onReady();
+  };
   scroller.addEventListener('scroll', () => {
     scroller.classList.toggle('is-scrolled', scroller.scrollLeft > 2);
     const record = homeOverviewApi.homeActivityScrollRecord({
@@ -2486,10 +3563,162 @@ function setupHomeActivityScroller(scroller) {
   // the panel becomes visible / the window resizes, so the measurement is always real.
   state.homeActivityResizeObserver?.disconnect();
   if (typeof ResizeObserver === 'function') {
-    state.homeActivityResizeObserver = new ResizeObserver(() => applyHomeActivityScroll(scroller));
+    state.homeActivityResizeObserver = new ResizeObserver(applySettledLayout);
     state.homeActivityResizeObserver.observe(scroller);
+  } else if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(applySettledLayout));
   }
   applyHomeActivityScroll(scroller);
+}
+
+function homeActivityTooltipEl() {
+  let tooltip = document.querySelector('.home-activity-tooltip');
+  if (tooltip) return tooltip;
+  tooltip = document.createElement('div');
+  tooltip.className = 'home-activity-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.setAttribute('aria-hidden', 'true');
+
+  const count = document.createElement('span');
+  count.className = 'home-activity-tooltip-count';
+  count.dataset.homeActivityTooltipCount = 'true';
+
+  const label = document.createElement('span');
+  label.className = 'home-activity-tooltip-label';
+  label.textContent = 'tokens';
+
+  const date = document.createElement('span');
+  date.className = 'home-activity-tooltip-date';
+  date.dataset.homeActivityTooltipDate = 'true';
+
+  const row = document.createElement('span');
+  row.className = 'home-activity-tooltip-row';
+  row.append(count, label);
+  tooltip.append(row, date);
+  document.body.append(tooltip);
+  return tooltip;
+}
+
+function moveHomeActivityTooltip(tooltip, cell) {
+  const cellRect = cell.getBoundingClientRect();
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const gap = 9;
+  const pad = 6;
+  const desiredX = cellRect.left + cellRect.width / 2;
+  const x = Math.max(pad + tooltipRect.width / 2, Math.min(window.innerWidth - pad - tooltipRect.width / 2, desiredX));
+  const aboveY = cellRect.top - tooltipRect.height - gap;
+  const belowY = cellRect.bottom + gap;
+  const y = aboveY >= pad ? aboveY : Math.min(window.innerHeight - pad - tooltipRect.height, belowY);
+  tooltip.style.transform = `translate(${x}px, ${y}px) translate(-50%, 0)`;
+}
+
+function setupHomeActivityHover(scroller) {
+  const canvas = scroller.querySelector('.home-activity-canvas');
+  const svg = canvas?.querySelector('.dash-heatmap');
+  const gradient = svg?.querySelector('#homeActivitySpotlightGradient');
+  const tooltip = homeActivityTooltipEl();
+  let activeCell = null;
+  let spotlightFrame = 0;
+  let spotlightVisible = false;
+  const spotlightTarget = { x: -200, y: -200 };
+  const spotlightCurrent = { x: -200, y: -200 };
+
+  const setSpotlight = (point) => {
+    gradient?.setAttribute('cx', String(Math.round(point.x * 10) / 10));
+    gradient?.setAttribute('cy', String(Math.round(point.y * 10) / 10));
+  };
+
+  const scheduleSpotlight = () => {
+    if (spotlightFrame || !gradient) return;
+    spotlightFrame = requestAnimationFrame(() => {
+      spotlightFrame = 0;
+      const dx = spotlightTarget.x - spotlightCurrent.x;
+      const dy = spotlightTarget.y - spotlightCurrent.y;
+      if (Math.abs(dx) < 0.12 && Math.abs(dy) < 0.12) {
+        spotlightCurrent.x = spotlightTarget.x;
+        spotlightCurrent.y = spotlightTarget.y;
+      } else {
+        spotlightCurrent.x += dx * 0.32;
+        spotlightCurrent.y += dy * 0.32;
+        scheduleSpotlight();
+      }
+      setSpotlight(spotlightCurrent);
+    });
+  };
+
+  const moveSpotlight = (x, y) => {
+    spotlightTarget.x = x;
+    spotlightTarget.y = y;
+    if (!spotlightVisible) {
+      spotlightVisible = true;
+      spotlightCurrent.x = x;
+      spotlightCurrent.y = y;
+      setSpotlight(spotlightCurrent);
+      return;
+    }
+    scheduleSpotlight();
+  };
+
+  const hide = () => {
+    tooltip.dataset.visible = 'false';
+    tooltip.setAttribute('aria-hidden', 'true');
+    tooltip.style.transform = 'translate(-9999px, -9999px)';
+    if (spotlightFrame) cancelAnimationFrame(spotlightFrame);
+    spotlightFrame = 0;
+    spotlightVisible = false;
+    spotlightTarget.x = -200;
+    spotlightTarget.y = -200;
+    spotlightCurrent.x = -200;
+    spotlightCurrent.y = -200;
+    setSpotlight(spotlightCurrent);
+    if (activeCell) activeCell.removeAttribute('data-active');
+    activeCell = null;
+  };
+
+  scroller.addEventListener('pointermove', (event) => {
+    if (!svg || scroller.classList.contains('is-dragging')) {
+      hide();
+      return;
+    }
+    const rect = svg.getBoundingClientRect();
+    const view = svg.viewBox.baseVal;
+    const x = view.x + (event.clientX - rect.left) * view.width / Math.max(1, rect.width);
+    const y = view.y + (event.clientY - rect.top) * view.height / Math.max(1, rect.height);
+    moveSpotlight(x, y);
+
+    const target = event.target instanceof Element ? event.target.closest('.heat[data-d]') : null;
+    const cell = target && canvas.contains(target) ? target : null;
+    if (!cell) {
+      hide();
+      return;
+    }
+    if (activeCell !== cell) {
+      activeCell?.removeAttribute('data-active');
+      activeCell = cell;
+      activeCell.setAttribute('data-active', 'true');
+      tooltip.querySelector('[data-home-activity-tooltip-count]').textContent = formatCompact(Number(cell.dataset.t || 0));
+      tooltip.querySelector('[data-home-activity-tooltip-date]').textContent = cell.dataset.d || '';
+    }
+    tooltip.dataset.visible = 'true';
+    tooltip.setAttribute('aria-hidden', 'false');
+    moveHomeActivityTooltip(tooltip, cell);
+  });
+  scroller.addEventListener('pointerleave', hide);
+  scroller.addEventListener('scroll', hide);
+  // The tooltip lives on document.body and is only dismissed by handlers on this
+  // scroller, which renderHome() throws away on every rebuild. Expose the latest
+  // hide() so renderHome/render can clear it — DOM removal fires no pointerleave.
+  state.homeActivityHoverTeardown = hide;
+}
+
+// Dismiss the body-level activity tooltip + spotlight from outside the scroller's own
+// pointer handlers (Home rerender, or switching away from Home while a cell is hovered).
+// Clearing the ref after teardown drops the last hold on the old hide() closure, so a
+// discarded scroller + its SVG can be collected when the trends module goes away and no
+// fresh setupHomeActivityHover reassigns it. setup always re-registers before any hover.
+function hideHomeActivityTooltip() {
+  state.homeActivityHoverTeardown?.();
+  state.homeActivityHoverTeardown = null;
 }
 
 function renderHomeTrendsModule() {
@@ -2497,8 +3726,8 @@ function renderHomeTrendsModule() {
   const historyEnabled = state.settings?.historyEnabled !== false;
   const preview = state.stats?.historyPreview || { daily: [] };
   const history = homeOverviewApi.pickHomeHistory(state.homeHistory, preview);
-  const points = history.daily || [];
-  if (!historyEnabled || points.length === 0) {
+  const rawDaily = history.daily || [];
+  if (!historyEnabled || rawDaily.length === 0) {
     const { module, body } = homeModuleShell('trends', t('home.activity'), 'trends');
     const empty = document.createElement('div');
     empty.className = 'home-module-empty';
@@ -2520,9 +3749,15 @@ function renderHomeTrendsModule() {
     body.append(empty);
     return module;
   }
+  // homeHistory is fetched once and frozen, so its today bucket lags the live headline
+  // total; patch today's tokens with the live period total (like the trends sparkline's
+  // patchTodayBar) so the heatmap and trend line match the number shown above them.
+  const today = new Date().toISOString().slice(0, 10);
+  const todayPeriod = state.stats?.periods?.today;
+  const points = homeOverviewApi.patchDailyToday(rawDaily, today, Number(todayPeriod?.totalTokens || 0), Number(todayPeriod?.costUsd || 0));
   const activityLayout = homeOverviewApi.homeActivityHeatmapLayout();
   const activity = charts.rollingYearHeatmap(dailyWithHeatIntensity(points), {
-    endDate: new Date().toISOString().slice(0, 10),
+    endDate: today,
     cell: activityLayout.cell,
     gap: activityLayout.gap
   });
@@ -2537,10 +3772,12 @@ function renderHomeTrendsModule() {
   activityCanvas.className = 'home-activity-canvas';
   activityCanvas.innerHTML = charts.heatmapSvg(activity, {
     monthLabel: (month) => compactMonthLabel(month.label),
-    radius: activityLayout.radius
+    radius: activityLayout.radius,
+    glowFilterId: 'homeActivityHeatGlow',
+    spotlightId: 'homeActivitySpotlight',
+    spotlightRadius: 82
   });
   activityScroll.append(activityCanvas);
-  setupHomeActivityScroller(activityScroll);
   const linePoints = charts.clampDaily(points, 45);
   const summary = homeOverviewApi.homeTrendSummary(linePoints);
   const trendHead = document.createElement('div');
@@ -2567,13 +3804,17 @@ function renderHomeTrendsModule() {
     dates.append(label);
   }
   body.append(activityScroll, trendHead, plot, dates);
+  setupHomeActivityScroller(activityScroll, () => animateHomeHistoryVisuals(activityScroll, activityCanvas, chart));
+  setupHomeActivityHover(activityScroll);
   return module;
 }
 
 function renderHome() {
   if (!els.homePanel) return;
   // The previous scroller (and its ResizeObserver) is about to be replaced; drop the
-  // observer so at most one is live and it is gone if the trends module disappears.
+  // observer so at most one is live and it is gone if the trends module disappears,
+  // and hide any open activity tooltip before its owning scroller is discarded.
+  hideHomeActivityTooltip();
   state.homeActivityResizeObserver?.disconnect();
   state.homeActivityResizeObserver = null;
   const period = state.stats.periods?.[state.period] || { totalTokens: 0, costUsd: 0, clients: {} };
@@ -2611,6 +3852,7 @@ function renderHome() {
 
 function render() {
   if (!state.stats) return;
+  renderSessionUsageArchiveStatus();
   ensureBreakdownVisible();
   renderViewSwitcher();
   if (state.openSession && state.breakdown !== 'session') { state.openSession = null; els.sessionDetail.classList.add('hidden'); els.sessionDetail.replaceChildren(); els.sessionDetailHead.classList.add('hidden'); els.sessionDetailHead.replaceChildren(); }
@@ -2621,19 +3863,31 @@ function render() {
   if (state.suppressInitialNumberAnimation) {
     cancelNumberAnimation();
     els.totalTokens.textContent = formatNumber(nextTotal);
+    updateTotalCompact(nextTotal);
     state.suppressInitialNumberAnimation = false;
   } else if (totalChanged) {
-    animateNumber(els.totalTokens, state.currentTotal, nextTotal);
+    // Keep the compact chip visible through the count-up and lock the font to the
+    // widest endpoint first (a downward roll starts wider than it settles), so the
+    // number never vanishes, clips, or resizes mid-roll. Re-fit on completion so a
+    // window resize during the animation, or a downward settle, still ends correct.
+    const widest = formatNumber(nextTotal).length >= formatNumber(state.currentTotal).length ? nextTotal : state.currentTotal;
+    els.totalTokens.textContent = formatNumber(widest);
+    updateTotalCompact(nextTotal);
+    animateNumber(els.totalTokens, state.currentTotal, nextTotal, state.periodMotionActive ? 800 : 1000, fitTotalNumber);
     pulseLiveDot();
   } else {
     cancelNumberAnimation();
     els.totalTokens.textContent = formatNumber(nextTotal);
+    updateTotalCompact(nextTotal);
   }
   state.currentTotal = nextTotal;
   els.cost.textContent = formatCost(period.costUsd || 0);
   if (!state.refreshBusy && !state.refreshFeedbackTimer) setRefreshButtonState('idle');
   els.shell.classList.toggle('session-mode', state.breakdown === 'session');
   els.shell.classList.toggle('home-mode', state.breakdown === 'home');
+  // Leaving Home only CSS-hides the panel, so its heatmap scroller never sees a
+  // pointerleave — dismiss the body-level tooltip here (renderHome covers rerenders).
+  if (state.breakdown !== 'home') hideHomeActivityTooltip();
   if (state.breakdown === 'status') ensureServiceStatusTicker(); else stopServiceStatusTicker();
   if (state.breakdown === 'home') {
     els.breakdown.classList.add('hidden');
@@ -2678,7 +3932,10 @@ function render() {
     els.trendsPanel.classList.add('hidden');
     els.breakdown.classList.remove('hidden');
     const rows = rowsForPeriod(period);
-    renderRows(rows);
+    renderRows(rows, {
+      showProjectIncompleteHint: state.breakdown === 'project'
+        && projectRowsApi.projectBreakdownIncomplete(state.stats, state.period)
+    });
   }
   
   renderFloatingBubbleContent();
@@ -2793,6 +4050,18 @@ function settleRefreshButtonState(status) {
   }, REFRESH_BUTTON_FEEDBACK_MS);
 }
 
+// The main process rebuilds the TOTAL session list for display but ships it as a
+// display-only sibling (`allTimeSessionsView`) so it never pollutes the lossless
+// period export. Overlay it onto periods.allTime here, on the renderer's own copy, so
+// every session-view reader (list, archived count, detail lookup) sees it. See
+// injectLocalDeviceStatus in main.js.
+function overlayAllTimeSessions(stats) {
+  if (stats && stats.allTimeSessionsView && stats.periods?.allTime) {
+    stats.periods.allTime.sessions = stats.allTimeSessionsView;
+  }
+  return stats;
+}
+
 async function refreshStats(options = {}) {
   const feedback = options.feedback === true;
   if (feedback) {
@@ -2802,7 +4071,8 @@ async function refreshStats(options = {}) {
     setRefreshButtonState('refreshing');
   }
   try {
-    state.stats = await window.tokenMonitor.getStats(options);
+    state.stats = overlayAllTimeSessions(await window.tokenMonitor.getStats(options));
+    applyCodexActiveAccountFromStats();
     setStatus(statusTextFor(state.mode, state.streamConnected));
     render();
     renderLimitProviderCheckboxes();
@@ -2810,6 +4080,13 @@ async function refreshStats(options = {}) {
     renderWslPanel();
     renderDeepseekStatus();
     renderMinimaxStatus();
+    renderExternalProviderStatus('zai');
+    renderExternalProviderStatus('zaiteam');
+    renderExternalProviderStatus('volcengine');
+    renderExternalProviderStatus('qoder');
+    renderExternalProviderStatus('kimi');
+    renderExternalProviderStatus('ollama');
+    renderMimoStatus();
     renderCopilotStatus();
     maybeUpdateBarsIcon();
     if (feedback) settleRefreshButtonState('refreshed');
@@ -2856,8 +4133,9 @@ function setPeriod(period) {
   return true;
 }
 
-function setBreakdown(breakdown) {
+function setBreakdown(breakdown, options = {}) {
   const next = normalizeInitialViewValue(breakdown, viewBreakdownValues, state.breakdown);
+  directBreakdownOverride = options.allowHidden === true ? next : null;
   if (next === state.breakdown) {
     publishViewState();
     return false;
@@ -2865,6 +4143,23 @@ function setBreakdown(breakdown) {
   state.breakdown = next;
   state.rowSignature = '';
   publishViewState();
+  return true;
+}
+
+function renderBreakdownChange(breakdown, options = {}) {
+  if (!setBreakdown(breakdown, options)) return false;
+  state.animateBarsFromZero = true;
+  state.animateChartsOnRender = true;
+  let renderSucceeded = false;
+  try {
+    render();
+    renderSucceeded = true;
+  } finally {
+    state.animateBarsFromZero = false;
+    // Home consumes this flag asynchronously after ResizeObserver confirms layout.
+    // Clear it only after a failed render so that deferred entry motion still runs.
+    if (!renderSucceeded) state.animateChartsOnRender = false;
+  }
   return true;
 }
 
@@ -2901,6 +4196,7 @@ function applyAppearanceSettings(settings) {
   document.documentElement.style.setProperty('--line-strong-alpha', (0.18 + depth * 0.14).toFixed(3));
   document.documentElement.style.setProperty('--control-alpha', (0.03 + depth * 0.045).toFixed(3));
   document.documentElement.style.setProperty('--highlight-alpha', (0.045 + depth * 0.06).toFixed(3));
+  applyReduceMotionPreference(settings?.reduceMotion);
   // Only full settings objects carry themeColors; glass/zoom preview patches
   // omit it, so we must not wipe theme overrides mid-slider-drag.
   if (settings && 'themeColors' in settings) applyThemeColors(settings.themeColors);
@@ -2929,6 +4225,7 @@ function applyAppearanceSettings(settings) {
 }
 
 const themePresetsApi = window.TokenMonitorThemePresets;
+let themeCodeFeedbackGeneration = 0;
 // Snapshot of the canonical brand colours, taken before any override is
 // applied. clientColors is mutated in place (other modules hold the same
 // reference), so this is the source of truth for "reset to brand".
@@ -2979,6 +4276,13 @@ function buildAppearanceColorControls() {
   renderThemePresetChips();
   renderThemeColorGrid();
   renderVendorColorList();
+  if (els.themeCodeInput && document.activeElement !== els.themeCodeInput) {
+    const code = themePresetsApi.encodeThemeCode(state.settings?.themeColors);
+    if (els.themeCodeInput.value !== code) {
+      els.themeCodeInput.value = code;
+      invalidateThemeCodeFeedback();
+    }
+  }
 }
 
 function renderThemePresetChips() {
@@ -3101,6 +4405,75 @@ async function commitThemeColors(overrides) {
   buildAppearanceColorControls();
   renderSettingsSummaries();
   await saveSettings({ themeColors: overrides });
+}
+
+function showThemeCodeStatus(key, type = '') {
+  if (!els.themeCodeStatus) return;
+  els.themeCodeStatus.textContent = t(key);
+  els.themeCodeStatus.classList.toggle('success', type === 'success');
+  els.themeCodeStatus.classList.toggle('error', type === 'error');
+}
+
+function clearThemeCodeStatus() {
+  if (!els.themeCodeStatus) return;
+  els.themeCodeStatus.textContent = '';
+  els.themeCodeStatus.classList.remove('success', 'error');
+}
+
+function invalidateThemeCodeFeedback() {
+  themeCodeFeedbackGeneration += 1;
+  clearThemeCodeStatus();
+  return themeCodeFeedbackGeneration;
+}
+
+function themeCodeFeedbackIsCurrent(generation, code) {
+  return generation === themeCodeFeedbackGeneration && els.themeCodeInput?.value === code;
+}
+
+async function applyThemeCodeFromInput() {
+  const generation = invalidateThemeCodeFeedback();
+  const parsed = themePresetsApi.decodeThemeCode(els.themeCodeInput?.value);
+  if (!parsed.ok) {
+    const key = parsed.reason === 'unsupportedVersion'
+      ? 'settings.appearance.themeCodeUnsupported'
+      : 'settings.appearance.themeCodeInvalid';
+    showThemeCodeStatus(key, 'error');
+    return;
+  }
+  els.themeCodeInput.value = parsed.code;
+  await commitThemeColors(parsed.colors);
+  if (themeCodeFeedbackIsCurrent(generation, parsed.code)) {
+    showThemeCodeStatus('settings.appearance.themeCodeApplied', 'success');
+  }
+}
+
+async function pasteAndApplyThemeCode() {
+  const generation = invalidateThemeCodeFeedback();
+  const code = els.themeCodeInput?.value;
+  let text;
+  try {
+    text = await navigator.clipboard.readText();
+  } catch (_) {
+    if (!themeCodeFeedbackIsCurrent(generation, code)) return;
+    showThemeCodeStatus('settings.appearance.themeCodeCopyFailed', 'error');
+    return;
+  }
+  if (!themeCodeFeedbackIsCurrent(generation, code)) return;
+  const trimmed = (text || '').trim();
+  if (els.themeCodeInput) els.themeCodeInput.value = trimmed;
+  await applyThemeCodeFromInput();
+}
+
+async function copyCurrentThemeCode() {
+  const generation = invalidateThemeCodeFeedback();
+  const code = themePresetsApi.encodeThemeCode(state.settings?.themeColors);
+  els.themeCodeInput.value = code;
+  const copied = await copyToClipboard(code);
+  if (!themeCodeFeedbackIsCurrent(generation, code)) return;
+  showThemeCodeStatus(
+    copied ? 'settings.appearance.themeCodeCopied' : 'settings.appearance.themeCodeCopyFailed',
+    copied ? 'success' : 'error'
+  );
 }
 
 function previewVendorColor(id, value) {
@@ -3244,7 +4617,7 @@ function applyFloatingBubbleState(payload = {}) {
   renderFloatingBubbleContent();
 }
 
-const BUBBLE_CONTENT_VALUES = ['icon', 'tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions'];
+const BUBBLE_CONTENT_VALUES = ['icon', 'tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions'];
 function normalizeTrayContentValue(value) {
   return BUBBLE_CONTENT_VALUES.includes(value) ? value : 'icon';
 }
@@ -3263,13 +4636,17 @@ function isBarsMode(mode) {
   return mode === 'bars' || mode === 'barsSession' || mode === 'barsWeekly' || mode === 'barsAllSessions';
 }
 
+function isTrayImageMode(mode) {
+  return isBarsMode(mode) || mode === 'limitsAllSessions';
+}
+
 function renderFloatingBubbleContent() {
   const el = els.floatingBubbleContent;
   if (!el || !state.floatingBubble.collapsed) return;
   const mode = state.settings?.floatingBubbleContent || 'icon';
-  if (isBarsMode(mode)) {
+  if (isTrayImageMode(mode)) {
     const dataUrl = state.stats
-      ? barsDataUrlForMode(mode, 44, BUBBLE_BARS_COLORS, { contentOnly: mode === 'barsAllSessions' })
+      ? trayDataUrlForMode(mode, 44, BUBBLE_BARS_COLORS, { contentOnly: mode === 'barsAllSessions' || mode === 'limitsAllSessions' })
       : null;
     if (dataUrl) {
       el.classList.add('bars');
@@ -3282,13 +4659,13 @@ function renderFloatingBubbleContent() {
       return;
     }
     el.classList.remove('bars');
-    el.textContent = (state.stats && window.TokenMonitorTrayText.formatTrayText(state.stats, mode, currentCurrency())) || 'Σ';
+    el.textContent = (state.stats && window.TokenMonitorTrayText.formatTrayText(state.stats, mode, currentCurrency(), state.settings)) || 'Σ';
   } else if (mode === 'icon') {
     el.classList.remove('bars');
     el.textContent = 'Σ';
   } else {
     el.classList.remove('bars');
-    el.textContent = state.stats ? (window.TokenMonitorTrayText.formatTrayText(state.stats, mode, currentCurrency()) || '0') : '0';
+    el.textContent = state.stats ? (window.TokenMonitorTrayText.formatTrayText(state.stats, mode, currentCurrency(), state.settings) || '0') : '0';
   }
   reportFloatingBubbleSize();
 }
@@ -3300,7 +4677,7 @@ function reportFloatingBubbleSize() {
   // Height is constant; only the width tracks the content.
   let width = BUBBLE_CONTENT_MIN_W;
   if (mode !== 'icon' && el) {
-    const pad = isBarsMode(mode) ? 8 : BUBBLE_CONTENT_PAD_X * 2;
+    const pad = isTrayImageMode(mode) ? 8 : BUBBLE_CONTENT_PAD_X * 2;
     width = Math.max(BUBBLE_CONTENT_MIN_W, Math.ceil(el.scrollWidth) + pad);
   }
   window.tokenMonitor.setFloatingBubbleCollapsedSize?.({ width, height: BUBBLE_CONTENT_HEIGHT });
@@ -3428,9 +4805,11 @@ function handleFloatingBubblePointerUp(event) {
 function appearancePatchFromControls() {
   return {
     systemGlass: Boolean(els.systemGlassInput.checked),
+    reduceMotion: els.reduceMotionInput?.value || 'system',
     showLiveDot: Boolean(els.liveDotInput.checked),
     showToolIcons: Boolean(els.toolIconsInput.checked),
     titleIconOnly: Boolean(els.titleIconInput.checked),
+    showCompactTotalTokens: Boolean(els.showCompactTotalTokensInput.checked),
     settingsInTitlebar: Boolean(els.settingsInTitlebarInput.checked),
     glassOpacity: Number(els.glassInput.value === '' ? defaultAppearance.glassOpacity : els.glassInput.value),
     glassBlur: Number(els.blurInput.value === '' ? defaultAppearance.glassBlur : els.blurInput.value),
@@ -3540,13 +4919,17 @@ function renderHubAddresses(addresses, port) {
 
 async function copyToClipboard(text, button) {
   try {
-    await navigator.clipboard.writeText(text);
+    if (window.tokenMonitor.copyText) await window.tokenMonitor.copyText(text);
+    else await navigator.clipboard.writeText(text);
     if (button) {
       const previous = button.textContent;
       button.textContent = '✓';
       setTimeout(() => { button.textContent = previous; }, 900);
     }
-  } catch (_) { /* clipboard blocked; no-op */ }
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 async function refreshHubInfo() {
@@ -3558,8 +4941,13 @@ async function refreshHubInfo() {
 }
 
 function syncPeriodTabs() {
-  for (const tab of document.querySelectorAll('.tab')) {
-    tab.classList.toggle('active', tab.dataset.period === state.period);
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.dataset.period === state.period));
+  document.querySelector('.tabs')?.style.setProperty('--period-index', String(activeIndex));
+  for (const tab of tabs) {
+    const active = tab.dataset.period === state.period;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-pressed', String(active));
   }
 }
 
@@ -3577,6 +4965,18 @@ function applyInitialBreakdownPreference() {
   if (next !== state.breakdown) setBreakdown(next);
 }
 
+function renderSessionUsageArchiveStatus() {
+  if (!els.sessionUsageArchiveStatus) return;
+  if (state.settings?.sessionUsageArchiveEnabled === false) {
+    els.sessionUsageArchiveStatus.textContent = t('settings.collection.sessionArchivePaused');
+    return;
+  }
+  const count = sessionRowsApi.archivedSessionCount(state.stats);
+  els.sessionUsageArchiveStatus.textContent = count > 0
+    ? t('settings.collection.sessionArchiveActiveCount', { count })
+    : t('settings.collection.sessionArchiveEmpty');
+}
+
 function syncSettingsForm() {
   applySettingsTranslations();
   applyInitialBreakdownPreference();
@@ -3590,8 +4990,13 @@ function syncSettingsForm() {
   els.deviceIdInput.value = state.settings.deviceId || '';
   els.limitsRefreshInput.value = String(LIMIT_REFRESH_OPTIONS.includes(Number(state.settings.limitsRefreshMs)) ? state.settings.limitsRefreshMs : 300000);
   els.showLimitSourceInput.checked = Boolean(state.settings.showLimitSource);
-  els.showActiveAccountInput.checked = Boolean(state.settings.showActiveAccount);
+  els.maskLimitAccountEmailsInput.checked = Boolean(state.settings.maskLimitAccountEmails);
   els.showLimitUsedInput.value = state.settings.showLimitUsed ? 'used' : 'remaining';
+  if (els.syncUploadIntervalInput) {
+    const value = Number(state.settings.syncUploadIntervalMs);
+    const allowed = Array.from(els.syncUploadIntervalInput.options, (option) => Number(option.value));
+    els.syncUploadIntervalInput.value = String(allowed.includes(value) ? value : 0);
+  }
   if (els.collectionCadenceInput) {
     const value = Number(state.settings.collectionIntervalMs);
     const allowed = [300000, 900000, 1800000];
@@ -3603,6 +5008,8 @@ function syncSettingsForm() {
     }
   }
   if (els.wslScanInput) els.wslScanInput.checked = state.settings.wslScanEnabled !== false;
+  if (els.sessionUsageArchiveInput) els.sessionUsageArchiveInput.checked = state.settings.sessionUsageArchiveEnabled !== false;
+  renderSessionUsageArchiveStatus();
   const exportAutoOn = Boolean(state.settings.exportAutoEnabled);
   const exportDir = state.settings.exportDir || '';
   if (els.exportAutoInput) els.exportAutoInput.checked = exportAutoOn;
@@ -3619,9 +5026,12 @@ function syncSettingsForm() {
   }
   renderWslPanel();
   els.systemGlassInput.checked = state.settings.systemGlass !== false;
+  const reduceMotion = motionPreferenceApi.normalize(state.settings.reduceMotion);
+  if (els.reduceMotionInput) els.reduceMotionInput.value = reduceMotion;
   els.liveDotInput.checked = state.settings.showLiveDot !== false;
   els.toolIconsInput.checked = state.settings.showToolIcons !== false;
   els.titleIconInput.checked = state.settings.titleIconOnly === true;
+  els.showCompactTotalTokensInput.checked = state.settings.showCompactTotalTokens === true;
   els.settingsInTitlebarInput.checked = state.settings.settingsInTitlebar === true;
   els.discordRpcInput.checked = Boolean(state.settings.discordRpcEnabled);
   syncWindowBehaviorControls();
@@ -3633,7 +5043,7 @@ function syncSettingsForm() {
   if (els.showTrayIconInput) els.showTrayIconInput.checked = showTrayIcon;
   els.trayModeInput.disabled = !showTrayIcon;
   els.trayModeInput.checked = showTrayIcon && Boolean(state.settings.trayMode);
-  els.trayContentInput.value = ['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon'].includes(state.settings.trayContent) ? state.settings.trayContent : 'tokens';
+  els.trayContentInput.value = ['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon'].includes(state.settings.trayContent) ? state.settings.trayContent : 'tokens';
   els.trayContentInput.disabled = !showTrayIcon;
   els.trayIconOptions?.classList.toggle('hidden', !showTrayIcon);
   els.trayOptions?.classList.toggle('hidden', !showTrayIcon || !state.settings.trayMode);
@@ -3643,15 +5053,24 @@ function syncSettingsForm() {
     els.startAtLoginInput.checked = Boolean(state.settings.startAtLogin && state.appInfo?.loginItemSupported);
   }
   if (els.startupNote) {
-    els.startupNote.textContent = state.appInfo?.loginItemSupported
-      ? t('settings.startup.launchAtSignIn')
-      : t('settings.startup.available');
+    els.startupNote.textContent = !state.appInfo?.loginItemSupported
+      ? t('settings.startup.available')
+      : state.appInfo?.platform === 'linux'
+        ? t('settings.startup.appimageNote')
+        : t('settings.startup.launchAtSignIn');
   }
   els.glassInput.value = String(state.settings.glassOpacity ?? 68);
   els.blurInput.value = String(state.settings.glassBlur ?? 32);
   els.zoomInput.value = String(Math.round((Number(state.settings.zoomFactor) || 1) * 100));
   renderDeepseekStatus();
   renderMinimaxStatus();
+  renderExternalProviderStatus('zai');
+  renderExternalProviderStatus('zaiteam');
+  renderExternalProviderStatus('volcengine');
+  renderExternalProviderStatus('qoder');
+  renderExternalProviderStatus('kimi');
+  renderExternalProviderStatus('ollama');
+  renderMimoStatus();
   renderCopilotStatus();
   renderViewPreferences();
   renderToolPreferences();
@@ -3899,7 +5318,8 @@ function renderViewPreferences() {
     const label = viewLabel(view);
     const isHidden = hidden.has(id);
     const historyEnabled = state.settings?.historyEnabled !== false;
-    const isDisabled = id === 'trends' && !historyEnabled;
+    const projectsEnabled = state.settings?.projectsEnabled !== false;
+    const isDisabled = (id === 'trends' && !historyEnabled) || (id === 'project' && !projectsEnabled);
     const isEffectivelyHidden = isHidden || isDisabled;
     const row = document.createElement('div');
     row.className = 'view-preference-row';
@@ -3918,7 +5338,11 @@ function renderViewPreferences() {
     visibility.setAttribute('aria-pressed', String(!isEffectivelyHidden));
     visibility.disabled = !isEffectivelyHidden && visibleCount <= 1;
     visibility.append(visibilityIcon(isEffectivelyHidden));
-    visibility.addEventListener('click', () => id === 'trends' ? onTrendVisibilityToggle() : onViewVisibilityToggle(id));
+    visibility.addEventListener('click', () => {
+      if (id === 'trends') return onTrendVisibilityToggle();
+      if (id === 'project') return onProjectVisibilityToggle();
+      return onViewVisibilityToggle(id);
+    });
     const handle = createPreferenceOrderHandle({ kind: 'view', id, label, count: views.length });
     const actions = document.createElement('div');
     actions.className = 'tool-preference-actions';
@@ -3985,6 +5409,36 @@ function renderViewPreferences() {
       listContainer.appendChild(inner);
       els.viewDisplayList.appendChild(listContainer);
     }
+    if (id === 'project') {
+      row.classList.add('has-subgroup');
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = `view-subgroup-toggle${state.projectSettingsExpanded ? ' is-expanded' : ''}`;
+      toggle.title = t('settings.views.configureProject', { name: label });
+      toggle.setAttribute('aria-label', toggle.title);
+      toggle.setAttribute('aria-expanded', String(Boolean(state.projectSettingsExpanded)));
+      const toggleIcon = document.createElement('span');
+      toggleIcon.className = 'view-subgroup-icon';
+      toggleIcon.setAttribute('aria-hidden', 'true');
+      toggle.append(toggleIcon);
+      toggle.addEventListener('click', () => {
+        state.projectSettingsExpanded = !state.projectSettingsExpanded;
+        toggle.classList.toggle('is-expanded', state.projectSettingsExpanded);
+        toggle.setAttribute('aria-expanded', String(Boolean(state.projectSettingsExpanded)));
+        const container = document.getElementById('projectSettingsContainer');
+        if (container) container.classList.toggle('hidden', !state.projectSettingsExpanded);
+      });
+      actions.insertBefore(toggle, visibility);
+
+      const listContainer = document.createElement('div');
+      listContainer.id = 'projectSettingsContainer';
+      listContainer.className = `accordion-animated-container${state.projectSettingsExpanded ? '' : ' hidden'}`;
+      const inner = document.createElement('div');
+      inner.className = 'accordion-animation-inner';
+      inner.appendChild(renderProjectSettingsList());
+      listContainer.appendChild(inner);
+      els.viewDisplayList.appendChild(listContainer);
+    }
     if (id === 'status') {
       row.classList.add('has-subgroup');
       const toggle = document.createElement('button');
@@ -4028,6 +5482,15 @@ function renderHomeLimitProviderList() {
     .orderedLimitProviders(LIMIT_PROVIDERS, homeLimitProviderOrderValue())
     .filter(({ id }) => enabled.has(id));
   const hasCustomOrder = Boolean(state.settings?.homeLimitProviderOrder);
+  const statusLabel = document.createElement('label');
+  statusLabel.className = 'checkbox-label home-limit-status-setting';
+  const statusInput = document.createElement('input');
+  statusInput.type = 'checkbox';
+  statusInput.checked = state.settings?.showHomeLimitBars === true;
+  const statusText = document.createElement('span');
+  statusText.textContent = t('settings.home.showLimitBars');
+  statusInput.addEventListener('change', () => void saveSettings({ showHomeLimitBars: statusInput.checked }));
+  statusLabel.append(statusInput, statusText);
   const header = document.createElement('div');
   header.className = 'settings-note-row home-limit-provider-header';
   const note = document.createElement('p');
@@ -4056,7 +5519,7 @@ function renderHomeLimitProviderList() {
   showAll.addEventListener('click', () => void showAllHomeLimitProviders());
   headerActions.append(reset, showAll);
   header.append(note, headerActions);
-  wrap.append(header);
+  wrap.append(statusLabel, header);
   for (const { id, label, settingsLabel } of providers) {
     const isHidden = hidden.has(id);
     const row = document.createElement('div');
@@ -4227,6 +5690,26 @@ function renderTrendSettingsList() {
   return wrap;
 }
 
+function renderProjectSettingsList() {
+  const wrap = document.createElement('div');
+  wrap.id = 'projectSettingsList';
+  wrap.className = 'trend-settings-list';
+  const label = document.createElement('label');
+  label.className = 'checkbox-label trend-settings-row';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = state.settings?.projectsEnabled !== false;
+  const text = document.createElement('span');
+  text.textContent = t('settings.views.enableProjects');
+  label.append(input, text);
+  wrap.append(label);
+  input.addEventListener('change', async () => {
+    await setProjectsEnabled(input.checked);
+    await refreshStats({ force: true });
+  });
+  return wrap;
+}
+
 async function setTrendEnabled(enabled) {
   if (!enabled) {
     await saveSettings({ historyEnabled: enabled });
@@ -4236,6 +5719,16 @@ async function setTrendEnabled(enabled) {
   hidden.delete('trends');
   const nextHiddenViews = Array.from(hidden).join(',');
   await saveSettings({ historyEnabled: enabled, hiddenViews: nextHiddenViews });
+}
+
+async function setProjectsEnabled(enabled) {
+  if (!enabled) {
+    await saveSettings({ projectsEnabled: false });
+    return;
+  }
+  const hidden = hiddenViewSet();
+  hidden.delete('project');
+  await saveSettings({ projectsEnabled: true, hiddenViews: Array.from(hidden).join(',') });
 }
 
 function renderServiceProviderList() {
@@ -4540,6 +6033,15 @@ async function onTrendVisibilityToggle() {
   await onViewVisibilityToggle('trends');
 }
 
+async function onProjectVisibilityToggle() {
+  if (state.settings?.projectsEnabled === false) {
+    await setProjectsEnabled(true);
+    await refreshStats({ force: true });
+    return;
+  }
+  await onViewVisibilityToggle('project');
+}
+
 async function onLimitProviderToggle() {
   const checked = Array.from(els.limitProviderCheckboxes.querySelectorAll('input[type=checkbox]'))
     .filter((cb) => cb.checked)
@@ -4842,8 +6344,10 @@ window.addEventListener('blur', () => {
 
 async function init() {
   try { state.appInfo = await window.tokenMonitor.getAppInfo?.(); } catch (_) {}
+  if (els.aboutVersion) els.aboutVersion.textContent = state.appInfo?.version ? `v${state.appInfo.version}` : '—';
   state.settings = await window.tokenMonitor.getSettings();
   applyEffectiveCurrencyRates();
+
   state.appUpdate = await window.tokenMonitor.getAppUpdateState();
   renderAppUpdatePill();
   renderSettingsAppUpdateRow();
@@ -4851,6 +6355,7 @@ async function init() {
     state.appUpdate = payload;
     renderAppUpdatePill();
     renderSettingsAppUpdateRow();
+    if (els.appUpdatePopover.matches(':popover-open')) renderAppUpdatePopover(payload);
   });
   if (state.appInfo?.loginItemSupported) {
     state.settings.startAtLogin = Boolean(state.appInfo.loginItemOpenAtLogin);
@@ -4877,12 +6382,15 @@ async function init() {
 
 for (const tab of document.querySelectorAll('.tab')) {
   tab.addEventListener('click', () => {
-    setPeriod(tab.dataset.period);
+    const snapshot = captureBreakdownMotion();
+    if (!setPeriod(tab.dataset.period)) return;
     syncPeriodTabs();
     if (state.openSession) openSessionDetail(state.openSession);
-    state.currentTotal = 0;
     state.rowSignature = '';
+    state.periodMotionActive = true;
     render();
+    state.periodMotionActive = false;
+    animateBreakdownFrom(snapshot, { duration: 800 });
   });
 }
 
@@ -4989,6 +6497,14 @@ els.hubSecretRegenButton?.addEventListener('click', async () => {
   els.hubSecretInput.value = info.secret;
   renderHubStatus();
 });
+els.secretPasteButton?.addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) {
+      els.secretInput.value = text.trim();
+    }
+  } catch (_) {}
+});
 els.limitsRefreshInput.addEventListener('change', async () => {
   await saveSettings({ limitsRefreshMs: Number(els.limitsRefreshInput.value) });
   await refreshStats({ force: true });
@@ -4996,11 +6512,15 @@ els.limitsRefreshInput.addEventListener('change', async () => {
 els.showLimitSourceInput.addEventListener('change', async () => {
   await saveSettings({ showLimitSource: els.showLimitSourceInput.checked });
 });
-els.showActiveAccountInput.addEventListener('change', async () => {
-  await saveSettings({ showActiveAccount: els.showActiveAccountInput.checked });
+els.maskLimitAccountEmailsInput.addEventListener('change', async () => {
+  await saveSettings({ maskLimitAccountEmails: els.maskLimitAccountEmailsInput.checked });
+  renderLimits();
 });
 els.showLimitUsedInput.addEventListener('change', async () => {
   await saveSettings({ showLimitUsed: els.showLimitUsedInput.value === 'used' });
+});
+els.syncUploadIntervalInput?.addEventListener('change', async () => {
+  await saveSettings({ syncUploadIntervalMs: Number(els.syncUploadIntervalInput.value) });
 });
 els.collectionCadenceInput?.addEventListener('change', async () => {
   const value = els.collectionCadenceInput.value;
@@ -5008,6 +6528,25 @@ els.collectionCadenceInput?.addEventListener('change', async () => {
     collectionMode: value === 'live' ? 'live' : 'interval',
     collectionIntervalMs: value === 'live' ? Number(state.settings.collectionIntervalMs || 300000) : Number(value)
   });
+});
+els.sessionUsageArchiveInput?.addEventListener('change', async () => {
+  await saveSettings({ sessionUsageArchiveEnabled: els.sessionUsageArchiveInput.checked });
+});
+els.clearSessionUsageArchiveButton?.addEventListener('click', async () => {
+  if (!window.confirm(t('settings.collection.sessionArchiveConfirm'))) return;
+  els.clearSessionUsageArchiveButton.disabled = true;
+  try {
+    const result = await window.tokenMonitor.clearSessionUsageArchive();
+    if (!result?.ok) {
+      window.alert(t(result?.error === 'agentActive'
+        ? 'settings.collection.sessionArchiveAgentActive'
+        : 'settings.collection.sessionArchiveFailed'));
+      return;
+    }
+    await refreshStats();
+  } finally {
+    els.clearSessionUsageArchiveButton.disabled = false;
+  }
 });
 els.wslScanInput?.addEventListener('change', async () => {
   await saveSettings({ wslScanEnabled: els.wslScanInput.checked });
@@ -5056,10 +6595,42 @@ els.blurInput.addEventListener('input', applyAppearanceFromControls);
 els.zoomInput.addEventListener('input', applyAppearanceFromControls);
 els.resetThemeColorsButton?.addEventListener('click', () => commitThemeColors({}));
 els.resetVendorColorsButton?.addEventListener('click', () => commitVendorColors({}));
+els.applyThemeCodeButton?.addEventListener('click', () => { void pasteAndApplyThemeCode(); });
+els.copyThemeCodeButton?.addEventListener('click', () => { void copyCurrentThemeCode(); });
+els.themeCodeInput?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  void applyThemeCodeFromInput();
+});
+els.themeCodeInput?.addEventListener('input', invalidateThemeCodeFeedback);
+function setupThemeAccordion(group, toggle, details) {
+  if (!group || !toggle || !details) return;
+  const setExpanded = (expanded) => {
+    const open = Boolean(expanded);
+    toggle.setAttribute('aria-expanded', String(open));
+    details.classList.toggle('hidden', !open);
+    details.inert = !open;
+    group.classList.toggle('expanded', open);
+  };
+  toggle.addEventListener('click', () => setExpanded(details.classList.contains('hidden')));
+  setExpanded(false);
+}
+
+setupThemeAccordion(els.themeAdvancedGroup, els.themeAdvancedToggle, els.themeAdvancedDetails);
+setupThemeAccordion(els.themeVendorGroup, els.themeVendorToggle, els.themeVendorDetails);
 els.systemGlassInput.addEventListener('change', saveAppearanceFromControls);
+els.reduceMotionInput?.addEventListener('change', async () => {
+  state.settings.reduceMotion = applyReduceMotionPreference(els.reduceMotionInput.value);
+  await saveAppearanceFromControls();
+});
 els.liveDotInput.addEventListener('change', saveAppearanceFromControls);
 els.toolIconsInput.addEventListener('change', saveAppearanceFromControls);
 els.titleIconInput.addEventListener('change', saveAppearanceFromControls);
+els.showCompactTotalTokensInput.addEventListener('change', async () => {
+  await saveAppearanceFromControls();
+  if (!numberAnimHandle) updateTotalCompact(state.currentTotal);
+});
+window.addEventListener('resize', () => { if (!numberAnimHandle) fitTotalNumber(); });
 els.settingsInTitlebarInput.addEventListener('change', saveAppearanceFromControls);
 els.discordRpcInput.addEventListener('change', saveAppearanceFromControls);
 els.windowBehaviorInput.addEventListener('change', () => saveSettings({ windowBehavior: els.windowBehaviorInput.value }));
@@ -5101,6 +6672,8 @@ els.checkTokscaleButton?.addEventListener('click', checkTokscaleNpm);
 els.downloadTokscaleButton?.addEventListener('click', downloadTokscaleFromNpm);
 els.resetTokscaleButton?.addEventListener('click', resetTokscaleToBundled);
 els.openTokscaleLinkButton?.addEventListener('click', () => window.tokenMonitor.openExternal?.('https://github.com/junhoyeo/tokscale'));
+els.openRepositoryButton?.addEventListener('click', () => window.tokenMonitor.openExternal?.(TOKEN_MONITOR_REPOSITORY_URL));
+els.reportIssueButton?.addEventListener('click', () => window.tokenMonitor.openExternal?.(TOKEN_MONITOR_ISSUES_URL));
 els.refreshButton.addEventListener('click', () => {
   if (state.breakdown === 'status') refreshStatusViewManually().catch(() => {});
   else refreshStats({ force: true, feedback: true });
@@ -5130,17 +6703,74 @@ els.floatingBubbleTab.addEventListener('keydown', (event) => {
   window.tokenMonitor.expandFloatingBubble?.();
 });
 
+async function runAppUpdateAction() {
+  const mode = appUpdateActionMode(state.appUpdate);
+  if (mode === 'install') {
+    state.appUpdate = await window.tokenMonitor.installAppUpdate();
+  } else if (mode === 'download') {
+    state.appUpdate = await window.tokenMonitor.downloadAppUpdate();
+  } else if (mode === 'release') {
+    const latest = state.appUpdate?.latest;
+    if (!latest?.htmlUrl) return;
+    await window.tokenMonitor.openExternal(latest.htmlUrl);
+  } else {
+    return;
+  }
+  renderAppUpdatePill();
+  renderSettingsAppUpdateRow();
+}
+
 els.appUpdatePillAction.addEventListener('click', async () => {
-  const latest = state.appUpdate?.latest;
-  if (!latest?.htmlUrl) return;
-  await window.tokenMonitor.openExternal(latest.htmlUrl);
+  if (appUpdateActionMode(state.appUpdate) === 'install') {
+    await runAppUpdateAction();
+    return;
+  }
+  if (!renderAppUpdatePopover(state.appUpdate) || typeof els.appUpdatePopover.showPopover !== 'function') {
+    await runAppUpdateAction();
+    return;
+  }
+  positionAppUpdatePopover();
+  els.appUpdatePopover.showPopover();
+  els.appUpdatePopoverAction.focus();
 });
 
 els.appUpdatePillDismiss.addEventListener('click', async () => {
   const version = state.appUpdate?.latest?.version;
   if (!version) return;
   state.appUpdate = await window.tokenMonitor.dismissAppUpdate(version);
+  if (els.appUpdatePopover.matches(':popover-open')) els.appUpdatePopover.hidePopover();
   renderAppUpdatePill();
+});
+
+els.appUpdatePopoverClose.addEventListener('click', () => {
+  els.appUpdatePopover.hidePopover();
+});
+
+els.appUpdatePopover.addEventListener('toggle', (event) => {
+  const open = event.newState === 'open';
+  if (els.appUpdatePillAction.hasAttribute('aria-haspopup')) {
+    els.appUpdatePillAction.setAttribute('aria-expanded', String(open));
+  }
+  if (!open) {
+    const active = document.activeElement;
+    if (active === document.body || active === els.appUpdatePopover || els.appUpdatePopover.contains(active)) {
+      els.appUpdatePillAction.focus();
+    }
+  }
+});
+
+els.appUpdatePopoverAction.addEventListener('click', async () => {
+  els.appUpdatePopover.hidePopover();
+  await runAppUpdateAction();
+});
+
+els.appUpdatePopoverRelease.addEventListener('click', async () => {
+  const url = state.appUpdate?.latest?.htmlUrl;
+  if (url) await window.tokenMonitor.openExternal(url);
+});
+
+window.addEventListener('resize', () => {
+  if (els.appUpdatePopover.matches(':popover-open')) positionAppUpdatePopover();
 });
 
 els.appUpdateCheckButton.addEventListener('click', async () => {
@@ -5150,9 +6780,12 @@ els.appUpdateCheckButton.addEventListener('click', async () => {
 });
 
 els.appUpdateViewReleaseButton.addEventListener('click', async () => {
+  await runAppUpdateAction();
+});
+
+els.appUpdateReleaseNotesButton.addEventListener('click', async () => {
   const url = state.appUpdate?.latest?.htmlUrl;
-  if (!url) return;
-  await window.tokenMonitor.openExternal(url);
+  if (url) await window.tokenMonitor.openExternal(url);
 });
 
 window.tokenMonitor.onSettingsPush?.((next) => {
@@ -5162,6 +6795,14 @@ window.tokenMonitor.onSettingsPush?.((next) => {
   syncSettingsForm();
   maybeUpdateBarsIcon();
 });
+
+reducedMotionMedia?.addEventListener?.('change', () => {
+  if (motionPreferenceApi.normalize(state.settings?.reduceMotion) !== 'system') return;
+  applyReduceMotionPreference('system');
+});
+
+window.tokenMonitor.onOpenSettings?.(openSettingsPanel);
+window.tokenMonitor.onOpenView?.(openViewFromTray);
 
 window.tokenMonitor.onFloatingBubbleState?.((payload) => {
   applyFloatingBubbleState(payload);
@@ -5195,10 +6836,16 @@ window.tokenMonitor.onStatsPush?.((payload) => {
     if (payload.data?.mode) state.mode = payload.data.mode;
     state.streamFailure = state.streamConnected ? null : (payload.data?.reason ? { reason: payload.data.reason, detail: payload.data.detail ?? null } : state.streamFailure);
   } else if (payload.data?.stats) {
-    state.streamConnected = true;
-    state.streamFailure = null;
+    // Local collector overlays update client-mode data independently of the
+    // Hub SSE transport. Preserve its current Offline/error state until a
+    // real stream status or remote stats event proves the connection changed.
+    if (payload.data?.reason !== 'local') {
+      state.streamConnected = true;
+      state.streamFailure = null;
+    }
     if (payload.data?.mode) state.mode = payload.data.mode;
-    state.stats = payload.data.stats;
+    state.stats = overlayAllTimeSessions(payload.data.stats);
+    applyCodexActiveAccountFromStats();
     // Progressive mid-tick pushes never carry a fresh history scan (see
     // AGENTS.md collector notes), so only the final push can retire the
     // "just turned trends on" loading state without a flash back to empty.
@@ -5216,37 +6863,28 @@ window.tokenMonitor.onStatsPush?.((payload) => {
     renderWslPanel();
     renderDeepseekStatus();
     renderMinimaxStatus();
+    renderExternalProviderStatus('zai');
+    renderExternalProviderStatus('zaiteam');
+    renderExternalProviderStatus('volcengine');
+    renderExternalProviderStatus('qoder');
+    renderExternalProviderStatus('kimi');
+    renderExternalProviderStatus('ollama');
     renderCopilotStatus();
     maybeUpdateBarsIcon();
   }
   restartTimer();
 });
 
-function pickWorstProvider(stats, windowFilter) {
-  const providers = stats?.limits?.providers || [];
-  let worstProvider = null;
-  let worstRemaining = Infinity;
-  for (const provider of providers) {
-    if (provider.status !== 'ok' || provider.stale) continue;
-    for (const window of provider.windows || []) {
-      if (windowFilter && !windowFilter(window)) continue;
-      const remaining = Number(window.remainingPercent);
-      if (!Number.isFinite(remaining)) continue;
-      if (remaining < worstRemaining) {
-        worstRemaining = remaining;
-        worstProvider = provider;
-      }
-    }
-  }
-  return worstProvider;
+function pickWorstProvider(stats) {
+  return window.TokenMonitorTrayText.pickWorstLimitProvider(stats);
 }
 
 function pickWorstSessionProvider(stats) {
-  return pickWorstProvider(stats, (window) => window.kind === 'session');
+  return window.TokenMonitorTrayText.pickLimitProviderByKindPriority(stats, ['session', 'weekly']);
 }
 
 function pickWorstWeeklyProvider(stats) {
-  return pickWorstProvider(stats, (window) => window.kind === 'weekly');
+  return window.TokenMonitorTrayText.pickWorstLimitProvider(stats, { kind: 'weekly' });
 }
 
 function roundedRectPath(ctx, x, y, w, h, r) {
@@ -5265,12 +6903,10 @@ const trayProviderImages = {};
 function renderBarsIcon(stats, height = 44, picker = pickWorstProvider, colors = {}) {
   const trackColor = colors.track || 'rgba(0, 0, 0, 0.32)';
   const fillColor = colors.fill || 'rgba(0, 0, 0, 1)';
-  const provider = picker(stats);
-  if (!provider) return null;
-  const session = (provider.windows || []).find((w) => w.kind === 'session');
-  const weekly = (provider.windows || []).find((w) => w.kind === 'weekly');
-  const billing = (provider.windows || []).find((w) => w.kind === 'billing');
-  const providerImage = trayProviderImages[provider.provider];
+  const selection = picker(stats);
+  if (!selection) return null;
+  const { providerRecord, primaryWindow, secondaryWindow } = selection;
+  const providerImage = trayProviderImages[providerRecord.provider];
   const { trayBarFillWidth, trayBarsLayout } = window.TokenMonitorTrayBars;
   const layout = trayBarsLayout(height);
 
@@ -5299,48 +6935,30 @@ function renderBarsIcon(stats, height = 44, picker = pickWorstProvider, colors =
     ctx.restore();
   }
 
-  if (session || weekly) {
-    drawBar(layout.barsStartY, Number(session?.remainingPercent));
-    drawBar(layout.barsStartY + layout.barHeight + layout.barGap, Number(weekly?.remainingPercent));
-  } else if (billing) {
-    // Billing-only providers (Grok Monthly) have no session/weekly pair — draw the
-    // single monthly bar on the top track and leave the bottom track empty, instead
-    // of painting two empty bars.
-    drawBar(layout.barsStartY, Number(billing.remainingPercent));
-  }
+  drawBar(layout.barsStartY, primaryWindow?.remainingPercent);
+  drawBar(layout.barsStartY + layout.barHeight + layout.barGap, secondaryWindow?.remainingPercent);
   return canvas.toDataURL('image/png');
 }
 
 function pickConfiguredSessionProviders(stats, configOrder) {
-  const providers = stats?.limits?.providers || [];
-  const byId = providersByLimitProviderId(providers);
-  const result = [];
-  for (const id of configOrder) {
-    let pick = null;
-    for (const p of byId.get(id) || []) {
-      if (!p || p.status !== 'ok' || p.stale) continue;
-      const session = (p.windows || []).find((w) => w.kind === 'session');
-      const remaining = Number(session?.remainingPercent);
-      if (!session || !Number.isFinite(remaining)) continue;
-      if (!pick || remaining < Number(pick.session.remainingPercent)) pick = { provider: p, session };
-    }
-    if (!pick) continue;
-    result.push(pick);
-    if (result.length === 2) break;
-  }
-  return result;
+  return window.TokenMonitorTrayText.pickConfiguredLimitProviders(stats, {
+    limitProviderOrder: configOrder,
+    limitProviders: configOrder,
+    showLimitUsed: Boolean(state.settings?.showLimitUsed)
+  });
 }
 
-function renderAllSessionsIcon(stats, height = 44, configOrder, colors = {}, options = {}) {
+function renderAllSessionsIcon(stats, height = 44, configOrder, colors = {}) {
   const trackColor = colors.track || 'rgba(0, 0, 0, 0.32)';
   const fillColor = colors.fill || 'rgba(0, 0, 0, 1)';
   const picks = pickConfiguredSessionProviders(stats, configOrder);
   if (picks.length === 0) return null;
-  // Only one tool has session data → fall back to that tool's session+weekly view.
-  if (picks.length === 1) return renderBarsIcon(stats, height, () => picks[0].provider, colors);
+  // With one tool, preserve its canonical pair; a lone weekly/billing window is
+  // promoted to the top lane and the lower lane remains an empty track.
+  if (picks.length === 1) return renderBarsIcon(stats, height, () => picks[0], colors);
 
   const { trayBarFillWidth, trayBarsLayout } = window.TokenMonitorTrayBars;
-  const layout = trayBarsLayout(height, { contentOnly: options.contentOnly === true });
+  const layout = trayBarsLayout(height, { contentOnly: true });
   const canvas = document.createElement('canvas');
   canvas.width = layout.width;
   canvas.height = layout.height;
@@ -5348,8 +6966,7 @@ function renderAllSessionsIcon(stats, height = 44, configOrder, colors = {}, opt
   ctx.clearRect(0, 0, layout.width, layout.height);
 
   // No per-row icons — order in the dropdown identifies which row is which tool.
-  // Default layout keeps menubar width stable; the bubble can request content-only
-  // output so the mini-window hugs just the visible bars.
+  // Keep the canvas to just the bars, so the tray does not reserve a blank icon area.
   function drawBar(y, percent) {
     roundedRectPath(ctx, layout.barsX, y, layout.barsWidth, layout.barHeight, layout.radius);
     ctx.fillStyle = trackColor;
@@ -5364,8 +6981,79 @@ function renderAllSessionsIcon(stats, height = 44, configOrder, colors = {}, opt
     ctx.restore();
   }
 
-  drawBar(layout.barsStartY, Number(picks[0].session.remainingPercent));
-  drawBar(layout.barsStartY + layout.barHeight + layout.barGap, Number(picks[1].session.remainingPercent));
+  drawBar(layout.barsStartY, picks[0].primaryWindow.remainingPercent);
+  drawBar(layout.barsStartY + layout.barHeight + layout.barGap, picks[1].primaryWindow.remainingPercent);
+  return canvas.toDataURL('image/png');
+}
+
+function renderLimitSessionsIcon(stats, height = 44, configOrder, colors = {}, options = {}) {
+  const picks = pickConfiguredSessionProviders(stats, configOrder);
+  if (picks.length === 0) return null;
+
+  const textColor = colors.text || colors.fill || 'rgba(0, 0, 0, 1)';
+  const { trayBarsLayout } = window.TokenMonitorTrayBars;
+  const layout = trayBarsLayout(height);
+  const iconSize = layout.iconSize;
+  const gap = Math.max(3, Math.round(height * 0.1));
+  const separator = ' · ';
+  const padX = options.contentOnly === true ? 0 : layout.padX;
+  const fontSize = Math.round(height * 0.68);
+  const font = `500 ${fontSize}px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif`;
+  const showUsed = Boolean(state.settings?.showLimitUsed);
+
+  const measureCanvas = document.createElement('canvas');
+  const measureCtx = measureCanvas.getContext('2d');
+  measureCtx.font = font;
+  const visiblePicks = picks.length === 1
+    ? [{
+        ...picks[0],
+        text: [picks[0].primaryWindow, picks[0].secondaryWindow]
+          .filter(Boolean)
+          .map((window) => formatPercent(limitFillPercent(window.remainingPercent, window.usedPercent, showUsed)))
+          .join(separator)
+      }]
+    : picks.map((pick) => ({
+        ...pick,
+        text: formatPercent(limitFillPercent(pick.primaryWindow.remainingPercent, pick.primaryWindow.usedPercent, showUsed))
+      }));
+  const entries = visiblePicks.map((pick) => {
+    const text = pick.text;
+    const image = trayProviderImages[pick.providerRecord.provider];
+    const textWidth = Math.ceil(measureCtx.measureText(text).width);
+    const iconWidth = image ? iconSize + gap : 0;
+    return { pick, text, image, width: iconWidth + textWidth };
+  }).filter((entry) => entry.text);
+  if (entries.length === 0) return null;
+
+  const separatorWidth = Math.ceil(measureCtx.measureText(separator).width);
+  const width = Math.ceil(
+    padX * 2 +
+    entries.reduce((sum, entry) => sum + entry.width, 0) +
+    separatorWidth * Math.max(0, entries.length - 1)
+  );
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, width);
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = font;
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = textColor;
+
+  let x = padX;
+  const centerY = height / 2;
+  entries.forEach((entry, index) => {
+    if (entry.image) {
+      ctx.drawImage(entry.image, x, layout.iconY, iconSize, iconSize);
+      x += iconSize + gap;
+    }
+    ctx.fillText(entry.text, x, centerY + 1);
+    x += Math.ceil(ctx.measureText(entry.text).width);
+    if (index < entries.length - 1) {
+      ctx.fillText(separator, x, centerY + 1);
+      x += separatorWidth;
+    }
+  });
   return canvas.toDataURL('image/png');
 }
 
@@ -5375,13 +7063,17 @@ function barsDataUrlForMode(mode, size = 44, colors, options = {}) {
   return renderBarsIcon(state.stats, size, pickers[mode] || pickWorstProvider, colors);
 }
 
+function trayDataUrlForMode(mode, size = 44, colors, options = {}) {
+  if (mode === 'limitsAllSessions') return renderLimitSessionsIcon(state.stats, size, configuredLimitProviderOrder(), colors, options);
+  return barsDataUrlForMode(mode, size, colors, options);
+}
+
 async function maybeUpdateBarsIcon() {
   const mode = state.settings?.trayContent;
-  if (mode !== 'bars' && mode !== 'barsSession' && mode !== 'barsWeekly' && mode !== 'barsAllSessions') return;
+  if (mode !== 'bars' && mode !== 'barsSession' && mode !== 'barsWeekly' && mode !== 'barsAllSessions' && mode !== 'limitsAllSessions') return;
   if (!window.tokenMonitor.setTrayIcons) return;
-  const dataUrl = barsDataUrlForMode(mode, 44);
-  if (!dataUrl) return;
-  try { await window.tokenMonitor.setTrayIcons({ [mode]: dataUrl }); } catch (_) {}
+  const dataUrl = trayDataUrlForMode(mode, 44);
+  try { await window.tokenMonitor.setTrayIcons({ [mode]: dataUrl || null }); } catch (_) {}
 }
 
 function loadImage(src) {
@@ -5446,6 +7138,10 @@ function setDeepseekAccountExpanded(expanded) {
   setAccountGroupExpanded('deepseek', expanded, 'deepseekAccountExpanded');
 }
 
+function setMimoAccountExpanded(expanded) {
+  setAccountGroupExpanded('mimo', expanded, 'mimoAccountExpanded');
+}
+
 function setCopilotAccountExpanded(expanded) {
   setAccountGroupExpanded('copilot', expanded, 'copilotAccountExpanded');
 }
@@ -5463,11 +7159,28 @@ function setCursorStatusText(el, text) {
   el.title = text;
 }
 
-function setCodexAccountButtonsDisabled(disabled) {
-  for (const id of ['codexAddAccountButton', 'codexRefreshAccountsButton']) {
-    const el = document.getElementById(id);
-    if (el) el.disabled = disabled;
-  }
+function renderCodexLoginStatus() {
+  const addButton = document.getElementById('codexAddAccountButton');
+  const cancelButton = document.getElementById('codexCancelLoginButton');
+  const refreshButton = document.getElementById('codexRefreshAccountsButton');
+  const openButton = document.getElementById('codexOpenLoginUrlButton');
+  const copyButton = document.getElementById('codexCopyLoginUrlButton');
+  const statusEl = document.getElementById('codexLoginStatus');
+  const urlActions = document.getElementById('codexLoginUrlActions');
+  const details = document.getElementById('codexLoginDetails');
+  const output = document.getElementById('codexLoginOutput');
+  if (!addButton || !cancelButton || !refreshButton || !openButton || !copyButton || !statusEl || !urlActions || !details || !output) return;
+
+  addButton.classList.toggle('hidden', state.codexSignInBusy);
+  cancelButton.classList.toggle('hidden', !state.codexSignInBusy);
+  refreshButton.classList.toggle('hidden', state.codexSignInBusy);
+  statusEl.textContent = state.codexLoginStatus;
+  statusEl.classList.toggle('hidden', !state.codexLoginStatus);
+  urlActions.classList.toggle('hidden', !state.codexSignInBusy);
+  openButton.classList.toggle('hidden', !state.codexLoginUrl);
+  copyButton.classList.toggle('hidden', !state.codexLoginUrl);
+  output.textContent = state.codexLoginOutput;
+  details.classList.toggle('hidden', !state.codexLoginOutput);
 }
 
 function renderCodexAccounts() {
@@ -5525,7 +7238,7 @@ function renderCodexAccounts() {
       right.className = 'managed-account-right';
       const info = document.createElement('span');
       info.className = 'managed-account-info';
-      info.textContent = enabled ? account.accountLabel || '' : t('settings.codex.disabled');
+      info.textContent = enabled ? limitProviderPresentationApi.limitProviderDisplayLabel(account.accountLabel) : t('settings.codex.disabled');
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'managed-account-remove';
@@ -5584,13 +7297,10 @@ async function refreshCodexAccounts() {
 // Linked. Only legacy/non-aggregated stats without a `devices` array may fall
 // back to the aggregate; once raw device rows are present they are authoritative.
 function localDeviceLimitsProviders() {
-  const devices = state.stats?.devices;
-  if (!Array.isArray(devices)) return null;
-  const localId = state.settings?.deviceId || '';
-  const local = localId
-    ? devices.find((device) => device.deviceId === localId)
-    : (devices.length === 1 ? devices[0] : null);
-  return local?.limits?.providers || [];
+  return accountIdentityApi.localDeviceLimitsProviders(
+    state.stats,
+    state.settings?.deviceId || ''
+  );
 }
 
 function localProviderStatus(name) {
@@ -5632,6 +7342,106 @@ function clearDeepseekPendingCheck() {
 function clearDeepseekProviderStatus() {
   if (!Array.isArray(state.stats?.limits?.providers)) return;
   state.stats.limits.providers = state.stats.limits.providers.filter((provider) => provider.provider !== 'deepseek');
+}
+
+function mimoAccountLinked() {
+  return (state.settings?.mimoManagedAccounts || []).length > 0;
+}
+
+function renderMimoStatus() {
+  const statusEl = document.getElementById('mimoAccountStatus');
+  const listEl = document.getElementById('mimoAccountList');
+  const emptyEl = document.getElementById('mimoAccountEmpty');
+  const errorEl = document.getElementById('mimoAccountErrorMessage');
+  if (!statusEl || !listEl || !emptyEl || !errorEl) return;
+  const accounts = state.settings?.mimoManagedAccounts || [];
+  const enabledCount = accounts.filter((account) => account.enabled !== false).length;
+  const statusText = accounts.length === 0
+    ? t('settings.mimo.notConfigured')
+    : t('settings.mimo.connected', { linked: enabledCount, total: accounts.length });
+  setCursorStatusText(statusEl, statusText);
+  errorEl.textContent = state.mimoAccountError || '';
+  errorEl.classList.toggle('hidden', !state.mimoAccountError);
+  emptyEl.classList.toggle('hidden', accounts.length > 0);
+
+  listEl.replaceChildren();
+  if (accounts.length > 0) {
+    for (const [index, account] of accounts.entries()) {
+      const enabled = account.enabled !== false;
+      const accountName = mimoSettingsAccountTitle(account, index);
+      const row = document.createElement('div');
+      row.className = 'managed-account-row';
+      row.classList.toggle('disabled', !enabled);
+
+      const input = document.createElement('input');
+      input.className = 'managed-account-checkbox';
+      input.type = 'checkbox';
+      input.checked = enabled;
+      input.setAttribute('aria-label', t('settings.mimo.toggleAccount', {
+        account: accountName
+      }));
+      input.addEventListener('change', async () => {
+        input.disabled = true;
+        const result = await window.tokenMonitor.mimo.setAccountEnabled(account.id, input.checked);
+        if (!result?.ok) {
+          state.mimoAccountError = result?.error || t('settings.mimo.toggleFailed');
+        } else {
+          state.mimoAccountError = '';
+          state.settings.mimoManagedAccounts = result.accounts || [];
+        }
+        renderMimoStatus();
+        renderSettingsSummaries();
+      });
+
+      const main = document.createElement('div');
+      main.className = 'managed-account-main';
+      const label = document.createElement('div');
+      label.className = 'managed-account-email';
+      label.textContent = accountName;
+      main.append(label);
+
+      const right = document.createElement('span');
+      right.className = 'managed-account-right';
+      const info = document.createElement('span');
+      info.className = 'managed-account-info';
+      info.textContent = enabled ? limitProviderPresentationApi.limitProviderDisplayLabel(account.accountLabel) : t('settings.mimo.disabled');
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'managed-account-remove';
+      remove.textContent = '✕';
+      remove.title = t('settings.mimo.remove');
+      let confirmingRemove = false;
+      remove.addEventListener('click', async () => {
+        if (!confirmingRemove) {
+          confirmingRemove = true;
+          remove.classList.add('confirming');
+          remove.textContent = '✓';
+          remove.title = t('settings.mimo.removeConfirm', {
+            account: accountName
+          });
+          return;
+        }
+        const result = await window.tokenMonitor.mimo.removeAccount(account.id);
+        if (result?.ok) {
+          state.mimoAccountError = '';
+          state.settings.mimoManagedAccounts = result.accounts || [];
+          renderMimoStatus();
+          renderSettingsSummaries();
+          refreshStats({ force: true }).catch(() => {});
+          return;
+        }
+        state.mimoAccountError = result?.error || t('settings.mimo.removeFailed');
+        renderMimoStatus();
+        renderSettingsSummaries();
+      });
+
+      right.append(info, remove);
+      row.append(input, main, right);
+      listEl.append(row);
+    }
+  }
+  renderSettingsSummaries();
 }
 
 function minimaxProviderStatus() {
@@ -5700,8 +7510,85 @@ function clearCopilotProviderStatus() {
   state.stats.limits.providers = state.stats.limits.providers.filter((provider) => provider.provider !== 'copilot');
 }
 
+const externalLimitAccountConfig = {
+  zai: {
+    configuredKey: 'zaiApiKeyConfigured',
+    sourceKey: 'zaiApiKeySource',
+    pendingKey: 'zaiPendingCheckSince'
+  },
+  zaiteam: {
+    configuredKey: 'zaiTeamApiKeyConfigured',
+    sourceKey: 'zaiTeamApiKeySource',
+    pendingKey: 'zaiteamPendingCheckSince'
+  },
+  volcengine: {
+    configuredKey: 'volcengineCredentialsConfigured',
+    sourceKey: 'volcengineCredentialsSource',
+    pendingKey: 'volcenginePendingCheckSince'
+  },
+  qoder: {
+    configuredKey: 'qoderCookieConfigured',
+    sourceKey: 'qoderCookieSource',
+    pendingKey: 'qoderPendingCheckSince'
+  },
+  kimi: {
+    configuredKey: 'kimiApiKeyConfigured',
+    sourceKey: 'kimiApiKeySource',
+    pendingKey: 'kimiPendingCheckSince'
+  },
+  ollama: {
+    configuredKey: 'ollamaCookieConfigured',
+    sourceKey: 'ollamaCookieSource',
+    pendingKey: 'ollamaPendingCheckSince'
+  }
+};
+
+function externalProviderForAccount(providerName) {
+  const provider = localProviderStatus(providerName);
+  const config = externalLimitAccountConfig[providerName];
+  const pendingSince = Number(config ? state[config.pendingKey] : 0);
+  if (!provider || !pendingSince) return provider;
+  const updatedAt = Date.parse(provider.updatedAt || '');
+  if (!Number.isFinite(updatedAt) || updatedAt < pendingSince) return null;
+  state[config.pendingKey] = 0;
+  return provider;
+}
+
+function externalProviderAccountLinked(providerName) {
+  const config = externalLimitAccountConfig[providerName];
+  const provider = externalProviderForAccount(providerName);
+  return Boolean(config && state.settings?.[config.configuredKey]) && provider?.status === 'ok';
+}
+
+function markExternalProviderCheckPending(providerName) {
+  const config = externalLimitAccountConfig[providerName];
+  if (!config) return;
+  state[config.pendingKey] = Date.now();
+  clearExternalProviderPendingStatus(providerName);
+}
+
+function clearExternalProviderCheckPending(providerName) {
+  const config = externalLimitAccountConfig[providerName];
+  if (config) state[config.pendingKey] = 0;
+}
+
+function clearExternalProviderPendingStatus(providerName) {
+  if (!Array.isArray(state.stats?.limits?.providers)) return;
+  state.stats.limits.providers = state.stats.limits.providers.filter((provider) => provider.provider !== providerName);
+}
+
 function nextCopilotSignInFlowId() {
   return `copilot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function nextCodexSignInFlowId() {
+  return `codex-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isCurrentCodexSignInFlow(flowId) {
+  const current = String(state.codexSignInFlowId || '');
+  const incoming = String(flowId || '');
+  return current && incoming === current;
 }
 
 function isCurrentCopilotSignInFlow(flowId) {
@@ -5754,6 +7641,107 @@ function minimaxPlatformUrl() {
   return region === 'en'
     ? 'https://platform.minimax.io/user-center/payment/token-plan'
     : 'https://platform.minimaxi.com/user-center/payment/token-plan';
+}
+
+function setExternalAccountExpanded(providerName, expanded) {
+  const details = document.getElementById(`${providerName}SettingsDetails`);
+  const toggle = document.getElementById(`${providerName}SettingsToggle`);
+  if (!details || !toggle) return;
+  state[`${providerName}AccountExpanded`] = expanded;
+  details.classList.toggle('hidden', !expanded);
+  toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
+function zaiPlatformUrl() {
+  const selectedRegion = document.getElementById('zaiApiRegionInput')?.value;
+  const region = selectedRegion || (state.settings?.zaiApiRegion === 'bigmodel-cn' ? 'bigmodel-cn' : 'global');
+  return region === 'bigmodel-cn'
+    ? 'https://bigmodel.cn/coding-plan/personal/usage'
+    : 'https://z.ai/manage-apikey/coding-plan/personal/my-plan';
+}
+
+function zaiteamPlatformUrl() {
+  return 'https://bigmodel.cn/coding-plan/team/usage-stats';
+}
+
+function volcenginePlatformUrl() {
+  return 'https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&advancedActiveKey=subscribe';
+}
+
+function selectedQoderSite() {
+  const selectedSite = document.getElementById('qoderSiteInput')?.value;
+  return selectedSite || (state.settings?.qoderSite === 'cn' ? 'cn' : 'global');
+}
+
+function qoderUsagePagePath() {
+  return selectedQoderSite() === 'cn' ? 'qoder.com.cn/account/usage' : 'qoder.com/account/usage';
+}
+
+function qoderPlatformUrl() {
+  return `https://${qoderUsagePagePath()}`;
+}
+
+function updateQoderUsagePageHint() {
+  const hint = document.getElementById('qoderUsagePageHint');
+  if (hint) hint.textContent = qoderUsagePagePath();
+}
+
+function kimiPlatformUrl() {
+  return 'https://www.kimi.com/code/console';
+}
+
+function ollamaPlatformUrl() {
+  return 'https://ollama.com/settings';
+}
+
+function ollamaValidationError(provider) {
+  if (provider?.status === 'unauthorized') return t('settings.ollama.validationInvalid');
+  if (provider?.status === 'rateLimited' || provider?.status === 'sourceRateLimited') {
+    return t('settings.ollama.validationRateLimited');
+  }
+  return t('settings.ollama.validationUnavailable');
+}
+
+function renderExternalProviderStatus(providerName) {
+  const config = externalLimitAccountConfig[providerName];
+  const statusEl = document.getElementById(`${providerName}AccountStatus`);
+  const openBtn = document.getElementById(`${providerName}OpenBrowser`);
+  const logoutBtn = document.getElementById(`${providerName}LogoutButton`);
+  const refreshBtn = document.getElementById(`${providerName}RefreshButton`);
+  const manualPanel = document.getElementById(`${providerName}ManualPanel`);
+  const errorEl = document.getElementById(`${providerName}ErrorMessage`);
+  if (!config || !statusEl || !openBtn || !logoutBtn || !refreshBtn || !manualPanel || !errorEl) return;
+
+  errorEl.classList.add('hidden');
+  errorEl.textContent = '';
+
+  const source = state.settings?.[config.sourceKey] || '';
+  const wasPending = Number(state[config.pendingKey] || 0) > 0;
+  const provider = externalProviderForAccount(providerName);
+  const configured = Boolean(state.settings?.[config.configuredKey]);
+  const pending = Number(state[config.pendingKey] || 0) > 0;
+  const linked = externalProviderAccountLinked(providerName);
+  if (providerName === 'ollama' && wasPending && !pending && linked) {
+    setExternalAccountExpanded('ollama', false);
+  }
+  if (providerName === 'zai') {
+    const regionInput = document.getElementById('zaiApiRegionInput');
+    if (regionInput) regionInput.value = state.settings?.zaiApiRegion === 'bigmodel-cn' ? 'bigmodel-cn' : 'global';
+  }
+  if (providerName === 'qoder') {
+    const siteInput = document.getElementById('qoderSiteInput');
+    if (siteInput) siteInput.value = state.settings?.qoderSite === 'cn' ? 'cn' : 'global';
+    updateQoderUsagePageHint();
+  }
+  setCursorStatusText(
+    statusEl,
+    pending ? t('settings.common.checking') : apiKeyAccountStatusText(providerName, provider, configured, source)
+  );
+  manualPanel.classList.toggle('hidden', linked);
+  openBtn.classList.toggle('hidden', linked);
+  logoutBtn.classList.toggle('hidden', !linked || source !== 'settings');
+  refreshBtn.classList.toggle('hidden', !configured);
+  renderSettingsSummaries();
 }
 
 function setMinimaxAccountExpanded(expanded) {
@@ -6290,54 +8278,94 @@ function setupCursorAccountUI() {
     setCodexAccountExpanded(false);
     renderCodexAccounts();
 
-    let codexLoginBusy = false;
-    let codexLoginUnsubscribe = null;
-    const codexLoginOutput = document.getElementById('codexLoginOutput');
     const codexAddButton = document.getElementById('codexAddAccountButton');
-    const showLoginStatus = (statusKey, streamed = '') => {
-      if (!codexLoginOutput) return;
-      codexLoginOutput.textContent = streamed ? `${t(statusKey)}\n\n${streamed}` : t(statusKey);
-      codexLoginOutput.classList.remove('hidden');
-      codexLoginOutput.scrollTop = codexLoginOutput.scrollHeight;
-    };
+    const codexCancelButton = document.getElementById('codexCancelLoginButton');
+    const codexOpenUrlButton = document.getElementById('codexOpenLoginUrlButton');
+    const codexCopyUrlButton = document.getElementById('codexCopyLoginUrlButton');
+    const codexLoginDetails = document.getElementById('codexLoginDetails');
+    window.tokenMonitor.codex.onLoginStatus((status) => {
+      if (!status || !isCurrentCodexSignInFlow(status.flowId) || status.phase !== 'output') return;
+      state.codexLoginOutput = (state.codexLoginOutput + String(status.text || '')).slice(-3000);
+      if (status.loginUrl) state.codexLoginUrl = status.loginUrl;
+      state.codexLoginStatus = t(state.codexLoginUrl ? 'settings.codex.loginWaiting' : 'settings.codex.loginStarting');
+      renderCodexLoginStatus();
+    });
     codexAddButton.addEventListener('click', async () => {
-      if (codexLoginBusy) return;
-      codexLoginBusy = true;
+      if (state.codexSignInBusy) return;
+      const flowId = nextCodexSignInFlowId();
+      state.codexSignInFlowId = flowId;
+      state.codexSignInBusy = true;
+      state.codexLoginUrl = '';
+      state.codexLoginOutput = '';
+      state.codexLoginStatus = t('settings.codex.loginStarting');
       state.codexAccountError = '';
-      let streamed = '';
-      showLoginStatus('settings.codex.loginStarting');
-      setCodexAccountButtonsDisabled(true);
-      codexAddButton.textContent = t('settings.codex.signingIn');
+      if (codexLoginDetails) codexLoginDetails.open = false;
+      renderCodexLoginStatus();
       renderCodexAccounts();
-      codexLoginUnsubscribe?.();
-      codexLoginUnsubscribe = window.tokenMonitor.codex.onLoginOutput((text) => {
-        streamed = (streamed + text).slice(-3000);
-        showLoginStatus('settings.codex.loginStarting', streamed);
-      });
       try {
-        const result = await window.tokenMonitor.codex.addAccount();
+        const result = await window.tokenMonitor.codex.addAccount({ flowId });
+        if (!isCurrentCodexSignInFlow(result?.flowId || flowId)) return;
         if (!result?.ok) {
+          if (result?.outcome === 'cancelled') return;
           state.codexAccountError = result?.error || t('settings.codex.loginFailed');
-          showLoginStatus('settings.codex.loginFailed', streamed);
+          state.codexLoginStatus = t('settings.codex.loginFailed');
+          if (codexLoginDetails && state.codexLoginOutput) codexLoginDetails.open = true;
           setCodexAccountExpanded(true);
         } else {
           state.codexAccountError = '';
-          showLoginStatus('settings.codex.loginSuccess');
+          state.codexLoginStatus = t('settings.codex.loginSuccess');
+          renderCodexLoginStatus();
           state.settings.codexManagedAccounts = await window.tokenMonitor.codex.accounts();
-          if (codexLoginOutput) codexLoginOutput.classList.add('hidden');
           await refreshStats({ force: true });
+          state.codexLoginStatus = '';
+          state.codexLoginOutput = '';
         }
       } catch (err) {
+        if (!isCurrentCodexSignInFlow(flowId)) return;
         state.codexAccountError = err.message;
+        state.codexLoginStatus = t('settings.codex.loginFailed');
+        if (codexLoginDetails && state.codexLoginOutput) codexLoginDetails.open = true;
       } finally {
-        codexLoginUnsubscribe?.();
-        codexLoginUnsubscribe = null;
-        codexLoginBusy = false;
-        setCodexAccountButtonsDisabled(false);
-        codexAddButton.textContent = t('settings.codex.addAccount');
+        if (isCurrentCodexSignInFlow(flowId)) {
+          state.codexSignInBusy = false;
+          state.codexSignInFlowId = '';
+          state.codexLoginUrl = '';
+          renderCodexLoginStatus();
+          renderCodexAccounts();
+        }
+      }
+    });
+
+    codexCancelButton.addEventListener('click', async () => {
+      const flowId = state.codexSignInFlowId;
+      if (!isCurrentCodexSignInFlow(flowId)) return;
+      const result = await window.tokenMonitor.codex.cancelLogin({ flowId });
+      if (!result?.cancelled || !isCurrentCodexSignInFlow(flowId)) return;
+      state.codexSignInBusy = false;
+      state.codexSignInFlowId = '';
+      state.codexLoginUrl = '';
+      state.codexLoginStatus = '';
+      state.codexLoginOutput = '';
+      state.codexAccountError = '';
+      if (codexLoginDetails) codexLoginDetails.open = false;
+      renderCodexLoginStatus();
+      renderCodexAccounts();
+    });
+
+    codexOpenUrlButton.addEventListener('click', async () => {
+      if (!state.codexLoginUrl) return;
+      const result = await window.tokenMonitor.openExternal(state.codexLoginUrl);
+      if (!result?.ok) {
+        state.codexAccountError = result?.error || t('settings.codex.openLoginUrlFailed');
         renderCodexAccounts();
       }
     });
+
+    codexCopyUrlButton.addEventListener('click', () => {
+      if (state.codexLoginUrl) copyToClipboard(state.codexLoginUrl, codexCopyUrlButton);
+    });
+
+    renderCodexLoginStatus();
 
     document.getElementById('codexRefreshAccountsButton').addEventListener('click', () => {
       refreshCodexAccounts();
@@ -6521,6 +8549,408 @@ function setupCursorAccountUI() {
     });
   }
 
+  const zaiToggle = document.getElementById('zaiSettingsToggle');
+  if (zaiToggle) {
+    const zaiApiRegionInput = document.getElementById('zaiApiRegionInput');
+    if (zaiApiRegionInput) zaiApiRegionInput.value = state.settings?.zaiApiRegion === 'bigmodel-cn' ? 'bigmodel-cn' : 'global';
+    zaiApiRegionInput?.addEventListener('change', () => void saveSettings({ zaiApiRegion: zaiApiRegionInput.value || 'global' }));
+    zaiToggle.addEventListener('click', () => setExternalAccountExpanded('zai', !state.zaiAccountExpanded));
+    setExternalAccountExpanded('zai', false);
+    renderExternalProviderStatus('zai');
+
+    document.getElementById('zaiOpenBrowser').addEventListener('click', () => {
+      window.tokenMonitor.openExternal(zaiPlatformUrl());
+    });
+
+    document.getElementById('zaiLogoutButton').addEventListener('click', async () => {
+      await saveSettings({ zaiApiKey: '' });
+      clearExternalProviderCheckPending('zai');
+      clearExternalProviderPendingStatus('zai');
+      renderExternalProviderStatus('zai');
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('zaiRefreshButton').addEventListener('click', async () => {
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('zaiApiKeySubmit').addEventListener('click', async () => {
+      const input = document.getElementById('zaiApiKeyInput');
+      const regionInput = document.getElementById('zaiApiRegionInput');
+      const errorEl = document.getElementById('zaiErrorMessage');
+      errorEl.classList.add('hidden');
+      if (!String(input.value || '').trim()) {
+        errorEl.textContent = t('settings.zai.statusNotSet');
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      try {
+        markExternalProviderCheckPending('zai');
+        await saveSettings({ zaiApiKey: input.value, zaiApiRegion: regionInput?.value || 'global' });
+        input.value = '';
+        renderExternalProviderStatus('zai');
+        await refreshStats({ force: true });
+        setExternalAccountExpanded('zai', !externalProviderAccountLinked('zai'));
+        renderExternalProviderStatus('zai');
+      } catch (err) {
+        clearExternalProviderCheckPending('zai');
+        errorEl.textContent = t('settings.zai.saveFailed', { message: err.message });
+        errorEl.classList.remove('hidden');
+      }
+    });
+  }
+
+  const zaiteamToggle = document.getElementById('zaiteamSettingsToggle');
+  if (zaiteamToggle) {
+    zaiteamToggle.addEventListener('click', () => setExternalAccountExpanded('zaiteam', !state.zaiteamAccountExpanded));
+    setExternalAccountExpanded('zaiteam', false);
+    renderExternalProviderStatus('zaiteam');
+
+    document.getElementById('zaiteamOpenBrowser').addEventListener('click', () => {
+      window.tokenMonitor.openExternal(zaiteamPlatformUrl());
+    });
+
+    document.getElementById('zaiteamLogoutButton').addEventListener('click', async () => {
+      await saveSettings({ zaiTeamApiKey: '', zaiTeamOrganizationId: '', zaiTeamProjectId: '' });
+      clearExternalProviderCheckPending('zaiteam');
+      clearExternalProviderPendingStatus('zaiteam');
+      renderExternalProviderStatus('zaiteam');
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('zaiteamRefreshButton').addEventListener('click', async () => {
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('zaiteamApiKeySubmit').addEventListener('click', async () => {
+      const keyInput = document.getElementById('zaiteamApiKeyInput');
+      const orgInput = document.getElementById('zaiteamOrganizationIdInput');
+      const projectInput = document.getElementById('zaiteamProjectIdInput');
+      const errorEl = document.getElementById('zaiteamErrorMessage');
+      errorEl.classList.add('hidden');
+      const apiKey = String(keyInput.value || '').trim();
+      const organizationId = String(orgInput.value || '').trim();
+      const projectId = String(projectInput.value || '').trim();
+      if (!apiKey || !organizationId || !projectId) {
+        errorEl.textContent = t('settings.zaiteam.statusNotSet');
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      try {
+        markExternalProviderCheckPending('zaiteam');
+        await saveSettings({ zaiTeamApiKey: apiKey, zaiTeamOrganizationId: organizationId, zaiTeamProjectId: projectId });
+        keyInput.value = '';
+        orgInput.value = '';
+        projectInput.value = '';
+        renderExternalProviderStatus('zaiteam');
+        await refreshStats({ force: true });
+        setExternalAccountExpanded('zaiteam', !externalProviderAccountLinked('zaiteam'));
+        renderExternalProviderStatus('zaiteam');
+      } catch (err) {
+        clearExternalProviderCheckPending('zaiteam');
+        errorEl.textContent = t('settings.zaiteam.saveFailed', { message: err.message });
+        errorEl.classList.remove('hidden');
+      }
+    });
+  }
+
+  const volcengineToggle = document.getElementById('volcengineSettingsToggle');
+  if (volcengineToggle) {
+    volcengineToggle.addEventListener('click', () => setExternalAccountExpanded('volcengine', !state.volcengineAccountExpanded));
+    setExternalAccountExpanded('volcengine', false);
+    renderExternalProviderStatus('volcengine');
+
+    document.getElementById('volcengineOpenBrowser').addEventListener('click', () => {
+      window.tokenMonitor.openExternal(volcenginePlatformUrl());
+    });
+
+    document.getElementById('volcengineLogoutButton').addEventListener('click', async () => {
+      await saveSettings({ volcengineAccessKeyId: '', volcengineSecretAccessKey: '', volcengineRegion: '' });
+      clearExternalProviderCheckPending('volcengine');
+      clearExternalProviderPendingStatus('volcengine');
+      renderExternalProviderStatus('volcengine');
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('volcengineRefreshButton').addEventListener('click', async () => {
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('volcengineCredentialsSubmit').addEventListener('click', async () => {
+      const accessKeyInput = document.getElementById('volcengineAccessKeyInput');
+      const secretInput = document.getElementById('volcengineSecretAccessKeyInput');
+      const regionInput = document.getElementById('volcengineRegionInput');
+      const errorEl = document.getElementById('volcengineErrorMessage');
+      errorEl.classList.add('hidden');
+      const accessKeyValue = String(accessKeyInput.value || '').trim();
+      const secretValue = String(secretInput.value || '').trim();
+      if (!accessKeyValue || (/^AKLT/i.test(accessKeyValue) && !secretValue)) {
+        errorEl.textContent = t('settings.volcengine.statusNotSet');
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      try {
+        markExternalProviderCheckPending('volcengine');
+        await saveSettings({
+          volcengineAccessKeyId: accessKeyInput.value,
+          volcengineSecretAccessKey: secretInput.value,
+          volcengineRegion: regionInput.value || 'cn-beijing'
+        });
+        accessKeyInput.value = '';
+        secretInput.value = '';
+        renderExternalProviderStatus('volcengine');
+        await refreshStats({ force: true });
+        setExternalAccountExpanded('volcengine', !externalProviderAccountLinked('volcengine'));
+        renderExternalProviderStatus('volcengine');
+      } catch (err) {
+        clearExternalProviderCheckPending('volcengine');
+        errorEl.textContent = t('settings.volcengine.saveFailed', { message: err.message });
+        errorEl.classList.remove('hidden');
+      }
+    });
+  }
+
+  const qoderToggle = document.getElementById('qoderSettingsToggle');
+  if (qoderToggle) {
+    qoderToggle.addEventListener('click', () => setExternalAccountExpanded('qoder', !state.qoderAccountExpanded));
+    setExternalAccountExpanded('qoder', false);
+    renderExternalProviderStatus('qoder');
+
+    const qoderSiteInput = document.getElementById('qoderSiteInput');
+    if (qoderSiteInput) qoderSiteInput.value = state.settings?.qoderSite === 'cn' ? 'cn' : 'global';
+    updateQoderUsagePageHint();
+    qoderSiteInput?.addEventListener('change', () => {
+      updateQoderUsagePageHint();
+      void saveSettings({ qoderSite: qoderSiteInput.value || 'global' });
+    });
+
+    document.getElementById('qoderOpenBrowser').addEventListener('click', () => {
+      window.tokenMonitor.openExternal(qoderPlatformUrl());
+    });
+
+    document.getElementById('qoderLogoutButton').addEventListener('click', async () => {
+      await saveSettings({ qoderCookie: '' });
+      clearExternalProviderCheckPending('qoder');
+      clearExternalProviderPendingStatus('qoder');
+      renderExternalProviderStatus('qoder');
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('qoderRefreshButton').addEventListener('click', async () => {
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('qoderCookieSubmit').addEventListener('click', async () => {
+      const input = document.getElementById('qoderCookieInput');
+      const siteInput = document.getElementById('qoderSiteInput');
+      const errorEl = document.getElementById('qoderErrorMessage');
+      errorEl.classList.add('hidden');
+      if (!String(input.value || '').trim()) {
+        errorEl.textContent = t('settings.qoder.statusNotSet');
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      try {
+        markExternalProviderCheckPending('qoder');
+        await saveSettings({ qoderCookie: input.value, qoderSite: siteInput?.value || 'global' });
+        input.value = '';
+        renderExternalProviderStatus('qoder');
+        await refreshStats({ force: true });
+        setExternalAccountExpanded('qoder', !externalProviderAccountLinked('qoder'));
+        renderExternalProviderStatus('qoder');
+      } catch (err) {
+        clearExternalProviderCheckPending('qoder');
+        errorEl.textContent = t('settings.qoder.saveFailed', { message: err.message });
+        errorEl.classList.remove('hidden');
+      }
+    });
+  }
+
+  const ollamaToggle = document.getElementById('ollamaSettingsToggle');
+  if (ollamaToggle) {
+    ollamaToggle.addEventListener('click', () => setExternalAccountExpanded('ollama', !state.ollamaAccountExpanded));
+    setExternalAccountExpanded('ollama', false);
+    renderExternalProviderStatus('ollama');
+
+    document.getElementById('ollamaOpenBrowser').addEventListener('click', () => {
+      window.tokenMonitor.openExternal(ollamaPlatformUrl());
+    });
+    document.getElementById('ollamaLogoutButton').addEventListener('click', async () => {
+      await saveSettings({ ollamaCookie: '' });
+      clearExternalProviderCheckPending('ollama');
+      clearExternalProviderPendingStatus('ollama');
+      renderExternalProviderStatus('ollama');
+      await refreshStats({ force: true });
+    });
+    document.getElementById('ollamaRefreshButton').addEventListener('click', async () => {
+      await refreshStats({ force: true });
+    });
+    document.getElementById('ollamaCookieSubmit').addEventListener('click', async () => {
+      const input = document.getElementById('ollamaCookieInput');
+      const errorEl = document.getElementById('ollamaErrorMessage');
+      errorEl.classList.add('hidden');
+      if (!String(input.value || '').trim()) {
+        errorEl.textContent = t('settings.ollama.statusNotSet');
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      try {
+        markExternalProviderCheckPending('ollama');
+        renderExternalProviderStatus('ollama');
+        const validation = await window.tokenMonitor.ollama.validateCookie(input.value);
+        if (!validation?.ok) {
+          clearExternalProviderCheckPending('ollama');
+          renderExternalProviderStatus('ollama');
+          errorEl.textContent = ollamaValidationError(validation);
+          errorEl.classList.remove('hidden');
+          return;
+        }
+        await saveSettings({
+          ollamaCookie: input.value,
+          limitProviders: limitProviderSelectionIncluding('ollama'),
+          limitsEnabled: true
+        });
+        if (!state.settings?.ollamaCookieConfigured) {
+          clearExternalProviderCheckPending('ollama');
+          renderExternalProviderStatus('ollama');
+          errorEl.textContent = t('settings.ollama.validationInvalid');
+          errorEl.classList.remove('hidden');
+          return;
+        }
+        input.value = '';
+        renderExternalProviderStatus('ollama');
+      } catch (err) {
+        clearExternalProviderCheckPending('ollama');
+        renderExternalProviderStatus('ollama');
+        errorEl.textContent = t('settings.ollama.saveFailed', { message: err.message });
+        errorEl.classList.remove('hidden');
+      }
+    });
+  }
+
+  const kimiToggle = document.getElementById('kimiSettingsToggle');
+  if (kimiToggle) {
+    kimiToggle.addEventListener('click', () => setExternalAccountExpanded('kimi', !state.kimiAccountExpanded));
+    setExternalAccountExpanded('kimi', false);
+    renderExternalProviderStatus('kimi');
+
+    document.getElementById('kimiOpenBrowser').addEventListener('click', () => {
+      window.tokenMonitor.openExternal(kimiPlatformUrl());
+    });
+
+    document.getElementById('kimiLogoutButton').addEventListener('click', async () => {
+      await saveSettings({ kimiApiKey: '' });
+      clearExternalProviderCheckPending('kimi');
+      clearExternalProviderPendingStatus('kimi');
+      renderExternalProviderStatus('kimi');
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('kimiRefreshButton').addEventListener('click', async () => {
+      await refreshStats({ force: true });
+    });
+
+    document.getElementById('kimiApiKeySubmit').addEventListener('click', async () => {
+      const input = document.getElementById('kimiApiKeyInput');
+      const errorEl = document.getElementById('kimiErrorMessage');
+      errorEl.classList.add('hidden');
+      if (!String(input.value || '').trim()) {
+        errorEl.textContent = t('settings.kimi.statusNotSet');
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      try {
+        markExternalProviderCheckPending('kimi');
+        await saveSettings({ kimiApiKey: input.value });
+        input.value = '';
+        renderExternalProviderStatus('kimi');
+        await refreshStats({ force: true });
+        setExternalAccountExpanded('kimi', !externalProviderAccountLinked('kimi'));
+        renderExternalProviderStatus('kimi');
+      } catch (err) {
+        clearExternalProviderCheckPending('kimi');
+        errorEl.textContent = t('settings.kimi.saveFailed', { message: err.message });
+        errorEl.classList.remove('hidden');
+      }
+    });
+  }
+
+  const mimoToggle = document.getElementById('mimoSettingsToggle');
+  if (mimoToggle) {
+    mimoToggle.addEventListener('click', () => setMimoAccountExpanded(!state.mimoAccountExpanded));
+
+    const addToggle = document.getElementById('mimoAddToggle');
+    const addDetails = document.getElementById('mimoAddDetails');
+    function setMimoAddExpanded(expanded) {
+      const next = Boolean(expanded);
+      addToggle?.setAttribute('aria-expanded', next ? 'true' : 'false');
+      addDetails?.classList.toggle('hidden', !next);
+      document.getElementById('mimoManualPanel')?.classList.toggle('expanded', next);
+    }
+    addToggle?.addEventListener('click', () => setMimoAddExpanded(addDetails?.classList.contains('hidden')));
+    setMimoAccountExpanded(false);
+    renderMimoStatus();
+
+    window.tokenMonitor.mimo.onAccounts((accounts) => {
+      state.settings.mimoManagedAccounts = accounts || [];
+      renderMimoStatus();
+    });
+
+    window.tokenMonitor.mimo.accounts().then((accounts) => {
+      state.settings.mimoManagedAccounts = accounts || [];
+      renderMimoStatus();
+    }).catch(() => {});
+
+    document.getElementById('mimoOpenConsoleButton').addEventListener('click', async () => {
+      const result = await window.tokenMonitor.mimo.openConsole();
+      if (!result?.ok) {
+        state.mimoAccountError = result?.error || t('settings.mimo.openFailed');
+        renderMimoStatus();
+        return;
+      }
+      state.mimoAccountError = '';
+      renderMimoStatus();
+    });
+
+    document.getElementById('mimoSaveAccountButton').addEventListener('click', async () => {
+      const input = document.getElementById('mimoCookieInput');
+      const saveButton = document.getElementById('mimoSaveAccountButton');
+      saveButton.disabled = true;
+      saveButton.textContent = t('settings.mimo.checking');
+      let result;
+      try {
+        result = await window.tokenMonitor.mimo.addAccount(input.value);
+      } catch (_) {
+        result = { ok: false, errorCode: 'validationUnavailable' };
+      } finally {
+        saveButton.disabled = false;
+        saveButton.textContent = t('settings.mimo.saveAccount');
+      }
+      if (!result?.ok) {
+        if (result?.errorCode === 'missingRequiredCookies') {
+          state.mimoAccountError = t('settings.mimo.missingCookies', { cookies: (result.missingCookies || []).join(', ') });
+        } else if (result?.errorCode === 'invalidCookie') {
+          state.mimoAccountError = t('settings.mimo.invalidCookie');
+        } else if (result?.errorCode === 'validationRateLimited') {
+          state.mimoAccountError = t('settings.mimo.validationRateLimited');
+        } else if (result?.errorCode === 'validationUnavailable') {
+          state.mimoAccountError = t('settings.mimo.validationUnavailable');
+        } else if (result?.errorCode === 'credentialStorageUnavailable') {
+          state.mimoAccountError = t('settings.mimo.credentialStorageUnavailable');
+        } else {
+          state.mimoAccountError = result?.error || t('settings.mimo.addFailed');
+        }
+        renderMimoStatus();
+        return;
+      }
+      input.value = '';
+      state.mimoAccountError = '';
+      state.settings.mimoManagedAccounts = await window.tokenMonitor.mimo.accounts();
+      renderMimoStatus();
+      setMimoAddExpanded(false);
+      await refreshStats({ force: true });
+    });
+  }
   const copilotToggle = document.getElementById('copilotSettingsToggle');
   if (copilotToggle) {
     copilotToggle.addEventListener('click', () => setCopilotAccountExpanded(!state.copilotAccountExpanded));
@@ -6665,7 +9095,13 @@ function initSettingsAnimationWrappers() {
     '#cursorManualPanel',
     '#opencodeManualPanel',
     '#deepseekManualPanel',
-    '#minimaxManualPanel'
+    '#minimaxManualPanel',
+    '#zaiManualPanel',
+    '#zaiteamManualPanel',
+    '#volcengineManualPanel',
+    '#qoderManualPanel',
+    '#kimiManualPanel',
+    '#ollamaManualPanel'
   ].join(', ');
 
   document.querySelectorAll(selectors).forEach(el => {

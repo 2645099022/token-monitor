@@ -11,6 +11,13 @@
   ]);
 
   function finiteNumber(value) {
+    if (
+      value === null
+      || value === undefined
+      || (typeof value === 'string' && value.trim() === '')
+    ) {
+      return null;
+    }
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
   }
@@ -48,9 +55,38 @@
     };
   }
 
+  function mimoPlanWindow(balance) {
+    if (!balance || balance.planStatus === 'expired') return null;
+    const used = finiteNumber(balance.planUsed);
+    const limit = finiteNumber(balance.planLimit);
+    const percent = finiteNumber(balance.planPercent);
+    if (used == null && limit == null && percent == null) return null;
+    const usedPercent = percent != null
+      ? clampPercent(percent)
+      : (used != null && limit != null && limit > 0 ? clampPercent((used / limit) * 100) : null);
+    return {
+      kind: 'billing',
+      label: 'Token Plan',
+      usedPercent,
+      remainingPercent: usedPercent == null ? null : clampPercent(100 - usedPercent)
+    };
+  }
+
   function accountWindows(account) {
+    const providerId = String(account?.providerId || '').trim().toLowerCase();
     const windows = Array.isArray(account?.windows) ? [...account.windows] : [];
-    if (account?.providerId === 'deepseek') {
+    if (providerId === 'mimo' && account?.balance?.planStatus === 'expired') {
+      const withoutStalePlan = windows.filter((window) => String(window?.kind || '').trim().toLowerCase() !== 'billing');
+      withoutStalePlan.push({ kind: 'billing', label: 'Token Plan', showMeter: false, planStatus: 'expired' });
+      const balance = balanceWindow(account.balance);
+      if (balance) withoutStalePlan.push(balance);
+      return withoutStalePlan;
+    }
+    if (providerId === 'mimo' && !windows.some((window) => String(window?.kind || '').trim().toLowerCase() === 'billing')) {
+      const plan = mimoPlanWindow(account.balance);
+      if (plan) windows.push(plan);
+    }
+    if (providerId === 'deepseek' || providerId === 'mimo') {
       const balance = balanceWindow(account.balance);
       if (balance) windows.push(balance);
     }
@@ -68,11 +104,12 @@
             resetsAt: window.resetsAt,
             resetDescription: window.resetDescription || '',
             value: window.value || '',
+            planStatus: window.planStatus || '',
             amount: finiteNumber(window.amount),
             currency: window.currency || '',
             index: windowIndex
           }))
-          .filter((window) => window.remainingPercent != null)
+          .filter((window) => window.remainingPercent != null || window.planStatus === 'expired' || window.value)
           .sort((a, b) => {
             const aPriority = windowPriority.get(a.kind) ?? 10;
             const bPriority = windowPriority.get(b.kind) ?? 10;
@@ -86,7 +123,7 @@
           providerId: account.providerId || '',
           name: account.name || '',
           color: account.color || '',
-          lowestRemaining: Math.min(...windows.map((window) => window.remainingPercent)),
+          lowestRemaining: Math.min(...windows.map((window) => window.remainingPercent ?? 100)),
           windows,
           index
         };
@@ -232,6 +269,29 @@
     return historyHasDays(homeHistory) ? homeHistory : (preview || { daily: [] });
   }
 
+  // The full-year homeHistory is fetched once per session and then frozen, so its today
+  // bucket lags the live headline total as usage accrues within the day (the trends
+  // sparkline avoids this via patchTodayBar). Overwrite today's tokens AND cost with the
+  // live period totals so the home heatmap/trend agree with the number shown above them
+  // — cost matters because dailyWithHeatIntensity colours cells by cost when any exists,
+  // so an appended today with cost 0 would render as an empty cell. Append a today row
+  // when the frozen snapshot predates today (app opened before midnight). Returns a new
+  // array; the input is never mutated.
+  function patchDailyToday(daily, todayDate, todayTotal, todayCost) {
+    const rows = Array.isArray(daily) ? daily.slice() : [];
+    const date = String(todayDate || '').slice(0, 10);
+    if (!date) return rows;
+    const tokens = finiteNumber(todayTotal) || 0;
+    const cost = finiteNumber(todayCost) || 0;
+    const idx = rows.findIndex((row) => String(row?.date).slice(0, 10) === date);
+    if (idx === -1) {
+      rows.push({ date, tokens, cost });
+      return rows;
+    }
+    rows[idx] = Object.assign({}, rows[idx], { tokens, cost });
+    return rows;
+  }
+
   // Stable signature of the preview's daily tail. Two previews with the same key
   // describe the same fetch opportunity, so the full history is fetched at most
   // once per distinct preview state — a failed/empty fetch (e.g. a transient
@@ -298,6 +358,7 @@
     homeDeviceRows,
     homeTrendSummary,
     pickHomeHistory,
+    patchDailyToday,
     historyPreviewKey,
     shouldFetchHomeHistory,
     homeActivityHeatmapLayout,

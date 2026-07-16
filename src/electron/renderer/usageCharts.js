@@ -148,6 +148,7 @@
   function contribHeatmap(daily, options) {
     const o = Object.assign({ cell: 11, gap: 2, startDate: null, endDate: null }, options || {});
     const intensities = new Map();
+    const values = new Map();
     // startDate/endDate, when given, fix the window (e.g. a rolling year) so the grid
     // spans the whole range even where there are no records; otherwise it hugs the data.
     let minDate = o.startDate ? String(o.startDate).slice(0, 10) : null;
@@ -155,6 +156,7 @@
     for (const d of (Array.isArray(daily) ? daily : [])) {
       const key = String(d.date).slice(0, 10);
       intensities.set(key, n(d.intensity));
+      values.set(key, { tokens: n(d.tokens), cost: n(d.cost) });
       if (!o.startDate && (!minDate || key < minDate)) minDate = key;
       if (!o.endDate && (!maxDate || key > maxDate)) maxDate = key;
     }
@@ -172,7 +174,8 @@
       // Label the column that contains the 1st of a month — this puts the first
       // month flush at the left edge (the leading week always spans a month's 1st).
       if (key.slice(8, 10) === '01') monthLabels.push({ col, label: key.slice(0, 7) });
-      cells.push({ date: key, intensity: intensities.get(key) || 0, col, row, x: col * (o.cell + o.gap), y: row * (o.cell + o.gap), size: o.cell });
+      const value = values.get(key) || { tokens: 0, cost: 0 };
+      cells.push({ date: key, intensity: intensities.get(key) || 0, tokens: value.tokens, cost: value.cost, col, row, x: col * (o.cell + o.gap), y: row * (o.cell + o.gap), size: o.cell });
     }
     const weeks = cells.length ? cells[cells.length - 1].col + 1 : 0;
     return {
@@ -308,8 +311,8 @@
     claude: '#cc7c5e', codex: '#49a3b0', hermes: '#d4af37', gemini: '#4285f4',
     antigravity: '#4285f4', cline: '#323B43', kimi: '#16191e', grok: '#000000', copilot: '#000000', deepseek: '#4d6bfe', cursor: '#000000', opencode: '#000000',
     openclaw: '#ff4d4d', xai: '#000000', meta: '#1d65c1', mistral: '#fa520f', qwen: '#615ced',
-    pi: '#000', zed: '#4173e7', kilocode: '#F8F676', micode: '#000000', zcode: '#000000', kiro: '#9046FF', codebuddy: '#6C4DFF', workbuddy: '#0DC8A5',
-    moonshot: '#16191e', zai: '#000000', cohere: '#39594d', xiaomi: '#ff6700', minimax: '#f23f5d',
+    pi: '#000', zed: '#4173e7', kilocode: '#F8F676', micode: '#000000', zcode: '#000000', kiro: '#9046FF', codebuddy: '#6C4DFF', workbuddy: '#0DC8A5', proma: '#000000',
+    moonshot: '#16191e', zai: '#000000', zaiteam: '#000000', cohere: '#39594d', xiaomi: '#ff6700', minimax: '#f23f5d', doubao: '#1E37FC', volcengine: '#006EFF', qoder: '#2ADB5C', ollama: '#888888',
     default: '#6ab4f0'
   };
   const fallbackModelColors = ['#6ab4f0', '#cc7c5e', '#a57df0', '#49a3b0', '#f0d66a', '#f06a7b'];
@@ -330,6 +333,7 @@
     if (/cohere|command-r/.test(name)) return 'cohere';
     if (/mimo|xiaomi/.test(name)) return 'xiaomi';
     if (/minimax|\babab/.test(name)) return 'minimax';
+    if (/doubao|\bseed(?:-|$)/.test(name)) return 'doubao';
     if (/^big-pickle$/.test(name)) return 'opencode'; // OpenCode Zen stealth model — no vendor hint in the name
     return null;
   }
@@ -422,7 +426,8 @@
       const title = tip ? `<title>${escapeXml(tip)}</title>` : '';
       const hover = `<rect data-i="${bar.index}" x="${svgRound(bar.x)}" y="${svgRound(p.y)}" width="${svgRound(bar.width)}" height="${svgRound(p.h)}" class="bar-hover">${title}</rect>`;
       const label = axisText(o.axisLabel(bar, bar.index, model.bars), bar.x + bar.width / 2, model.height - 4);
-      return drawn + hover + label;
+      const stack = `<g class="bar-stack" data-motion-key="${encodeURIComponent(String(bar.label))}">${drawn}</g>`;
+      return stack + hover + label;
     }).join('');
     const baseline = `<line class="axis-base" x1="${svgRound(p.x)}" y1="${svgRound(p.y + p.h)}" x2="${svgRound(p.x + p.w)}" y2="${svgRound(p.y + p.h)}"></line>`;
     return `<svg class="dash-chart" viewBox="0 0 ${model.width} ${model.height}" width="100%" height="100%">${grid}${baseline}${parts}</svg>`;
@@ -434,24 +439,51 @@
     const grid = yAxisSvg(p, model.maxVal, o.yTicks, o.formatTick);
     const parts = (model.candles || []).map((c, i) => {
       const cls = c.up ? 'candle-up' : 'candle-down';
-      const wick = `<line class="candle-wick ${cls}" x1="${svgRound(c.wickX)}" y1="${svgRound(c.yHigh)}" x2="${svgRound(c.wickX)}" y2="${svgRound(c.yLow)}"></line>`;
-      const body = `<rect class="candle-body ${cls}" x="${svgRound(c.x)}" y="${svgRound(c.bodyY)}" width="${svgRound(c.width)}" height="${svgRound(Math.max(1, c.bodyHeight))}" rx="1"></rect>`;
+      const bodyHeight = Math.max(1, c.bodyHeight);
+      const bodyMid = c.bodyY + bodyHeight / 2;
+      const wick = `<line class="candle-wick candle-wick-high ${cls}" x1="${svgRound(c.wickX)}" y1="${svgRound(bodyMid)}" x2="${svgRound(c.wickX)}" y2="${svgRound(c.yHigh)}"></line>`
+        + `<line class="candle-wick candle-wick-low ${cls}" x1="${svgRound(c.wickX)}" y1="${svgRound(bodyMid)}" x2="${svgRound(c.wickX)}" y2="${svgRound(c.yLow)}"></line>`;
+      const body = `<rect class="candle-body ${cls}" x="${svgRound(c.x)}" y="${svgRound(c.bodyY)}" width="${svgRound(c.width)}" height="${svgRound(bodyHeight)}" rx="1"></rect>`;
       const tip = o.titleOf(c);
       const title = tip ? `<title>${escapeXml(tip)}</title>` : '';
       const hover = `<rect data-i="${i}" x="${svgRound(c.x)}" y="${svgRound(p.y)}" width="${svgRound(c.width)}" height="${svgRound(p.h)}" class="bar-hover">${title}</rect>`;
       const label = axisText(o.axisLabel(c, i, model.candles), c.wickX, model.height - 4);
-      return wick + body + hover + label;
+      const candle = `<g class="candle-stack" data-motion-key="${encodeURIComponent(String(c.key))}">${wick}${body}</g>`;
+      return candle + hover + label;
     }).join('');
     return `<svg class="dash-chart" viewBox="0 0 ${model.width} ${model.height}" width="100%" height="100%">${grid}${parts}</svg>`;
   }
 
   function heatmapSvg(model, options) {
-    const o = Object.assign({ titleOf: () => '', monthLabel: (m) => m.label, radius: 3 }, options || {});
+    const o = Object.assign({ titleOf: () => '', monthLabel: (m) => m.label, radius: 3, glowFilterId: '', spotlightId: '', spotlightRadius: 86, initialHidden: false }, options || {});
     const botPad = 16;
     const pitch = (model.cell || 11) + (model.gap || 2);
+    const glowFilterId = String(o.glowFilterId || '');
+    const spotlightId = String(o.spotlightId || '');
+    const spotlightGradientId = spotlightId ? `${spotlightId}Gradient` : '';
+    const spotlightMaskId = spotlightId ? `${spotlightId}Mask` : '';
+    const radius = svgRound(Math.max(1, Number(o.spotlightRadius) || 86));
+    const defsParts = [];
+    if (glowFilterId) {
+      defsParts.push(`<filter id="${escapeXml(glowFilterId)}" x="-80%" y="-80%" width="260%" height="260%" color-interpolation-filters="sRGB"><feDropShadow dx="0" dy="0" stdDeviation="2.1" flood-color="rgb(120, 190, 255)" flood-opacity="0.95"></feDropShadow><feDropShadow dx="0" dy="0" stdDeviation="4.2" flood-color="rgb(120, 190, 255)" flood-opacity="0.42"></feDropShadow></filter>`);
+    }
+    if (spotlightId) {
+      defsParts.push(`<radialGradient id="${escapeXml(spotlightGradientId)}" gradientUnits="userSpaceOnUse" cx="-200" cy="-200" r="${radius}"><stop offset="0" stop-color="white" stop-opacity="1"></stop><stop offset="0.35" stop-color="white" stop-opacity="0.62"></stop><stop offset="0.75" stop-color="white" stop-opacity="0"></stop></radialGradient><mask id="${escapeXml(spotlightMaskId)}"><rect x="0" y="0" width="${svgRound(model.width)}" height="${svgRound(model.height)}" fill="url(#${escapeXml(spotlightGradientId)})"></rect></mask>`);
+    }
+    const defs = defsParts.length ? `<defs>${defsParts.join('')}</defs>` : '';
+    const initialVisibility = o.initialHidden ? ' data-motion-hidden="true" opacity="0"' : '';
+    const cellAttrs = (c) => `class="heat lvl-${c.intensity}" data-d="${escapeXml(c.date)}" data-t="${svgRound(c.tokens || 0)}" data-cost="${svgRound(c.cost || 0)}" x="${svgRound(c.x)}" y="${svgRound(c.y)}" width="${svgRound(c.size)}" height="${svgRound(c.size)}" rx="${svgRound(Math.max(0, Number(o.radius) || 0))}"${initialVisibility}`;
     const cells = (model.cells || []).map((c) =>
-      `<rect class="heat lvl-${c.intensity}" data-d="${c.date}" x="${svgRound(c.x)}" y="${svgRound(c.y)}" width="${svgRound(c.size)}" height="${svgRound(c.size)}" rx="${svgRound(Math.max(0, Number(o.radius) || 0))}">${o.titleOf(c) ? `<title>${escapeXml(o.titleOf(c))}</title>` : ''}</rect>`
+      `<rect ${cellAttrs(c)}>${o.titleOf(c) ? `<title>${escapeXml(o.titleOf(c))}</title>` : ''}</rect>`
     ).join('');
+    const brightCells = spotlightId
+      ? (model.cells || []).map((c) =>
+        `<rect class="heat heat-bright lvl-${c.intensity}" x="${svgRound(c.x)}" y="${svgRound(c.y)}" width="${svgRound(c.size)}" height="${svgRound(c.size)}" rx="${svgRound(Math.max(0, Number(o.radius) || 0))}"></rect>`
+      ).join('')
+      : '';
+    const brightLayer = spotlightId
+      ? `<g class="heat-bright-layer" mask="url(#${escapeXml(spotlightMaskId)})" aria-hidden="true">${brightCells}</g>`
+      : '';
     // Month labels sit BELOW the grid, left-anchored at the column where each month
     // starts — so the current month naturally lands on whichever column its 1st falls in
     // (no special-casing), and the first month sits flush at the left edge.
@@ -459,7 +491,7 @@
     const months = (model.monthLabels || []).map((m) =>
       `<text class="heat-month" x="${svgRound(m.col * pitch)}" y="${svgRound(labelY)}" text-anchor="start">${escapeXml(o.monthLabel(m))}</text>`
     ).join('');
-    return `<svg class="dash-heatmap" viewBox="0 0 ${model.width} ${model.height + botPad}" width="${model.width}" height="${model.height + botPad}">${cells}${months}</svg>`;
+    return `<svg class="dash-heatmap" viewBox="0 0 ${model.width} ${model.height + botPad}" width="${model.width}" height="${model.height + botPad}">${defs}<g class="heat-base-layer">${cells}</g>${brightLayer}${months}</svg>`;
   }
 
   function statsCardsHtml(cards, options) {

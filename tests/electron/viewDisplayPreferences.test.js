@@ -50,6 +50,7 @@ test('main default settings use the default view display preferences', () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '../../src/electron/main.js'), 'utf8');
   assert.match(mainSource, /defaultViewDisplayPreferences/);
   assert.match(mainSource, /hiddenViews:\s*defaultViewDisplayPreferences\(\)\.hiddenViews/);
+  assert.match(mainSource, /projectsEnabled:\s*parseBoolean\(process\.env\.TOKEN_MONITOR_PROJECTS_ENABLED, false\)/);
 });
 
 test('main default settings include independent Home module preferences', () => {
@@ -127,6 +128,19 @@ test('visibleViewOrder applies order, hidden views, and runtime availability', (
       availableIds: ['tool', 'device', 'model', 'session']
     }),
     ['session', 'tool', 'model']
+  );
+});
+
+test('visibleViewOrder temporarily includes a directly opened hidden view in configured order', () => {
+  assert.deepEqual(
+    visibleViewOrder({
+      views,
+      orderValue: 'session,limits,tool,device,model',
+      hiddenValue: 'device,session',
+      availableIds: ['tool', 'device', 'model', 'session'],
+      includeIds: ['device']
+    }),
+    ['tool', 'device', 'model']
   );
 });
 
