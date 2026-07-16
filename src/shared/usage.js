@@ -3,6 +3,8 @@
 const PERIODS = ['today', 'month', 'allTime'];
 const { aggregateLimits, normalizeLimitsSummary } = require('./limits');
 const { coerceHistory, mergeHistories } = require('./history');
+const { canonicalProjectKey, deterministicProjectLabel } = require('./projectKey');
+const { normalizeSyncUploadIntervalMs, staleAfterMsForSyncUpload } = require('./syncUploadInterval');
 // Local-only persistence layer (off by default until a writer is injected via
 // `options.persistence`). When a writer is supplied, every row that flows
 // through extractUsageFromTokscale is also stored to a local SQLite DB so
@@ -1020,4 +1022,4 @@ function deltaValue(base, fresh, anchor, key) {
   return base ?? fresh;
 }
 
-module.exports = { PERIODS, addPeriodInto, aggregateDevices, aggregateHistory, applyPeriodDelta, carryDeviceHistory, emptyPeriod, extractUsageFromTokscale, mergeDeviceRecord, mergePeriods, normalizeDeviceRecord, normalizePeriod, setPersistenceWriter };
+module.exports = { PERIODS, addPeriodInto, aggregateDevices, aggregateHistory, applyPeriodDelta, applyProjectRollups, canonicalProjectKey, carryDeviceHistory, emptyPeriod, extractUsageFromTokscale, mergeDeviceRecord, mergePeriods, normalizeDeviceRecord, normalizePeriod, projectRollupFromSessions, setPersistenceWriter };

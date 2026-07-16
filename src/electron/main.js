@@ -77,11 +77,33 @@ const {
   normalizeArchivedClientUsage,
   pruneArchivedClientUsage
 } = require('../shared/clientUsageArchive');
-const { aggregateDevices, aggregateHistory, carryDeviceHistory, setPersistenceWriter: setUsageWriter } = require('../shared/usage');
+const {
+  applySessionUsageArchive,
+  captureSessionUsageArchive,
+  clearSessionUsageArchive,
+  normalizeSessionUsageArchive,
+  readSessionUsageArchive,
+  sessionUsageArchiveDate,
+  writeSessionUsageArchive
+} = require('../shared/sessionUsageArchive');
+const {
+  aggregateDevices,
+  aggregateHistory,
+  applyProjectRollups,
+  carryDeviceHistory,
+  setPersistenceWriter: setUsageWriter
+} = require('../shared/usage');
 const { openDb: openUsageDb } = require('../shared/persistence/db');
 const { createWriter: createUsageWriter } = require('../shared/persistence/recordWriter');
-const { syncLimits } = require('../shared/limits');
-const { historyPreview } = require('../shared/history');
+const { postSyncPayload, syncPayload } = require('../shared/syncPayload');
+const { mergedLocalAllTimeSessions } = require('../shared/localSessions');
+const {
+  MIMO_PLATFORM_CONSOLE_URL,
+  createMimoManagedAccount,
+  fetchMimoLimits,
+  normalizeMimoCookieHeader
+} = require('../shared/mimoLimits');
+const { historyPreview, historyRevision } = require('../shared/history');
 const { readSessionDetail } = require('../shared/sessionDetail');
 const { startDiscordRpc, stopDiscordRpc, updateDiscordRpc } = require('./discordRpc');
 const linuxAutostart = require('./linuxAutostart');
@@ -168,6 +190,7 @@ let dashboardWindow = null;
 let settingsPath = null;
 let settings = null;
 let usagePersistenceHandle = null;
+let sessionUsageArchive = null;
 let rendererViewState = normalizeInitialRendererViewState();
 const serviceStatusClient = createServiceStatusClient();
 const STATUS_PAGE_HOSTS = new Set(SERVICE_STATUS_PROVIDERS.map((provider) => new URL(provider.pageUrl).hostname));
