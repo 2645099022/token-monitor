@@ -7,9 +7,10 @@ const test = require('node:test');
 const { claudeCommandCandidates, fetchClaudeLimits, mapClaudeCliUsageToProvider, mapClaudeUsageToProvider } = require('../../src/shared/limitCollector');
 
 function fakeSpawnForClaudeUsage(expectedCommand = 'claude.cmd') {
-  return (command, args) => {
+  return (command, args, options) => {
     assert.equal(command, expectedCommand);
-    assert.deepEqual(args, ['/usage']);
+    assert.deepEqual(args, ['--no-session-persistence', '/usage']);
+    assert.equal(options.cwd, 'C:\\tmp\\token-monitor-claude-probe');
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -47,6 +48,7 @@ test('Claude limits fall back to direct CLI usage on Windows when OAuth usage is
       status: 500
     }),
     existsSync: () => false,
+    claudeProbeDir: 'C:\\tmp\\token-monitor-claude-probe',
     spawn: fakeSpawnForClaudeUsage()
   });
 
