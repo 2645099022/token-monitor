@@ -61,6 +61,20 @@ Token Monitor는 **토큰 사용량**, **계정 한도**, **세션 상세**를 �
 | <img src=".github/assets/tools-icon/qoder.png" width="28" alt="Qoder" /> | Qoder | Qoder dashboard cookie (Qoder usage API로 big-model credits 조회) | — | ✅ | — |
 | <img src=".github/assets/tools-icon/ollama.png" width="28" alt="Ollama" /> | Ollama | Ollama Cloud cookie (ollama.com/settings에서 session/weekly 사용량 조회) | — | ✅ | — |
 
+## 쇼케이스
+
+| 홈 보기 | 한도 보기 | 도구 보기 |
+|:---:|:---:|:---:|
+| ![홈 보기](.github/assets/home-view.png) | ![한도 보기](.github/assets/limits-view.png) | ![도구 보기](.github/assets/tools-view.png) |
+
+| 세션 보기 | 모델 보기 | 서비스 상태 |
+|:---:|:---:|:---:|
+| ![세션 보기](.github/assets/sessions-view.png) | ![모델 보기](.github/assets/models-view.png) | ![서비스 상태](.github/assets/status-view.png) |
+
+| 사용 대시보드 — 개요 | 사용 대시보드 — 추세 |
+|:---:|:---:|
+| ![사용 대시보드 개요](.github/assets/dashboard-overview.png) | ![사용 대시보드 추세](.github/assets/dashboard-trends.png) |
+
 ## Token Monitor를 쓰는 이유
 
 대부분의 사용량 모니터는 실행 중인 그 기기에서만 유용합니다. Token Monitor는 멀티 디바이스 작업을 위해 만들어졌습니다. 각 기기가 로컬 로그를 감시하고 hub로 요약을 보내면, 연결된 모든 위젯이 토큰 변화를 거의 실시간으로 볼 수 있습니다.
@@ -88,26 +102,14 @@ Token Monitor는 **토큰 사용량**, **계정 한도**, **세션 상세**를 �
 - **자체 호스트 동기화** — 위젯 내 hub, Node CLI hub, Cloudflare Worker
 - **iOS 위젯** — Worker hub + Widgy, Scriptable
 - **Discord Rich Presence** — 오늘 토큰·비용·주요 클라이언트 (옵트인)
-- **프라이버시 우선** — 요약 숫자만 기기 밖으로 나감
-
-| 한도 보기 | 기기 보기 | 모델 보기 |
-|:---:|:---:|:---:|
-| ![한도 보기](.github/assets/limits-view.png) | ![기기 보기](.github/assets/devices-view.png) | ![모델 보기](.github/assets/models-view.png) |
-
-| 세션 보기 | 세션 상세 | 서비스 상태 |
-|:---:|:---:|:---:|
-| ![세션 보기](.github/assets/sessions-view.png) | ![세션 상세](.github/assets/session-details.png) | ![서비스 상태](.github/assets/status-view.png) |
-
-| 사용 대시보드 — 개요 | 사용 대시보드 — 추세 |
-|:---:|:---:|
-| ![사용 대시보드 개요](.github/assets/dashboard-overview.png) | ![사용 대시보드 추세](.github/assets/dashboard-trends.png) |
+- **프라이버시 우선** — 프롬프트, 응답, 소스 코드, 파일 내용은 모두 기기에만 보관
 
 ## 설치
 
 [GitHub Releases](https://github.com/Javis603/token-monitor/releases)에서 다운로드하세요.
 
 - **macOS (Apple Silicon)** — `.dmg`, 서명 및 notarize 완료
-- **Windows 10/11** — 설치용 `.exe`; 서명은 준비 중이라 SmartScreen이 표시될 수 있습니다
+- **Windows 10/11** — 설치용 및 휴대용 `.exe`, [SignPath Foundation](docs/code-signing.md)을 통해 서명됨
 - **Linux x64** — `.AppImage`
 
 패키지 빌드는 GitHub Releases를 자동 확인합니다. 새 버전이 있으면 화면에 업데이트 표시가 나타나며, 지원되는 플랫폼에서는 설정 → 일반에서도 설치할 수 있습니다.
@@ -189,6 +191,20 @@ npm run pack       # 설치 없이 앱 디렉터리만 (로컬 테스트)
 
 위젯은 **설정 → 멀티 디바이스 동기화**에 따라 로컬/동기화를 선택합니다. hub는 `npm run hub`, Cloudflare Worker, 또는 위젯 내 Host 모드로 실행할 수 있습니다. 동기화 모드에서는 hub가 SSE로 집계 통계를 푸시해 한 기기의 변경이 수 초 내 다른 기기에 반영됩니다.
 
+## 세션 데이터 보존 기간
+
+활동 히트맵과 트렌드 대시보드는 각 도구가 디스크에 남겨 둔 세션 파일로 만들어집니다. **Claude Code는 기본적으로 30일이 지난 트랜스크립트를 삭제합니다**(`cleanupPeriodDays`). **삭제된 세션 사용량 유지**(설정 → 수집)를 켜면 Token Monitor는 오늘/이번 달/전체 세션 합계와 함께 이미 관측한 모든 일별 도구/모델 정보를 기간 제한 없이 로컬에 보존합니다. 히트맵과 동기화 데이터는 계속 370일 롤링 기간을 사용하며, 더 오래된 관측 데이터는 향후 보기를 위해 로컬에 남습니다. 이후 원본 파일이 정리되어도 관측된 날짜는 사라지지 않지만, Token Monitor가 처음 관측하기 전에 이미 삭제된 데이터는 이 아카이브로 복구할 수 없습니다.
+
+히트맵의 1년치 롤링 기간을 보존하려면 기간이 지나기 전에 `~/.claude/settings.json`에서 Claude Code의 보존 기간을 늘리세요:
+
+```json
+{
+  "cleanupPeriodDays": 370
+}
+```
+
+370은 히트맵의 표시 기간에 해당합니다. 값을 키우면 더 오래 남길 수 있지만, 그만큼 트랜스크립트가 디스크에 계속 남습니다. 다른 도구의 기본값과 설정 파일 경로는 tokscale의 [Session Data Retention](https://github.com/junhoyeo/tokscale#session-data-retention) 표를 참고하세요.
+
 ## 설정
 
 ### 위젯 (GUI)
@@ -235,15 +251,7 @@ npm run agent -- --clients=claude,codex,opencode --once
 
 ## 프라이버시
 
-hub와 agent는 요약 필드만 전송합니다.
-
-- 기기 id, 호스트명, 플랫폼
-- 기간별 총 토큰 (오늘 / 이번 달 / 전체)
-- 비용 합계 (`tokscale`이 비용을 반환할 때)
-- 클라이언트·모델별 분류
-- AI 도구 한도 사용 시 정규화된 Claude Code/Codex/Cursor/Antigravity/OpenCode/Grok/Minimax/MiMo/GitHub Copilot/Kiro/GLM/Volcengine/Qoder/Kimi/Ollama 한도 상태
-
-원본 AI 로그, 프롬프트, 소스 코드, 대화 내용, OAuth·토큰·이메일·제공자 원본 응답은 전송하지 않습니다. `.env`, `data/`, `node_modules/`는 gitignore됩니다.
+Token Monitor는 사용 로그를 로컬에서 처리하며 프로젝트 관리자에게 분석 또는 원격 측정 데이터를 보내지 않습니다. 네트워크 접근은 문서화되었거나 사용자가 활성화한 기능에만 사용됩니다. 업데이트, 제공자 연동, Discord Rich Presence 및 선택적 다중 기기 동기화에서 사용하는 데이터는 [개인정보 처리방침](docs/privacy.md)을 참고하세요.
 
 ## 요구 사항
 
@@ -269,6 +277,7 @@ Issue와 PR을 환영합니다. 프로젝트 규약, 아키텍처 노트, 명령
 
 - [tokscale](https://github.com/junhoyeo/tokscale) — 로그 파싱 및 토큰 집계
 - [CodexBar](https://github.com/steipete/CodexBar) — AI 도구 한도 연구
+- **[코드 서명 정책](docs/code-signing.md):** 무료 코드 서명은 [SignPath.io](https://signpath.io/)에서 제공하고 인증서는 [SignPath Foundation](https://signpath.org/)에서 제공합니다.
 
 ## 라이선스
 

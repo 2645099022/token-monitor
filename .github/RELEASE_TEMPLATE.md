@@ -1,38 +1,37 @@
 # English
 
-**Open-source build.** macOS is signed and notarized; Windows is unsigned (SmartScreen may appear); Linux AppImages need executable permission — see notes below.
-
 ## What's changed
 
 <!-- app-update-notes:en:start -->
 ### Added
-- **Low-limit highlights:** Added an optional Home setting that highlights remaining AI tool limits below 50% and marks critical limits below 20%. (#161)
-- **Reduce Motion:** Added a three-state preference under Appearance. System follows the OS setting, On reduces animations, and Off keeps animations enabled across the main widget and Usage Dashboard. (#167)
+- **Device usage details:** Expand a device to see its tool and model usage for Day, Month, and Total, together with its operating system, Widget or Agent version, and last sync time. (#206, #208)
 
 ### Improved
-- **Usage animations:** Live token totals and breakdown values now transition smoothly, while bars, activity heatmaps, trend lines, and Dashboard bar/K-line charts animate data and period changes. Page navigation stays immediate. (#163, #166)
-- **Update release notes:** Improved the contrast and readability of the release notes popover. (#162)
+- **Credential storage:** GUI-managed credentials are now separated from preferences in a permission-restricted local store, with safer migration and rollback when a save fails. (#200)
+- **Footer controls:** Refresh and Settings now share a compact footer control that reveals the other button on hover or keyboard focus; their order can also be swapped under Appearance. (#203)
+- **Windows application signing:** The installed application executable is now signed as well as the installer and portable download. (#198)
 
 ### Fixed
-- **App updates:** Dismissed updates remain available through manual checks and Settings, while downloaded updates expose the restart action instead of staying hidden. (#158)
-- **Claude limits:** Fall back to the Claude CLI when OAuth credentials cannot be found, so limits continue to load for signed-in CLI sessions. (#159)
+- **Grok limits:** Unified credit usage now honors standard proxy settings and no longer falls back to the legacy billing endpoint. (#175)
+- **Live usage animation:** Totals, row values, and bars no longer restart or jump during unrelated refreshes, and continue smoothly when data changes mid-animation. (#204)
+- **Disabled limit accounts:** Disabled providers no longer remain stuck on Checking, and pending checks clear immediately when a provider is turned off. (#205)
 <!-- app-update-notes:en:end -->
 
 ## Download
 
-- **macOS Apple Silicon** — [Token-Monitor-0.29.0-arm64.dmg](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0-arm64.dmg)
-- **Windows Installer** — [Token-Monitor-Setup-0.29.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-Setup-0.29.0.exe) (recommended)
-- **Windows Portable** — [Token-Monitor-0.29.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0.exe) (no install required)
-- **Linux x64** — [Token-Monitor-0.29.0.AppImage](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0.AppImage)
+- **macOS Apple Silicon** — [Token-Monitor-0.32.0-arm64.dmg](https://github.com/Javis603/token-monitor/releases/download/v0.32.0/Token-Monitor-0.32.0-arm64.dmg)
+- **Windows Installer** — [Token-Monitor-Setup-0.32.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.32.0/Token-Monitor-Setup-0.32.0.exe) (recommended)
+- **Windows Portable** — [Token-Monitor-0.32.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.32.0/Token-Monitor-0.32.0.exe) (no install required)
+- **Linux x64** — [Token-Monitor-0.32.0.AppImage](https://github.com/Javis603/token-monitor/releases/download/v0.32.0/Token-Monitor-0.32.0.AppImage)
 
 <details>
 <summary><strong>First launch and other notes</strong></summary>
 
 ### First launch
 
-**macOS:** open the `.dmg`, drag Token Monitor to Applications.
+**macOS:** the app is Developer ID-signed and notarized by Apple. Open the `.dmg`, then drag Token Monitor to Applications.
 
-**Windows:** SmartScreen → More info → Run anyway.
+**Windows:** both executables are signed ([how to verify](https://github.com/Javis603/token-monitor/blob/main/docs/code-signing.md#verify-a-download)), but you may still see a brief SmartScreen prompt on the first few releases while the certificate builds reputation with Microsoft — More info → Run anyway.
 
 **Linux:** mark the AppImage executable, then run it:
 
@@ -57,39 +56,38 @@ open-source: https://github.com/junhoyeo/tokscale
 
 # 中文
 
-**这是开源构建。** macOS 已签名并 notarize；Windows 尚未签名（可能跳出 SmartScreen）；Linux AppImage 需要先赋予执行权限，说明见下方。
-
 ## 更新内容
 
 <!-- app-update-notes:zh:start -->
 ### 新增
-- **低额度提示：** 新增可选主页设置，在 AI 工具剩余额度低于 50% 时高亮，并在低于 20% 时标记为紧急。（#161）
-- **减少动态效果：** 外观中新增「系统／开启／关闭」三态设置。系统跟随操作系统，开启减少动画，关闭保留动画，并统一应用于主窗口与使用仪表板。（#167）
+- **设备用量明细：** 展开设备即可查看其在今日、本月与总计范围内的工具及模型用量，并显示操作系统、Widget 或 Agent 版本及上次同步时间。（#206、#208）
 
 ### 改进
-- **用量动画：** 实时 Token 总计与明细数值现在会平滑过渡；柱形图、活动热力图、趋势线以及仪表盘的柱形图和 K 线图会呈现数据与周期变化。页面切换仍保持即时。（#163、#166）
-- **更新说明：** 提升了更新说明弹窗的对比度和可读性。（#162）
+- **凭据存储：** GUI 管理的凭据现已与偏好设置分离，存入权限受限的本地凭据文件，并在迁移或保存失败时更安全地保留原有数据。（#200）
+- **底部操作：** 刷新与设置现在共用一个紧凑的底部操作组；将鼠标移到按钮上或用键盘聚焦时会显示另一个按钮，也可在外观设置中交换两者顺序。（#203）
+- **Windows 应用签名：** 除安装包与便携版外，安装后的应用程序可执行文件现在也会完成签名。（#198）
 
 ### 修复
-- **应用更新：** 已忽略的更新仍可通过手动检查和设置页面操作；下载完成后会显示重启操作，不再被忽略状态隐藏。（#158）
-- **Claude 额度：** 未找到 OAuth 凭据时自动回退到 Claude CLI，使已登录的 CLI 会话仍能读取额度。（#159）
+- **Grok 额度：** 统一额度用量现在会遵循标准代理设置，且不再回退到旧版额度接口。（#175）
+- **实时用量动画：** 总计、列表数值与进度条不会再因无关刷新而重新开始或跳动，数据在动画途中变化时也会平滑衔接。（#204）
+- **已禁用额度账号：** 提供者停用后不再一直显示“检查中”，尚未完成的检查也会立即清除。（#205）
 <!-- app-update-notes:zh:end -->
 
 ## 下载
 
-- **macOS Apple Silicon** — [Token-Monitor-0.29.0-arm64.dmg](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0-arm64.dmg)
-- **Windows 安装版** — [Token-Monitor-Setup-0.29.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-Setup-0.29.0.exe)（推荐）
-- **Windows 便携版** — [Token-Monitor-0.29.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0.exe)（免安装）
-- **Linux x64** — [Token-Monitor-0.29.0.AppImage](https://github.com/Javis603/token-monitor/releases/download/v0.29.0/Token-Monitor-0.29.0.AppImage)
+- **macOS Apple Silicon** — [Token-Monitor-0.32.0-arm64.dmg](https://github.com/Javis603/token-monitor/releases/download/v0.32.0/Token-Monitor-0.32.0-arm64.dmg)
+- **Windows 安装版** — [Token-Monitor-Setup-0.32.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.32.0/Token-Monitor-Setup-0.32.0.exe)（推荐）
+- **Windows 便携版** — [Token-Monitor-0.32.0.exe](https://github.com/Javis603/token-monitor/releases/download/v0.32.0/Token-Monitor-0.32.0.exe)（免安装）
+- **Linux x64** — [Token-Monitor-0.32.0.AppImage](https://github.com/Javis603/token-monitor/releases/download/v0.32.0/Token-Monitor-0.32.0.AppImage)
 
 <details>
 <summary><strong>首次启动与其他说明</strong></summary>
 
 ### 首次启动
 
-**macOS：** 打开 `.dmg`，把 Token Monitor 拖到 Applications。
+**macOS：** 应用已使用 Developer ID 签名并通过 Apple 公证。打开 `.dmg`，然后把 Token Monitor 拖到 Applications。
 
-**Windows：** SmartScreen → 更多信息 → 仍要运行。
+**Windows：** 两个可执行文件均已签名（[查看验证方法](https://github.com/Javis603/token-monitor/blob/main/docs/code-signing.md#verify-a-download)），但在证书刚建立信誉的最初几个版本，仍可能短暂出现 SmartScreen 提示 → 更多信息 → 仍要运行。
 
 **Linux：** 先给 AppImage 执行权限，然后运行：
 

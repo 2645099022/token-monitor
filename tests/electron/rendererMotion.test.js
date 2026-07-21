@@ -36,8 +36,8 @@ test('data bars animate on the compositor instead of changing layout width', () 
   assert.doesNotMatch(css, /(?:\.bar-fill|\.limit-meter-fill)\s*\{[^}]*transition:\s*width/s);
   assert.match(app, /applyBarScale\(fill, width \/ 100\)/);
   assert.match(app, /applyBarScale\(fill, safePercent \/ 100\)/);
-  assert.match(app, /state\.animateBarsFromZero[\s\S]*?transform: 'scaleX\(0\)'[\s\S]*?duration: 420/s);
-  assert.match(applyBarScale, /for \(const animation of fill\.getAnimations\(\)\) animation\.cancel\(\)/);
+  assert.match(app, /state\.animateBarsFromZero[\s\S]*?animateBarBetween\(fill, 0, safeScale, 0, 420\)/s);
+  assert.match(applyBarScale, /animateBarBetween\(fill, 0, safeScale, 0, 420\)/);
 });
 
 test('period changes preserve row identity, animate rank changes, and count from the previous total', () => {
@@ -64,8 +64,49 @@ test('live row updates count and resize bars together without slowing the headli
 
   assert.match(app, /const liveMotionSnapshot = !state\.periodMotionActive && !state\.animateBarsFromZero[\s\S]*?captureBreakdownMotion\(\)/);
   assert.match(app, /if \(liveMotionSnapshot\) animateBreakdownFrom\(liveMotionSnapshot, \{ duration: 600 \}\)/);
-  assert.match(app, /animateNumber\(els\.totalTokens, state\.currentTotal, nextTotal, state\.periodMotionActive \? 800 : 1000, fitTotalNumber\)/);
+  assert.match(app, /const animationFrom = numberAnimHandle \? numberAnimValue : state\.currentTotal/);
+  assert.match(app, /animateNumber\(els\.totalTokens, animationFrom, nextTotal, state\.periodMotionActive \? 800 : 1000, fitTotalNumber\)/);
   assert.match(app, /animateRowNumber\(row\.querySelector\('\.row-value'\), 0, value, duration\)/);
+});
+
+test('unrelated rerenders do not truncate an in-flight headline count', () => {
+  const app = read('app.js');
+  const renderTotal = app.slice(
+    app.indexOf('const totalChanged = nextTotal !== state.currentTotal'),
+    app.indexOf('state.currentTotal = nextTotal', app.indexOf('const totalChanged = nextTotal !== state.currentTotal'))
+  );
+
+  assert.match(app, /let numberAnimTarget = null;\s*let numberAnimValue = 0;/);
+  assert.match(app, /function headlineNumberIsAnimatingTo\(value\) \{\s*return Boolean\(numberAnimHandle\) && numberAnimTarget === value;\s*\}/);
+  assert.match(app, /numberAnimTarget = to;\s*numberAnimValue = from;/);
+  assert.match(app, /numberAnimValue = from \+ delta \* easeOutQuart\(progress\)/);
+  assert.match(renderTotal, /else if \(!headlineNumberIsAnimatingTo\(nextTotal\)\) \{\s*cancelNumberAnimation\(\)/);
+  assert.doesNotMatch(renderTotal, /else \{\s*cancelNumberAnimation\(\)/);
+});
+
+test('row motion preserves matching targets and continues changed targets from the visual state', () => {
+  const app = read('app.js');
+  const animateRowNumber = app.slice(
+    app.indexOf('function animateRowNumber('),
+    app.indexOf('function animateBreakdownFrom(', app.indexOf('function animateRowNumber('))
+  );
+  const animateBarBetween = app.slice(
+    app.indexOf('function animateBarBetween('),
+    app.indexOf('function captureTrendBarMotion(', app.indexOf('function animateBarBetween('))
+  );
+
+  assert.match(app, /const rowNumberAnimations = new Map\(\);\s*const rowBarAnimations = new Map\(\);/);
+  assert.match(animateRowNumber, /if \(previous\?\.target === to\) return;/);
+  assert.match(animateRowNumber, /const startValue = Number\.isFinite\(previous\?\.value\) \? previous\.value : from;/);
+  assert.match(animateRowNumber, /const motion = \{ handle: 0, target: to, value: startValue \}/);
+  assert.match(animateBarBetween, /const previousIsActive = previous\?\.animation\.pending \|\| previous\?\.animation\.playState === 'running';/);
+  assert.match(animateBarBetween, /if \(previousIsActive && Math\.abs\(previous\.target - toScale\) < 0\.001\) return;/);
+  assert.ok(
+    animateBarBetween.indexOf('for (const animation of fill.getAnimations()) animation.cancel()')
+      < animateBarBetween.indexOf('if (Math.abs(toScale - fromScale) < 0.001) return'),
+    'a stale bar tween must be cancelled even when the new target already matches the visual scale'
+  );
+  assert.match(animateBarBetween, /animation\.onfinish = forget;\s*animation\.oncancel = forget;\s*rowBarAnimations\.set\(fill, motion\);/);
 });
 
 test('view changes render immediately without a page crossfade', () => {
@@ -85,7 +126,7 @@ test('headline counting respects reduced-motion preferences', () => {
   const app = read('app.js');
   const animateNumber = app.slice(
     app.indexOf('function animateNumber('),
-    app.indexOf('const rowNumberAnimationHandles', app.indexOf('function animateNumber('))
+    app.indexOf('const rowNumberAnimations', app.indexOf('function animateNumber('))
   );
 
   assert.match(animateNumber, /if \(prefersReducedMotion\(\)\) \{[\s\S]*?el\.textContent = formatNumber\(to\);[\s\S]*?onDone\(\);[\s\S]*?return;/);
@@ -108,13 +149,15 @@ test('Home history visuals reveal left to right only when entering the view', ()
   assert.match(app, /state\.animateChartsOnRender = true/);
   assert.match(app, /\.heat-base-layer \.heat/);
   assert.match(app, /const HOME_HISTORY_MOTION_MS = 920/);
-  assert.match(app, /const HOME_HEAT_CELL_MOTION_MS = 360/);
+  assert.match(app, /const HOME_HEATMAP_MOTION_MS = 640/);
+  assert.match(app, /const HOME_HEAT_CELL_MOTION_MS = 240/);
   assert.match(app, /const viewport = activityScroll\?\.getBoundingClientRect\(\)/);
   assert.match(app, /rect\.right > viewport\.left && rect\.left < viewport\.right/);
   assert.match(app, /const firstVisibleColumn = visibleCells\.length \? visibleCells\[0\]\.column : 0/);
-  assert.match(app, /const heatColumnDelay = \(HOME_HISTORY_MOTION_MS - HOME_HEAT_CELL_MOTION_MS\) \/ Math\.max\(1, lastVisibleColumn - firstVisibleColumn\)/);
+  assert.match(app, /const heatColumnDelay = \(HOME_HEATMAP_MOTION_MS - HOME_HEAT_CELL_MOTION_MS\) \/ Math\.max\(1, lastVisibleColumn - firstVisibleColumn\)/);
   assert.match(app, /delay: \(column - firstVisibleColumn\) \* heatColumnDelay/);
   assert.match(app, /duration: HOME_HEAT_CELL_MOTION_MS/);
+  assert.match(app, /duration: HOME_HEAT_CELL_MOTION_MS,[\s\S]*?easing: 'cubic-bezier\(0\.22, 1, 0\.36, 1\)'/);
   assert.match(app, /strokeDasharray: `\$\{length\} \$\{length\}`[\s\S]*?strokeDashoffset: length[\s\S]*?strokeDashoffset: 0/);
   assert.equal((app.match(/duration: HOME_HISTORY_MOTION_MS/g) || []).length, 2);
   assert.match(app, /clipPath: 'inset\(0 100% 0 0\)'[\s\S]*?clipPath: 'inset\(0 0 0 0\)'/);

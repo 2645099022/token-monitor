@@ -61,6 +61,20 @@ Token Monitor 对「Token 用量」「账户额度」和「session 明细」分�
 | <img src=".github/assets/tools-icon/qoder.png" width="28" alt="Qoder" /> | Qoder | Qoder dashboard cookie（通过 Qoder usage API 查询 big-model credits） | — | ✅ | — |
 | <img src=".github/assets/tools-icon/ollama.png" width="28" alt="Ollama" /> | Ollama | Ollama Cloud cookie（通过 ollama.com/settings 查询 session／每周用量） | — | ✅ | — |
 
+## 界面展示
+
+| 主页视图 | 额度视图 | 工具视图 |
+|:---:|:---:|:---:|
+| ![主页视图](.github/assets/home-view.png) | ![额度视图](.github/assets/limits-view.png) | ![工具视图](.github/assets/tools-view.png) |
+
+| Session 视图 | 模型视图 | 服务状态 |
+|:---:|:---:|:---:|
+| ![Session 视图](.github/assets/sessions-view.png) | ![模型视图](.github/assets/models-view.png) | ![服务状态](.github/assets/status-view.png) |
+
+| 使用仪表板 — 总览 | 使用仪表板 — 趋势 |
+|:---:|:---:|
+| ![使用仪表板 总览](.github/assets/dashboard-overview.png) | ![使用仪表板 趋势](.github/assets/dashboard-trends.png) |
+
 ## 为什么用 Token Monitor？
 
 大多数用量监控工具只在它运行的那台机器上有用。Token Monitor 是为多设备工作流而设计的：每台设备监视自己的本地日志、把汇总更新发送到你的 hub，每个连接中的小部件几乎都能实时看到 Token 变化。
@@ -88,26 +102,14 @@ Token Monitor 对「Token 用量」「账户额度」和「session 明细」分�
 - **自托管同步后端**：小部件内 hub、Node CLI hub 或 Cloudflare Worker
 - **iOS 小部件支持**：通过 Worker hub 搭配 Widgy、Scriptable
 - **Discord Rich Presence**：将今日 Token、花费与主要工具广播到你的 Discord 个人资料（需手动开启）
-- **隐私优先**：只有汇总数字会离开你的机器
-
-| 额度视图 | 设备视图 | 模型视图 |
-|:---:|:---:|:---:|
-| ![额度视图](.github/assets/limits-view.png) | ![设备视图](.github/assets/devices-view.png) | ![模型视图](.github/assets/models-view.png) |
-
-| Session 视图 | Session 明细 | 服务状态 |
-|:---:|:---:|:---:|
-| ![Session 视图](.github/assets/sessions-view.png) | ![Session 明细](.github/assets/session-details.png) | ![服务状态](.github/assets/status-view.png) |
-
-| 使用仪表板 — 总览 | 使用仪表板 — 趋势 |
-|:---:|:---:|
-| ![使用仪表板 总览](.github/assets/dashboard-overview.png) | ![使用仪表板 趋势](.github/assets/dashboard-trends.png) |
+- **隐私优先**：提示词、回复、源代码和文件内容都留在你的设备上
 
 ## 安装
 
 从 [GitHub Releases](https://github.com/Javis603/token-monitor/releases) 下载。
 
 - **macOS（Apple Silicon）** — `.dmg`，已签名并 notarize
-- **Windows 10/11** — 安装版 `.exe`；签名还在准备中，可能会出现 SmartScreen
+- **Windows 10/11** — 安装版和便携版 `.exe`，均已通过 [SignPath Foundation](docs/code-signing.md) 签名
 - **Linux x64** — `.AppImage`
 
 打包版会自动检查 GitHub Releases。有新版本时，界面会显示更新提示；受支持的平台也可在 设置 → 一般 中安装更新。
@@ -189,6 +191,20 @@ npm run pack       # 未打包的 app 目录（无安装包），方便本机快
 
 小部件会根据 设置 → 多设备同步 决定走本地还是同步模式。hub 本身可以是单独的 `npm run hub` 进程、Cloudflare Worker，或直接跑在某一个小部件里（Host 模式）。同步模式下，hub 通过 Server-Sent Events 把聚合后的统计推送给每个连接中的小部件，所以一台设备上的更新会在数秒内出现在其他设备上。
 
+## 会话数据保留期
+
+活动热力图与趋势仪表板，是由各工具仍留在磁盘上的会话文件构建的。**Claude Code 默认会清除 30 天前的 transcript**（`cleanupPeriodDays`）。开启**保留已删除会话用量**（设置 → 采集）后，Token Monitor 除了保留今日／本月／全部的会话总量，也会在本地不设期限地保存所有已观测到的每日工具／模型数据。热力图与同步数据仍采用 370 天的滚动窗口，更早的观测数据则保留在本地供未来查看。来源日后清理文件时，已观测的日期不会再消失；但在 Token Monitor 首次观测前就已删除的数据，无法由这份归档记录找回。
+
+若要保住热力图完整的滚动年份，请在时限过去之前，于 `~/.claude/settings.json` 调高 Claude Code 的保留期：
+
+```json
+{
+  "cleanupPeriodDays": 370
+}
+```
+
+370 对应热力图的窗口；设更大能留更多，代价是 transcript 会按你设定的期限一直留在磁盘上。其他工具的默认值与配置文件路径，请见 tokscale 的 [Session Data Retention](https://github.com/junhoyeo/tokscale#session-data-retention) 表。
+
 ## 设置
 
 ### 小部件（GUI）
@@ -235,15 +251,7 @@ npm run agent -- --clients=claude,codex,opencode --once
 
 ## 隐私
 
-hub 与代理只传输汇总字段:
-
-- 设备 id、主机名、平台
-- 每个时段的 Token 总数（今日 / 本月 / 全部）
-- 成本总额（当 `tokscale` 返回成本数据时）
-- 按客户端与模型的分项统计
-- 启用 AI 工具额度时，归一化后的 Claude Code／Codex／Cursor／Antigravity／OpenCode／Grok／Minimax／MiMo／GitHub Copilot／Kiro／GLM／Volcengine／Qoder／Kimi／Ollama 额度状态
-
-完全不会传输原始 AI 日志、提示词、源代码或对话内容。也不会传输 OAuth 凭据、访问令牌、刷新令牌、邮箱或提供方原始响应。`.env`、`data/`、`node_modules/` 已加入 gitignore。
+Token Monitor 在本地处理使用日志，不会向项目维护者发送分析或遥测数据。网络访问仅用于文档所述或由用户启用的功能；更新、提供方集成、Discord Rich Presence 与可选多设备同步所使用的数据，请参阅[隐私政策](docs/privacy.md)。
 
 ## 系统要求
 
@@ -269,6 +277,7 @@ hub 与代理只传输汇总字段:
 
 - [tokscale](https://github.com/junhoyeo/tokscale) 提供日志解析与 Token 计算。
 - [CodexBar](https://github.com/steipete/CodexBar) 提供 AI 工具额度的研究参考。
+- **[代码签名政策](docs/code-signing.md)：** 免费代码签名由 [SignPath.io](https://signpath.io/) 提供，证书由 [SignPath Foundation](https://signpath.org/) 提供。
 
 ## 许可证
 

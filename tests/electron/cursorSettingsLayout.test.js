@@ -186,6 +186,20 @@ test('OpenCode account panel provides multi-profile management', () => {
   assert.match(setupBody, /updateOpenCodeProfilesStatus\(\)/);
 });
 
+test('OpenCode multi-account rows separate profile identity from plan label', () => {
+  const app = readRendererFile('app.js');
+  const titleBody = functionBody(app, 'opencodeAccountTitle', 'renderOpenCodeAccountGroup');
+  const groupBody = functionBody(app, 'renderOpenCodeAccountGroup', 'renderLimits');
+
+  assert.match(titleBody, /provider\?\.accountName/);
+  assert.match(titleBody, /legacyName !== 'Go' && legacyName !== 'Zen'/);
+  assert.match(groupBody, /opencodeAccountTitle\(provider, index\)/);
+  assert.match(groupBody, /legacyProfileLabel/);
+  assert.match(groupBody, /planText: ''/);
+  assert.match(app, /provider\?\.planLabel \|\| provider\?\.accountLabel/);
+  assert.doesNotMatch(groupBody, /renderLimitProviderRow\('opencode', provider\.accountLabel/);
+});
+
 test('OpenCode disabled profiles still count in the account summary', () => {
   const app = readRendererFile('app.js');
   const renderBody = functionBody(app, 'renderOpenCodeProfiles', 'updateOpenCodeProfilesStatus');
@@ -220,7 +234,7 @@ test('OpenCode profile enable toggles restart the collector mode so limits sourc
   );
   assert.ok(handler, 'opencode:setProfileEnabled handler should exist');
   assert.match(handler, /profiles\[name\]\.enabled = Boolean\(enabled\);/);
-  assert.match(handler, /saveSettings\(\);/);
+  assert.match(handler, /saveSettings\(\{ throwOnError: true \}\);/);
   assert.match(handler, /opencodeStatusCache = \{ value: null, at: 0 \};/);
   assert.match(handler, /startMode\(\)/);
 });
@@ -458,7 +472,17 @@ test('Codex system account switching is exposed from limits account rows', () =>
   assert.match(switchFlush, /state\.breakdown !== 'limits'/);
   assert.match(switchFlush, /renderLimits\(\)/);
   const switchBody = functionBody(main, 'switchCodexSystemAccount', 'refreshCodexManagedAccountLimits');
-  assert.doesNotMatch(switchBody, /restart: false/);
+  assert.match(switchBody, /const previousAccounts = normalizeCodexManagedAccounts\(settings\.codexManagedAccounts\)/);
+  assert.match(switchBody, /liveAuthSnapshot = await snapshotCodexAuthFile\(liveAuthPath\)/);
+  assert.match(switchBody, /preservedLiveAccount = await preserveLiveCodexAuthAsManagedAccount/);
+  assert.match(switchBody, /restart: false/);
+  assert.match(switchBody, /settings\.codexManagedAccounts = previousAccounts;/);
+  assert.match(switchBody, /restoreCodexAuthFileSnapshot\(liveAuthSnapshot\)/);
+  assert.match(switchBody, /preservedLiveAccount\?\.rollback\?\.\(\)/);
+  const preserveBody = functionBody(main, 'preserveLiveCodexAuthAsManagedAccount', 'codexLoginErrorMessage');
+  assert.match(preserveBody, /const authSnapshot = await snapshotCodexAuthFile/);
+  assert.match(preserveBody, /persist: false/);
+  assert.match(preserveBody, /rollback: \(\) => restoreCodexAuthFileSnapshot/);
   const findExistingBody = functionBody(main, 'findExistingCodexAccount', 'codexAccountId');
   assert.match(findExistingBody, /if \(identity\.accountKey && account\.accountKey && !codexEmailDerivedAccountKey\(account, identity\)\)/);
   assert.match(main, /function codexEmailDerivedAccountKey\(account, identity\)/);
@@ -677,7 +701,7 @@ test('DeepSeek account linked state requires a validated API key', () => {
 
   const renderBody = functionBody(app, 'renderDeepseekStatus', 'renderOpenCodeProfiles');
   assert.match(renderBody, /const configured = Boolean\(state\.settings\?\.deepseekApiKeyConfigured\);/);
-  assert.match(renderBody, /apiKeyAccountStatusText\('deepseek', provider, configured, source\)/);
+  assert.match(renderBody, /apiKeyAccountStatusText\('deepseek', provider, configured, source, enabled\)/);
 });
 
 test('DeepSeek key changes invalidate stale provider status before re-checking', () => {
@@ -699,6 +723,29 @@ test('DeepSeek key changes invalidate stale provider status before re-checking',
   const clearBody = functionBody(app, 'clearDeepseekProviderStatus', 'renderDeepseekStatus');
   assert.match(clearBody, /state\.stats\.limits\.providers = state\.stats\.limits\.providers\.filter/);
   assert.match(clearBody, /provider\.provider !== 'deepseek'/);
+});
+
+test('disabled credential providers settle account status instead of checking forever', () => {
+  const app = readRendererFile('app.js');
+  const toggleBody = functionBody(app, 'onLimitProviderToggle', 'onLimitProviderMove');
+  const clearBody = functionBody(app, 'clearDisabledLimitProviderPendingChecks', 'externalProviderForAccount');
+  const externalRenderBody = functionBody(app, 'renderExternalProviderStatus', 'setMinimaxAccountExpanded');
+  const deepseekRenderBody = functionBody(app, 'renderDeepseekStatus', 'renderOpenCodeProfiles');
+  const minimaxRenderBody = functionBody(app, 'renderMinimaxStatus', 'renderCopilotStatus');
+  const copilotRenderBody = functionBody(app, 'renderCopilotStatus', 'renderDeepseekStatus');
+
+  assert.match(toggleBody, /clearDisabledLimitProviderPendingChecks\(new Set\(checked\)\)/);
+  assert.match(clearBody, /clearDeepseekPendingCheck\(\)/);
+  assert.match(clearBody, /clearMinimaxPendingCheck\(\)/);
+  assert.match(clearBody, /clearCopilotPendingCheck\(\)/);
+  assert.match(clearBody, /Object\.keys\(externalLimitAccountConfig\)/);
+  assert.match(clearBody, /clearExternalProviderCheckPending\(providerName\)/);
+  assert.match(externalRenderBody, /const enabled = limitProviderEnabled\(providerName\);/);
+  assert.match(externalRenderBody, /const pending = enabled &&/);
+  assert.match(externalRenderBody, /apiKeyAccountStatusText\(providerName, provider, configured, source, enabled\)/);
+  assert.match(deepseekRenderBody, /apiKeyAccountStatusText\('deepseek', provider, configured, source, enabled\)/);
+  assert.match(minimaxRenderBody, /apiKeyAccountStatusText\('minimax', provider, configured, source, enabled\)/);
+  assert.match(copilotRenderBody, /copilotAccountStatusText\(provider, configured, source, enabled\)/);
 });
 
 test('MiniMax key changes invalidate stale provider status before re-checking', () => {
@@ -818,11 +865,13 @@ test('opencode status env account avoids saved profile names', () => {
 
 test('settingsForRenderer strips provider cookies before they reach the renderer', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'electron', 'main.js'), 'utf8');
+  const credentialStore = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'shared', 'credentialStore.js'), 'utf8');
   const body = main.slice(
     main.indexOf('function settingsForRenderer'),
     main.indexOf('function pushSettingsToRenderer')
   );
   assert.ok(body, 'settingsForRenderer should exist');
+  assert.match(body, /credentialSettingsForRenderer\(settings, \{\s*expose: \['hubHostSecret', 'secret'\]\s*\}\)/);
   // The raw OpenCode cookie must be reduced to a presence flag, never forwarded verbatim.
   assert.match(body, /opencodeCookie:[^,}]*\?\s*'set'\s*:\s*''/);
   // Multi-account profile cookies are redacted the same way.
@@ -833,14 +882,56 @@ test('settingsForRenderer strips provider cookies before they reach the renderer
   );
   assert.match(mimoRendererShape, /id, accountKey, accountEmail, accountLabel, addedAt, updatedAt, enabled/);
   assert.doesNotMatch(mimoRendererShape, /cookieHeader/);
-  assert.doesNotMatch(main, /safeStorage/);
-  assert.match(main, /fs\.writeFileSync\(temporary, `\$\{cookieHeader\}\\n`, \{ encoding: 'utf8', mode: 0o600 \}\)/);
-  assert.match(main, /fs\.chmodSync\(destination, 0o600\)/);
+  assert.match(credentialStore, /fsApi\.openSync\(temporary, 'wx', 0o600\)/);
+  assert.match(credentialStore, /fsApi\.fchmodSync\(descriptor, 0o600\)/);
+  assert.match(credentialStore, /fsApi\.openSync\(directory, constants\.O_RDONLY\)/);
+  assert.match(main, /ensureCredentialStore\(\)\.writeMimoCredential\(id, cookieHeader\)/);
   assert.match(main, /cookieHeader: readMimoCredential\(account\.id\)/);
-  assert.match(main, /cookieHeader: readMimoCredential\(account\.id\)/);
-  assert.doesNotMatch(main, /legacyCookieHeader|keepLegacyCookie|hadPlaintextMimoCookie/);
+  assert.match(main, /migrateLegacyMimoCredentialFiles\(merged\.mimoManagedAccounts\)/);
   assert.match(main, /if \(!removeMimoCredential\(accountId\)\) return \{ ok: false, error: 'Could not remove stored credential' \};/);
   assert.match(main, /delete result\.account\.cookieHeader/);
+});
+
+test('legacy credential cleanup retries independently from the migration marker', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'electron', 'main.js'), 'utf8');
+  const body = functionBody(main, 'loadCredentialSettings', 'migrateLegacyMimoCredentialFiles');
+  assert.match(body, /store\.migrateLegacySettings\(saved\);/);
+  assert.match(body, /if \(hasCredentialSettings\(saved\)\) \{/);
+  assert.match(body, /writePrivateJsonAtomic\(settingsPath, stripCredentialSettings\(saved\)\)/);
+  assert.doesNotMatch(body, /migration\.migrated/);
+});
+
+test('legacy MiMo migration rejects symlinks and retries cleanup after a partial failure', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'electron', 'main.js'), 'utf8');
+  const body = functionBody(main, 'migrateLegacyMimoCredentialFiles', 'readSettings');
+  assert.match(body, /readRegularFileNoFollow\(legacyMimoCredentialPath\(account\.id\)/);
+  assert.match(body, /ensureCredentialStore\(\)\.migrateLegacyMimoCredentials\(entries\);/);
+  assert.match(body, /if \(!readMimoCredential\(entry\.id\)\) continue;/);
+  assert.doesNotMatch(body, /migratedIds/);
+});
+
+test('credential storage failures preserve the file and surface one actionable error', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'electron', 'main.js'), 'utf8');
+  const reporter = functionBody(main, 'reportCredentialStorageError', 'loadCredentialSettings');
+  assert.match(reporter, /credentialStorageErrorShown \|\| !app\.isReady\(\)/);
+  assert.match(reporter, /dialog\.showErrorBox\(/);
+  assert.match(reporter, /save was stopped and previous data was restored where possible/);
+  const saveBody = functionBody(main, 'saveSettings', 'loginItemEnabledHere');
+  assert.match(saveBody, /persistSettingsAndCredentials\(/);
+  assert.match(saveBody, /settings = previousSettings;/);
+  assert.match(saveBody, /reportCredentialStorageError\('could not persist settings', error\)/);
+  assert.match(saveBody, /if \(options\.throwOnError\) throw error;/);
+
+  const settingsHandler = main.slice(
+    main.indexOf("ipcMain.handle('settings:update'"),
+    main.indexOf("ipcMain.handle('appearance:preview'")
+  );
+  assert.match(settingsHandler, /saveSettings\(\{ throwOnError: true \}\);/);
+
+  const renderer = readRendererFile('app.js');
+  const rendererSave = functionBody(renderer, 'saveSettings', 'renderHomeIfVisible');
+  assert.match(rendererSave, /state\.settings = await window\.tokenMonitor\.getSettings\(\)/);
+  assert.match(rendererSave, /throw error;/);
 });
 
 test('main settings normalize the Z.ai API region', () => {
@@ -927,7 +1018,7 @@ test('collection cadence setting is exposed in the Collection panel', () => {
 
 test('sync upload interval setting is exposed in the Multi-device Sync panel', () => {
   const html = readRendererFile('index.html');
-  const controls = html.match(/<label class="sync-upload-interval-row"[\s\S]*?<select id="syncUploadIntervalInput"[\s\S]*?<\/select>[\s\S]*?<\/label>/)?.[0] || '';
+  const controls = html.match(/<label class="sync-upload-interval-row[^"]*"[\s\S]*?<select id="syncUploadIntervalInput"[\s\S]*?<\/select>[\s\S]*?<\/label>/)?.[0] || '';
   const clientFields = html.slice(html.indexOf('<div id="hubClientFields"'), html.indexOf('<div id="hubHostFields"'));
   assert.match(clientFields, /sync-upload-interval-row/);
   assert.match(controls, /data-i18n="settings\.sync\.uploadInterval"/);

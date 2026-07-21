@@ -16,17 +16,27 @@
   --control-alpha: 0.049;
   --highlight-alpha: 0.07;
   --glass: rgba(var(--glass-rgb), var(--glass-alpha));
+  --glass-surface:
+    linear-gradient(180deg, rgba(var(--overlay-rgb), var(--highlight-alpha)), rgba(var(--overlay-rgb), 0.022)),
+    linear-gradient(135deg, rgba(var(--overlay-rgb), 0.035), rgba(0, 0, 0, 0.09)),
+    var(--glass);
+  --glass-filter: blur(32px) saturate(115%);
+  --floating-bubble-radius: 17px;
   --glass-strong: rgba(31, 35, 41, 0.56);
   --glass-soft: rgba(var(--overlay-rgb), 0.05);
   --line: rgba(var(--line-rgb), var(--line-alpha));
   --line-strong: rgba(var(--line-rgb), var(--line-strong-alpha));
   --text: #eef5fb;
   --muted: #a3adbb;
-  --green: #b7ead4;
-  /* RGB triplet of the accent (--green), for the accent-tinted borders / glows /
+  --accent: #b7ead4;
+  /* RGB triplet of --accent, for accent-tinted borders / glows /
      active states. Driven from the chosen accent so they flip together — see
-     themeCssVarEntries(). Must match --green above. */
+     themeCssVarEntries(). Must match --accent above. */
   --accent-rgb: 183, 234, 212;
+  /* Semantic success is deliberately independent from the custom accent.
+     themeCssVarEntries() switches this to a darker green on light themes. */
+  --success: #b7ead4;
+  --success-rgb: 183, 234, 212;
   --number: #f3fbf7;
   /* Semantic blue, exposed as a triplet so the trend line and its area fill can
      share one hue (and match the blue heatmap ramp) instead of the fill borrowing
@@ -71,13 +81,10 @@ input, textarea, [contenteditable="true"] {
   border: 1px solid var(--line-strong);
   border-radius: 14px;
   clip-path: inset(0 round 14px);
-  background:
-    linear-gradient(180deg, rgba(var(--overlay-rgb), var(--highlight-alpha)), rgba(var(--overlay-rgb), 0.022)),
-    linear-gradient(135deg, rgba(var(--overlay-rgb), 0.035), rgba(0, 0, 0, 0.09)),
-    var(--glass);
+  background: var(--glass-surface);
   box-shadow: 0 22px 55px var(--shadow), inset 0 1px 0 rgba(var(--overlay-rgb), 0.13);
-  -webkit-backdrop-filter: blur(32px) saturate(115%);
-  backdrop-filter: blur(32px) saturate(115%);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
 }
 html.is-windows, html.is-windows body {
   border-radius: 8px;
@@ -119,12 +126,21 @@ html.is-mac-legacy .shell {
   width: 100%;
   height: 100%;
   padding: 0;
+  overflow: hidden;
   border: 0;
-  background: transparent;
-  color: var(--green);
+  border-radius: var(--floating-bubble-radius);
+  background: var(--glass-surface);
+  color: var(--number);
   cursor: grab;
-  box-shadow: none;
+  box-shadow: inset 0 1px 0 rgba(var(--overlay-rgb), 0.13);
   outline: none;
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+}
+.system-glass-disabled .floating-bubble-tab {
+  box-shadow:
+    inset 0 0 0 1px var(--line-strong),
+    inset 0 1px 0 rgba(var(--overlay-rgb), 0.13);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
@@ -150,19 +166,15 @@ html.floating-bubble-collapsed-left,
 body.floating-bubble-collapsed-left,
 html.floating-bubble-collapsed-right,
 body.floating-bubble-collapsed-right {
-  background:
-    linear-gradient(180deg, rgba(var(--overlay-rgb), var(--highlight-alpha)), rgba(var(--overlay-rgb), 0.022)),
-    linear-gradient(135deg, rgba(var(--overlay-rgb), 0.035), rgba(0, 0, 0, 0.09)),
-    var(--glass),
-    rgb(var(--glass-rgb));
+  background: transparent;
 }
 html.floating-bubble-collapsed-left,
 body.floating-bubble-collapsed-left {
-  border-radius: 0;
+  border-radius: var(--floating-bubble-radius);
 }
 html.floating-bubble-collapsed-right,
 body.floating-bubble-collapsed-right {
-  border-radius: 0;
+  border-radius: var(--floating-bubble-radius);
 }
 html.floating-bubble-collapsed-left body .shell,
 html.floating-bubble-collapsed-right body .shell,
@@ -174,12 +186,22 @@ body.floating-bubble-collapsed-right .shell {
 html.floating-bubble-collapsed-left body .floating-bubble-tab,
 body.floating-bubble-collapsed-left .floating-bubble-tab {
   display: flex;
-  border-radius: 0;
+  border-radius: var(--floating-bubble-radius);
 }
 html.floating-bubble-collapsed-right body .floating-bubble-tab,
 body.floating-bubble-collapsed-right .floating-bubble-tab {
   display: flex;
-  border-radius: 0;
+  border-radius: var(--floating-bubble-radius);
+}
+html.is-windows.floating-bubble-collapsed-left,
+html.is-windows.floating-bubble-collapsed-right,
+html.is-windows body.floating-bubble-collapsed-left,
+html.is-windows body.floating-bubble-collapsed-right,
+html.is-windows.floating-bubble-collapsed-left body .floating-bubble-tab,
+html.is-windows.floating-bubble-collapsed-right body .floating-bubble-tab,
+body.is-windows.floating-bubble-collapsed-left .floating-bubble-tab,
+body.is-windows.floating-bubble-collapsed-right .floating-bubble-tab {
+  border-radius: 8px;
 }
 .floating-bubble-tab:hover {
   color: var(--text);
@@ -244,7 +266,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   transition: background 200ms ease, box-shadow 200ms ease;
 }
 .live-dot.live {
-  background: var(--green);
+  background: var(--accent);
   box-shadow: 0 0 4px rgba(var(--accent-rgb), 0.55);
 }
 /* One-shot flare on data update — flares, then settles back to the resting
@@ -284,7 +306,6 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   transform: none;
   z-index: 4;
 }
-#titlebarActionSlot { display: contents; }
 #footerActionSlot { display: contents; }
 /* Size the swappable action button by its slot, not by its element identity,
    so Settings/Refresh look right in either location. */
@@ -342,32 +363,24 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   position: relative;
   z-index: 1;
   display: grid;
-  gap: 14px;
+  gap: 0;
   min-width: 0;
   max-height: calc(100vh - 72px);
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(var(--panel-rgb), 0.72);
-  -webkit-backdrop-filter: blur(22px);
-  backdrop-filter: blur(22px);
+  padding: 2px 0 4px;
   opacity: 1;
   overflow: hidden auto;
   scrollbar-width: none;
   transform: translateY(0);
-  transition: max-height 140ms ease, opacity 120ms ease, padding 140ms ease, border-color 140ms ease, transform 140ms ease;
+  transition: max-height 140ms ease, opacity 120ms ease, padding 140ms ease, transform 140ms ease;
 }
 .settings-panel::-webkit-scrollbar { width: 0; height: 0; }
 .settings-panel.hidden {
   max-height: 0;
   padding-top: 0;
   padding-bottom: 0;
-  border-color: transparent;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-4px);
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
 }
 .settings-panel label, .settings-field { display: grid; min-width: 0; gap: 4px; color: var(--muted); font-size: 11px; }
 .settings-field-label { min-width: 0; }
@@ -376,10 +389,57 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-height: 30px;
+  color: var(--text);
 }
-.settings-panel .checkbox-label input {
-  width: auto;
-  accent-color: var(--green);
+.settings-panel .checkbox-label > input[type="checkbox"] { order: 2; }
+/* iOS-style switch, drawn on the native checkbox so keyboard/a11y stay intact.
+   Scoped to .checkbox-label rows: compact list checkboxes (.client-checkbox,
+   .tool-preference-toggle) keep their native accent-color look. */
+.settings-panel .checkbox-label > input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  position: relative;
+  border: 1px solid rgba(var(--line-rgb), 0.16);
+  border-radius: 999px;
+  background: rgba(var(--sunken-rgb), 0.55);
+  cursor: pointer;
+  transition: background 180ms ease, border-color 180ms ease;
+}
+.settings-panel .checkbox-label > input[type="checkbox"]::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), background 180ms ease;
+}
+.settings-panel .checkbox-label > input[type="checkbox"]:checked {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.88);
+}
+.settings-panel .checkbox-label > input[type="checkbox"]:checked::before {
+  transform: translateX(14px);
+  background: rgb(var(--panel-rgb));
+}
+.settings-panel .checkbox-label > input[type="checkbox"]:focus-visible {
+  outline: 1px solid rgba(115, 189, 245, 0.72);
+  outline-offset: 2px;
+}
+/* Disabled switch (e.g. Tray-only mode while the tray icon is off): dim it and
+   drop the pointer so it doesn't read as an available control. */
+.settings-panel .checkbox-label > input[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .settings-group { display: grid; min-width: 0; gap: 8px; }
 .settings-group.hidden, .settings-subgroup.hidden, .settings-actions button.hidden { display: none; }
@@ -387,7 +447,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   grid-template-columns: minmax(0, 1fr);
 }
 .session-archive-settings { display: grid; gap: 6px; }
-.session-archive-settings .session-archive-toggle { justify-content: flex-start; gap: 8px; color: var(--text); }
+.session-archive-settings .session-archive-toggle { color: var(--text); }
 .session-archive-footer {
   display: flex;
   align-items: center;
@@ -418,7 +478,6 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .session-archive-clear:disabled { opacity: 0.38; cursor: default; }
 .settings-wsl-block { display: grid; gap: 6px; min-width: 0; }
 .settings-wsl-block.hidden { display: none; }
-.settings-wsl-block .wsl-scan-toggle { justify-content: flex-start; gap: 8px; }
 .wsl-panel { display: grid; gap: 4px; margin-top: 4px; }
 .settings-export-block { display: grid; gap: 8px; min-width: 0; }
 /* Give the section description room under the header so the two small-text lines don't merge. */
@@ -427,10 +486,10 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
    standard subgroup top-rule to it — closes the Data export section off from 自訂模型單價. */
 .settings-export-block + .settings-group { padding-top: 9px; border-top: 1px solid rgba(var(--line-rgb), 0.075); }
 .export-auto-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-.export-auto-head .export-auto-toggle { justify-content: flex-start; gap: 8px; flex: 1 1 auto; min-width: 0; }
+.export-auto-head .export-auto-toggle { flex: 1 1 auto; min-width: 0; }
 .export-status-pill { flex: 0 0 auto; }
 .export-status-pill.hidden { display: none; }
-.export-status-pill.is-active { color: var(--green); border-color: rgba(var(--accent-rgb), 0.5); background: rgba(var(--accent-rgb), 0.08); }
+.export-status-pill.is-active { color: var(--success); border-color: rgba(var(--success-rgb), 0.5); background: rgba(var(--success-rgb), 0.08); }
 .export-auto-details { display: grid; gap: 8px; }
 .export-auto-details.hidden { display: none; }
 .export-dir-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -444,15 +503,118 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .wsl-panel-title { font-size: 11px; color: var(--muted); }
 .wsl-panel-name { font-size: 11px; }
 .wsl-panel-row { padding-left: 10px; }
+/* Modern settings row: text (title + optional desc) left, control right. */
+.settings-panel label.settings-item,
+.settings-panel .settings-item {
+  display: flex;
+  flex-wrap: wrap; /* row line 1 = title + control; a description wraps to a full-width line 2 */
+  align-items: center;
+  gap: 3px 12px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 0;
+  color: var(--text);
+  font-size: 11px;
+}
+.settings-item + .settings-item {
+  border-top: 1px solid rgba(var(--line-rgb), 0.06);
+}
+.settings-panel .settings-item.hidden { display: none; }
+.settings-item-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.settings-item-title { color: var(--text); }
+.settings-item-desc,
+p.settings-note.settings-item-desc,
+span.settings-note.settings-item-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+.settings-item > .settings-item-desc {
+  flex-basis: 100%;
+  min-width: 0;
+  padding-bottom: 2px;
+  order: 3; /* after the checkbox-label input (order: 2) so the control stays on the title line */
+}
+.settings-item > .settings-item-desc:empty { display: none; }
+.settings-item-value {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.settings-item-value strong { color: var(--text); font-weight: 600; }
+/* .settings-panel prefix outweighs the panel-wide `select { width: 100% }` default */
+.settings-panel .settings-item > select {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 58%;
+}
+.settings-panel .settings-item > input[type="number"] {
+  flex: 0 0 64px;
+  width: 64px;
+  text-align: right;
+}
+/* Inline text options (Codex-style): plain labels, the active one gets a soft pill. */
+.inline-options { display: inline-flex; align-items: center; gap: 2px; }
+.settings-panel .inline-option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.settings-panel .inline-option:hover { color: var(--text); }
+.settings-panel .inline-option input[type="radio"] {
+  position: absolute;
+  width: 0;
+  height: 0;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.settings-panel .inline-option:has(input:checked) { background: rgba(var(--overlay-rgb), 0.12); color: var(--text); }
+.settings-panel .inline-option:has(input:focus-visible) { outline: 1px solid rgba(var(--accent-rgb), 0.72); }
 .settings-group-header { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; }
-.settings-group-header span:last-child:not(:first-child) { font-size: 9px; opacity: 0.72; }
+.settings-group-header:not(.cursor-settings-toggle) {
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  opacity: 0.9;
+}
+.settings-group-header span:last-child:not(:first-child) { font-size: 9px; opacity: 0.72; letter-spacing: normal; text-transform: none; }
+/* The sections form ONE continuous inset-grouped card (iOS Settings root
+   list): segments share side borders, hairlines separate them, only the
+   first/last segment round their outer corners. */
 .settings-collapsible-group {
   gap: 0;
-  padding-bottom: 2px;
-  border-bottom: 1px solid rgba(var(--line-rgb), 0.09);
+  min-width: 0;
+  border: 1px solid rgba(var(--line-rgb), 0.10);
+  border-radius: 0;
+  background: rgba(var(--panel-rgb), 0.35);
+  /* clip, not hidden: the settings panel is a max-height-constrained grid, and
+     overflow:hidden would zero this item's automatic minimum size, letting the
+     grid squash every card. clip rounds the corners without becoming a scroll
+     container, so intrinsic sizing (and the panel's own scrolling) survive. */
+  overflow: clip;
+  transition: background 140ms ease;
 }
-.settings-collapsible-group:last-child {
-  border-bottom: 0;
+.settings-collapsible-group + .settings-collapsible-group {
+  border-top: 0;
+  box-shadow: inset 0 1px 0 rgba(var(--line-rgb), 0.07);
+}
+.settings-collapsible-group:first-child { border-radius: 12px 12px 0 0; }
+.settings-collapsible-group:last-child { border-radius: 0 0 12px 12px; }
+.settings-collapsible-group.expanded {
+  background: rgba(var(--panel-rgb), 0.55);
 }
 .settings-section-toggle {
   display: grid;
@@ -461,15 +623,18 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   gap: 10px;
   width: 100%;
   min-width: 0;
-  min-height: 34px;
-  padding: 5px 4px;
+  min-height: 40px;
+  padding: 9px 11px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+.settings-collapsible-group.expanded > .settings-section-toggle {
+  border-bottom: 1px solid rgba(var(--line-rgb), 0.08);
 }
 .settings-section-toggle:hover,
 .settings-section-toggle:focus-visible {
@@ -591,9 +756,16 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .settings-section-details-inner {
   display: grid;
   min-width: 0;
-  gap: 10px;
-  padding-left: 4px;
+  gap: 0;
+  padding: 2px 11px 0;
 }
+.settings-section-details-inner > * + * {
+  margin-top: 10px;
+}
+/* Consecutive list rows glue into one hairline-separated list (iOS grouped list). */
+.settings-panel .settings-item + .settings-item { margin-top: 0; }
+/* A tiny uppercase group header hugs the rows it introduces. */
+.settings-subgroup > .settings-group-header:not(.cursor-settings-toggle) + * { margin-top: 4px; }
 .settings-section-details-inner > :first-child {
   padding-top: 2px;
 }
@@ -613,8 +785,11 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 }
 .presence-feature { display: grid; min-width: 0; gap: 8px; }
 .presence-feature + .presence-feature {
-  padding-top: 10px;
-  border-top: 1px solid rgba(var(--line-rgb), 0.09);
+  margin-top: 0; /* features read as consecutive rows of one list */
+  border-top: 1px solid rgba(var(--line-rgb), 0.06);
+}
+.presence-feature > * + * {
+  margin-top: 2px;
 }
 .presence-feature-body {
   min-width: 0;
@@ -624,7 +799,10 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .presence-feature-body > .accordion-animation-inner {
   display: grid;
   min-width: 0;
-  gap: 8px;
+  gap: 0;
+}
+.presence-feature-body > .accordion-animation-inner > * + * {
+  margin-top: 4px;
 }
 .settings-collapsible-group.expanded > .settings-section-toggle .settings-section-disclosure {
   transform: rotate(180deg);
@@ -633,13 +811,18 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   position: relative;
   flex: 0 0 auto;
   display: inline-block;
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   background-color: currentColor;
-  color: var(--green);
-  opacity: 0.9;
+  color: var(--muted);
+  opacity: 0.85;
+  transition: color 140ms ease, opacity 140ms ease;
   -webkit-mask: var(--settings-section-icon-url) center / contain no-repeat;
   mask: var(--settings-section-icon-url) center / contain no-repeat;
+}
+.settings-collapsible-group.expanded .settings-section-icon {
+  color: var(--accent);
+  opacity: 1;
 }
 .settings-section-icon-general { --settings-section-icon-url: url("icons/settings/general.svg"); }
 .settings-section-icon-main { --settings-section-icon-url: url("icons/settings/main.svg"); }
@@ -692,6 +875,15 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A status pill can sit inline right after a row title (e.g. the auto-export
+   "running" pill) instead of stacking onto its own line below. */
+.settings-item-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.settings-item-heading > .cursor-status-pill { flex: 0 1 auto; }
 .cursor-disclosure-icon {
   flex: 0 0 auto;
   display: inline-grid;
@@ -911,22 +1103,23 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   gap: 8px;
   min-width: 0;
   width: 100%;
-  padding: 7px 8px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
+  padding: 8px 9px;
+  border: 1px solid rgba(var(--line-rgb), 0.10);
+  border-radius: 10px;
   background: rgba(var(--overlay-rgb), var(--control-alpha));
   cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
 }
 .settings-panel .hub-mode-option:hover { border-color: var(--line-strong); }
 .settings-panel .hub-mode-option input[type="radio"] {
   width: auto;
   margin: 2px 0 0;
   flex: 0 0 auto;
-  accent-color: var(--green);
+  accent-color: var(--accent);
 }
 .settings-panel .hub-mode-option:has(input:checked) {
-  border-color: rgba(115, 189, 245, 0.62);
-  background: rgba(115, 189, 245, 0.07);
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.07);
 }
 .hub-mode-text { display: grid; gap: 1px; min-width: 0; }
 .hub-mode-text strong { color: var(--text); font-size: 11px; font-weight: 500; }
@@ -939,10 +1132,14 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 #secretPasteButton { font-size: 17px; }
 .shortcut-recorder {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
   min-width: 0;
 }
+/* As a settings-item row the recorder hugs the right edge; the value pill hugs its text.
+   The value is itself the record button: click it, then press the shortcut. */
+.settings-shortcut-item > .shortcut-recorder { flex: 0 1 auto; }
+.settings-shortcut-item .shortcut-value { min-width: 44px; justify-content: center; }
 .shortcut-value {
   display: flex;
   align-items: center;
@@ -986,7 +1183,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   color: var(--muted);
   font-size: 10px;
 }
-.hub-status.ok { color: var(--green); border-color: rgba(var(--accent-rgb), 0.32); }
+.hub-status.ok { color: var(--success); border-color: rgba(var(--success-rgb), 0.32); }
 .hub-status.error { color: var(--red); border-color: rgba(244, 119, 136, 0.42); }
 .hub-status[hidden] { display: none; }
 .hub-address-list { display: grid; min-width: 0; gap: 5px; }
@@ -1018,39 +1215,11 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .hub-address-iface { color: var(--muted); font-size: 9.5px; flex: 0 0 auto; }
 .hub-address-row .icon-button { width: 26px; height: 26px; flex: 0 0 auto; font-size: 12px; }
 .settings-note.hub-warning { color: var(--orange); }
-.currency-rate-row { display: grid; gap: 8px; min-width: 0; }
+.currency-rate-row { display: grid; gap: 4px; min-width: 0; }
 .currency-rate-row.hidden, .currency-rate-manual-field.hidden { display: none; }
-.currency-rate-mode {
-  display: inline-flex;
-  width: max-content;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(var(--sunken-rgb), 0.48);
-}
-.settings-panel .rate-mode-option {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 4px 16px;
-  border-radius: 6px;
-  color: var(--muted);
-  font-size: 11px;
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
-}
-.settings-panel .rate-mode-option:hover { color: var(--text); }
-.settings-panel .rate-mode-option input[type="radio"] {
-  position: absolute;
-  width: 0;
-  height: 0;
-  margin: 0;
-  opacity: 0;
-  pointer-events: none;
-}
-.settings-panel .rate-mode-option:has(input:checked) { background: rgba(var(--blue-rgb), 0.16); color: var(--text); }
-.currency-rate-manual-field { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* The rate row is a sub-setting of the Currency row: keep them as one unseparated pair. */
+.settings-subgroup > .settings-item + .currency-rate-row { margin-top: 0; }
+.currency-rate-manual-field { display: flex; align-items: center; gap: 8px; min-width: 0; padding-bottom: 2px; }
 .currency-rate-prefix { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
 .settings-panel .currency-rate-manual-field input { flex: 1 1 0; width: 0; min-width: 0; font-size: 11px; }
 .settings-note.currency-rate-status { font-variant-numeric: tabular-nums; }
@@ -1078,13 +1247,13 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 }
 .tokscale-lines small { color: var(--muted); font-size: 9px; }
 .tokscale-message {
-  min-height: 12px;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.35;
 }
+.tokscale-message:empty { display: none; } /* don't reserve a blank line while there's no status */
 .tokscale-message.error { color: var(--red); }
-.tokscale-message.success { color: var(--green); }
+.tokscale-message.success { color: var(--success); }
 .settings-panel .client-checkboxes {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1108,7 +1277,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   flex: 0 0 auto;
   width: auto;
   margin: 0;
-  accent-color: var(--green);
+  accent-color: var(--accent);
 }
 .settings-panel .client-checkboxes label.client-checkbox > span {
   flex: 1 1 auto;
@@ -1131,6 +1300,20 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+/* When the note-row's left cell is an accordion toggle (Vendor Colors), the
+   toggle owns the whole row so its disclosure caret lands at the true right
+   edge; the group-level reset then tucks in just left of the caret instead of
+   pushing it inward and reading as a detached, floating button. */
+.settings-note-row:has(> .cursor-settings-toggle) {
+  display: block;
+  position: relative;
+}
+.settings-note-row:has(> .cursor-settings-toggle) > .tool-header-actions {
+  position: absolute;
+  top: 50%;
+  right: 20px;
+  transform: translateY(-50%);
 }
 .tool-header-actions {
   display: flex;
@@ -1242,8 +1425,8 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   white-space: nowrap;
 }
 .tool-status-tag-ok {
-  border-color: rgba(var(--accent-rgb), 0.28);
-  color: var(--green);
+  border-color: rgba(var(--success-rgb), 0.28);
+  color: var(--success);
 }
 .tool-status-tag-neutral {
   border-color: rgba(var(--line-rgb), 0.2);
@@ -1290,7 +1473,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .tool-preference-toggle input[type="checkbox"] {
   width: auto;
   margin: 0;
-  accent-color: var(--green);
+  accent-color: var(--accent);
 }
 .tool-visibility-button,
 .tool-pin-button {
@@ -1303,7 +1486,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  color: var(--green);
+  color: var(--accent);
   cursor: pointer;
 }
 .tool-visibility-button:hover {
@@ -1335,7 +1518,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .tool-pin-button.is-pinned {
   border-color: rgba(var(--accent-rgb), 0.28);
   background: rgba(var(--accent-rgb), 0.06);
-  color: var(--green);
+  color: var(--accent);
 }
 .tool-visibility-button svg,
 .tool-pin-button svg {
@@ -1397,8 +1580,8 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   white-space: nowrap;
 }
 .limit-provider-tag-status {
-  border-color: rgba(var(--accent-rgb), 0.28);
-  color: var(--green);
+  border-color: rgba(var(--success-rgb), 0.28);
+  color: var(--success);
 }
 .limit-provider-tag-source {
   border-color: rgba(115, 189, 245, 0.24);
@@ -1408,12 +1591,12 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   border-color: rgba(var(--line-rgb), 0.18);
 }
 .limit-provider-tag-local {
-  border-color: rgba(var(--accent-rgb), 0.24);
-  color: var(--green);
+  border-color: rgba(var(--line-rgb), 0.18);
+  color: var(--muted);
 }
 .limit-provider-tag-remote {
-  border-color: rgba(241, 217, 115, 0.32);
-  color: var(--yellow);
+  border-color: rgba(115, 189, 245, 0.28);
+  color: var(--blue);
 }
 .limit-provider-tag-multi {
   border-color: rgba(115, 189, 245, 0.3);
@@ -1498,6 +1681,17 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .reset-appearance-button:hover { border-color: var(--line-strong); color: var(--text); }
 .slider-label { display: flex; align-items: center; justify-content: space-between; }
 .reset-inline { width: 18px; height: 18px; font-size: 10px; line-height: 1; }
+/* Slider rows: title (+ reset) left, track with value fill right, numeric readout at the edge */
+.settings-slider-item .slider-label { justify-content: flex-start; gap: 6px; }
+.settings-panel .settings-slider-item input[type="range"] { flex: 0 0 42%; width: 42%; }
+.slider-value {
+  flex: 0 0 auto;
+  min-width: 24px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Appearance: interface theme presets + colour pickers */
 .theme-preset-chips { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1514,7 +1708,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   cursor: pointer;
 }
 .theme-preset-chip:hover { border-color: var(--line-strong); color: var(--text); }
-.theme-preset-chip.active { border-color: rgba(var(--accent-rgb), 0.58); color: var(--green); background: rgba(var(--accent-rgb), 0.08); }
+.theme-preset-chip.active { border-color: rgba(var(--accent-rgb), 0.58); color: var(--accent); background: rgba(var(--accent-rgb), 0.08); }
 .theme-preset-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25); }
 .theme-code-field { display: grid; gap: 6px; }
 .settings-panel input.theme-code-input {
@@ -1525,7 +1719,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 }
 .theme-code-status { min-height: 0; margin: 0; font-size: 10px; line-height: 1.35; }
 .theme-code-status:empty { display: none; }
-.theme-code-status.success { color: var(--green); }
+.theme-code-status.success { color: var(--success); }
 .theme-code-status.error { color: var(--red); }
 .theme-color-accordion { border-top: 1px solid var(--line); padding-top: 9px; }
 .color-picker-grid { display: grid; gap: 6px; }
@@ -1566,16 +1760,50 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   color: var(--text);
   outline: none;
 }
-.settings-panel select { appearance: none; cursor: pointer; }
+.settings-panel select {
+  appearance: none;
+  cursor: pointer;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: rgba(var(--overlay-rgb), 0.05);
+}
+.settings-panel select:hover { border-color: var(--line-strong); }
+/* Chromium delegates an open <select> popup to a platform-specific surface.
+   Windows can give that popup a light system background while retaining our
+   light text, so make only the popup options opaque. The closed control keeps
+   the same light glass treatment as macOS instead of reverting to a heavy
+   native field. */
+html.is-windows .settings-panel select option {
+  background-color: rgb(var(--panel-rgb));
+  color: var(--text);
+}
 .settings-panel input[type="range"] {
-  height: 22px;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 20px;
   padding: 0;
-  accent-color: var(--green);
+  border: 0;
   background: transparent;
+}
+.settings-panel input[type="range"]::-webkit-slider-runnable-track {
+  /* One thin line with a single continuous faint→full accent gradient across the
+     whole track (macOS-style); the thumb rides on it as the position indicator. */
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(to right, rgba(var(--accent-rgb), 0.22), rgb(var(--accent-rgb)));
+}
+.settings-panel input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -5.5px;
+  border-radius: 50%;
+  background: rgb(var(--accent-rgb));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 .settings-panel input:focus { border-color: rgba(115, 189, 245, 0.72); }
 .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.settings-actions button { min-height: 30px; padding: 0 10px; font-size: 11px; white-space: nowrap; }
+.settings-actions button { min-height: 30px; padding: 0 10px; border-radius: 8px; font-size: 11px; white-space: nowrap; }
 .refresh-button {
   display: inline-flex;
   align-items: center;
@@ -1616,7 +1844,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .refresh-button:active:not(:disabled) .refresh-button-icon { transform: scale(0.9); }
 .refresh-button:disabled { cursor: default; }
 .refresh-button.is-refreshing {
-  color: var(--green);
+  color: var(--accent);
   border-color: rgba(var(--accent-rgb), 0.58);
   background: rgba(var(--accent-rgb), 0.1);
   box-shadow: inset 0 1px 0 rgba(var(--overlay-rgb), 0.12), 0 0 0 1px rgba(var(--accent-rgb), 0.1);
@@ -1624,10 +1852,10 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .refresh-button.is-refreshing .refresh-button-icon { display: none; }
 .refresh-button.is-refreshing .refresh-button-spinner { display: block; }
 .refresh-button.is-refreshed {
-  color: var(--green);
-  border-color: rgba(var(--accent-rgb), 0.64);
-  background: rgba(var(--accent-rgb), 0.12);
-  box-shadow: inset 0 1px 0 rgba(var(--overlay-rgb), 0.12), 0 0 12px rgba(var(--accent-rgb), 0.18);
+  color: var(--success);
+  border-color: rgba(var(--success-rgb), 0.64);
+  background: rgba(var(--success-rgb), 0.12);
+  box-shadow: inset 0 1px 0 rgba(var(--overlay-rgb), 0.12), 0 0 12px rgba(var(--success-rgb), 0.18);
 }
 .refresh-button.is-refresh-error {
   color: #ffd8d8;
@@ -1637,7 +1865,9 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 }
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-reduce-motion="off"]) .refresh-button,
-  :root:not([data-reduce-motion="off"]) .refresh-button-icon {
+  :root:not([data-reduce-motion="off"]) .refresh-button-icon,
+  :root:not([data-reduce-motion="off"]) .utility-actions .refresh-button,
+  :root:not([data-reduce-motion="off"]) .utility-actions .settings-icon-button {
     transition-duration: 0.01ms;
   }
 }
@@ -1686,7 +1916,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 .tab:hover { color: var(--text); }
 .tab.active {
   border-color: transparent;
-  color: var(--green);
+  color: var(--accent);
   background: transparent;
   box-shadow: none;
 }
@@ -1746,7 +1976,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
 }
 .breakdown.hidden { display: none; }
 .breakdown::-webkit-scrollbar { width: 0; height: 0; }
-.project-incomplete-hint {
+.breakdown-incomplete-hint {
   margin: 0;
   padding: 0 2px 1px;
   color: var(--muted);
@@ -2256,7 +2486,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   padding: 0 8px;
   border-radius: 6px;
   border-color: rgba(var(--accent-rgb), 0.24);
-  color: var(--green);
+  color: var(--accent);
   font-size: 11px;
 }
 .home-empty {
@@ -2282,7 +2512,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   padding: 0 10px;
   border-radius: 7px;
   border-color: rgba(var(--accent-rgb), 0.24);
-  color: var(--green);
+  color: var(--accent);
   font-size: 11px;
 }
 
@@ -2612,8 +2842,8 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   line-height: 1.1;
 }
 .service-status-ok .service-status-pill {
-  border-color: rgba(var(--accent-rgb), 0.28);
-  color: var(--green);
+  border-color: rgba(var(--success-rgb), 0.28);
+  color: var(--success);
 }
 .service-status-degraded .service-status-pill {
   border-color: rgba(241, 217, 115, 0.32);
@@ -2704,6 +2934,33 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   grid-template-columns: 1fr;
   gap: 8px;
 }
+.limit-windows-antigravity-grouped {
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+.limit-window-group {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+.limit-window-group-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.limit-window-group-items {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-width: 0;
+  gap: 10px;
+}
+.limit-window-group-items > .limit-window:only-child {
+  grid-column: 1 / -1;
+}
 .limit-row-group {
   gap: 8px;
 }
@@ -2719,7 +2976,7 @@ body.floating-bubble-collapsed-right .floating-bubble-tab {
   margin-left: -6px;
   align-items: center;
   justify-content: center;
-  color: var(--green);
+  color: var(--accent);
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -2835,7 +3092,7 @@ html.is-windows .limit-live-badge {
 .limit-account-switch-button:focus-visible {
   border-color: rgba(var(--accent-rgb), 0.32);
   background: rgba(var(--accent-rgb), 0.075);
-  color: var(--green);
+  color: var(--accent);
   box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.16), inset 0 1px 0 rgba(var(--overlay-rgb), 0.1);
 }
 .limit-account-switch-button:disabled {
@@ -3234,7 +3491,7 @@ html.is-windows .limit-live-badge {
 }
 .view-switcher-menu-item.is-current {
   background: rgba(var(--accent-rgb), 0.08);
-  color: var(--green);
+  color: var(--accent);
 }
 .view-switcher-menu-label {
   min-width: 0;
@@ -3275,10 +3532,17 @@ html.is-windows .limit-live-badge {
   font-size: 10px;
   line-height: 1;
   white-space: nowrap;
-  transition: background-color 120ms ease, border-color 120ms ease;
+  transition: opacity 120ms ease, background-color 120ms ease, border-color 120ms ease;
 }
 .update-pill.hidden { display: none; }
 .update-pill:hover { background: rgba(115, 189, 245, 0.18); border-color: rgba(115, 189, 245, 0.52); }
+.footer:has(.utility-actions:hover) .update-pill,
+.footer:has(.utility-actions :focus-visible) .update-pill,
+.footer:has(.refresh-button:is(.is-refreshing, .is-refreshed, .is-refresh-error)) .update-pill,
+.shell.settings-open .footer .update-pill {
+  opacity: 0;
+  pointer-events: none;
+}
 .update-pill-action {
   appearance: none;
   background: transparent;
@@ -3375,6 +3639,7 @@ html.is-windows .limit-live-badge {
 .app-update-popover .inline-link { font-size: 10px; }
 .app-update-popover .inline-link.hidden { display: none; }
 @media (prefers-reduced-motion: reduce) {
+  :root:not([data-reduce-motion="off"]) .update-pill,
   :root:not([data-reduce-motion="off"]) .app-update-popover { transition-duration: 0.01ms; }
 
   :root:not([data-reduce-motion="off"]) *,
@@ -3582,7 +3847,7 @@ html.is-windows .limit-live-badge {
 .view-subgroup-toggle:hover,
 .view-subgroup-toggle:focus-visible,
 .view-subgroup-toggle.is-expanded {
-  color: var(--green);
+  color: var(--accent);
 }
 .view-subgroup-toggle:focus-visible {
   outline: 2px solid rgba(var(--accent-rgb), 0.35);
@@ -3635,9 +3900,31 @@ html.is-windows .limit-live-badge {
   padding: 0 0 0 8px;
   border-left: 1px solid rgba(var(--line-rgb), 0.14);
 }
+.home-activity-settings {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px 0 4px 14px;
+  padding: 2px 0 2px 8px;
+  border-left: 1px solid rgba(var(--line-rgb), 0.14);
+  color: var(--muted);
+  font-size: 11px;
+}
 .home-limit-provider-header { margin-bottom: 1px; }
 .home-limit-status-setting {
   min-height: 24px;
+}
+.home-limit-provider-names-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.home-limit-provider-names-reason {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.3;
 }
 .home-limit-provider-row {
   grid-template-columns: minmax(0, 1fr) repeat(2, 22px);
@@ -3740,6 +4027,84 @@ html.is-windows .limit-live-badge {
   gap: 6px;
   white-space: nowrap;
 }
+.device-breakdown { gap: 6px; }
+.device-tool {
+  display: grid;
+  gap: 2px;
+}
+.device-tool + .device-tool {
+  padding-top: 6px;
+  border-top: 1px solid rgba(var(--overlay-rgb), 0.07);
+}
+.device-tool-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+}
+.device-tool-label {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.device-tool-mark {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+}
+.device-tool-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-tool-metrics {
+  flex: 0 0 auto;
+  min-width: max-content;
+  color: var(--text);
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+.device-model-list {
+  display: grid;
+  gap: 2px;
+  padding-left: 15px;
+}
+.device-model-row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.3;
+}
+.device-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-model-value {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.62;
+}
+.device-meta {
+  padding-top: 6px;
+  border-top: 1px solid rgba(var(--overlay-rgb), 0.07);
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+.device-breakdown-empty { color: var(--muted); font-size: 10px; }
 .accordion-pct {
   font-size: 10px;
   opacity: 0.6;
@@ -3754,6 +4119,10 @@ html.is-windows .limit-live-badge {
   text-align: right;
 }
 .project-tool-breakdown { gap: 5px; }
+@media (prefers-reduced-motion: reduce) {
+  .row-accordion,
+  .row-accordion-inner { transition: none; }
+}
 .project-tool-row { align-items: center; }
 .project-tool-mark {
   width: 7px;

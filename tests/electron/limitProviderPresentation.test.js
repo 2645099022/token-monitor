@@ -8,12 +8,17 @@ const vm = require('node:vm');
 const accountIdentityApi = require('../../src/electron/renderer/accountIdentity');
 
 const {
+  antigravityQuotaWindow,
   apiKeyAccountStatus,
   isCodexLiveAccount,
   limitProviderDisplayLabel,
   limitProviderCapabilityTags,
+  limitProviderCompactWindowLabel,
+  limitProviderCompactWindowPeriodLabel,
+  limitProviderCompactWindows,
   limitProviderMainDeviceLabel,
   limitProviderProvenance,
+  limitResetRemainingMs,
   limitProviderSettingsTags
 } = require('../../src/electron/renderer/limitProviderPresentation');
 
@@ -49,6 +54,97 @@ test('limitProviderDisplayLabel normalizes short account labels without rewritin
   assert.equal(limitProviderDisplayLabel(''), '');
 });
 
+test('compact Antigravity labels distinguish duplicate periods by model group', () => {
+  const windows = [
+    { kind: 'session', label: 'Gemini 5-hour' },
+    { kind: 'session', label: 'Claude/GPT 5-hour' }
+  ];
+
+  assert.equal(limitProviderCompactWindowLabel('antigravity', windows[0], windows), 'Gemini');
+  assert.equal(limitProviderCompactWindowLabel('antigravity', windows[1], windows), 'Claude/GPT');
+  assert.equal(limitProviderCompactWindowLabel('codex', windows[0], windows), '');
+});
+
+test('Antigravity quota presentation parses grouped period labels once', () => {
+  assert.deepEqual(antigravityQuotaWindow({ kind: 'session', label: 'Gemini 5-hour' }), {
+    groupLabel: 'Gemini',
+    windowLabel: '5-hour'
+  });
+  assert.deepEqual(antigravityQuotaWindow({ kind: 'weekly', label: 'Future Group weekly' }), {
+    groupLabel: 'Future Group',
+    windowLabel: 'Weekly'
+  });
+  assert.equal(antigravityQuotaWindow({ kind: 'weekly', label: 'Gemini Pro' }), null);
+});
+
+test('compact Antigravity windows surface critical weekly quotas per model group', () => {
+  const windows = [
+    { kind: 'session', label: 'Gemini 5-hour', remainingPercent: 100 },
+    { kind: 'weekly', label: 'Gemini weekly', remainingPercent: 0 },
+    { kind: 'session', label: 'Claude/GPT 5-hour', remainingPercent: 20 },
+    { kind: 'weekly', label: 'Claude/GPT weekly', remainingPercent: 80 }
+  ];
+
+  assert.deepEqual(limitProviderCompactWindows('antigravity', windows), [windows[1], windows[2]]);
+  const selected = limitProviderCompactWindows('antigravity', windows);
+  assert.equal(limitProviderCompactWindowPeriodLabel('antigravity', selected[0], selected), 'Weekly');
+  assert.equal(limitProviderCompactWindowPeriodLabel('antigravity', selected[1], selected), '5-hour');
+});
+
+test('compact Antigravity windows keep 5-hour primary until weekly is critical', () => {
+  const aboveCritical = [
+    { kind: 'session', label: 'Gemini 5-hour', remainingPercent: 60 },
+    { kind: 'weekly', label: 'Gemini weekly', remainingPercent: 30 }
+  ];
+  const critical = [
+    { kind: 'session', label: 'Gemini 5-hour', remainingPercent: 60 },
+    { kind: 'weekly', label: 'Gemini weekly', remainingPercent: 10 }
+  ];
+
+  assert.deepEqual(limitProviderCompactWindows('antigravity', aboveCritical), [aboveCritical[0]]);
+  assert.deepEqual(limitProviderCompactWindows('antigravity', critical), [critical[1]]);
+});
+
+test('compact Antigravity windows prefer 5-hour on ties and preserve legacy pools', () => {
+  const grouped = [
+    { kind: 'session', label: 'Gemini 5-hour', remainingPercent: 100 },
+    { kind: 'weekly', label: 'Gemini weekly', remainingPercent: 100 },
+    { kind: 'session', label: 'Claude/GPT 5-hour', remainingPercent: 100 },
+    { kind: 'weekly', label: 'Claude/GPT weekly', remainingPercent: 100 }
+  ];
+  const legacy = [
+    { kind: 'session', label: 'Gemini Pro', remainingPercent: 50 },
+    { kind: 'session', label: 'Gemini Flash', remainingPercent: 40 }
+  ];
+
+  assert.deepEqual(limitProviderCompactWindows('antigravity', grouped), [grouped[0], grouped[2]]);
+  assert.equal(limitProviderCompactWindows('antigravity', legacy), legacy);
+});
+
+test('compact Antigravity labels preserve period fallback when groups are not distinct', () => {
+  const differentPeriods = [
+    { kind: 'session', label: 'Gemini 5-hour' },
+    { kind: 'weekly', label: 'Gemini weekly' }
+  ];
+  const legacy = [
+    { kind: 'session', label: 'Gemini Pro' },
+    { kind: 'session', label: 'Gemini Flash' }
+  ];
+
+  assert.equal(limitProviderCompactWindowLabel('antigravity', differentPeriods[0], differentPeriods), '');
+  assert.equal(limitProviderCompactWindowLabel('antigravity', legacy[0], legacy), '');
+});
+
+test('limitResetRemainingMs keeps future resets, briefly marks reset time, and expires old timestamps', () => {
+  const now = Date.parse('2026-07-10T03:00:00.000Z');
+
+  assert.equal(limitResetRemainingMs('2026-07-10T04:30:00.000Z', now), 90 * 60 * 1000);
+  assert.equal(limitResetRemainingMs('2026-07-10T02:59:30.000Z', now), 0);
+  assert.equal(limitResetRemainingMs('2026-07-10T02:58:59.000Z', now), null);
+  assert.equal(limitResetRemainingMs('not-a-date', now), null);
+  assert.equal(limitResetRemainingMs(null, now), null);
+});
+
 const rendererDir = path.join(__dirname, '..', '..', 'src', 'electron', 'renderer');
 
 function readRendererFile(name) {
@@ -79,6 +175,21 @@ function runLocalLiveCodexProvider(source, state) {
     { accountIdentityApi, state }
   );
 }
+
+test('Limits and Home share reset expiry while preserving the existing reset copy', () => {
+  const app = readRendererFile('app.js');
+  const formatReset = functionBody(app, 'formatReset', 'formatDuration');
+  const limitWindow = functionBody(app, 'limitWindowNode', 'providersByLimitProviderId');
+  const homeLimits = functionBody(app, 'renderHomeLimitModule', 'renderHomeModelModule');
+
+  assert.match(formatReset, /limitResetRemainingMs\(value\)/);
+  assert.match(formatReset, /diffMs === 0\) return 'Reset now'/);
+  assert.match(formatReset, /return `Reset \$\{formatDuration\(diffMs\)\}`/);
+  assert.match(limitWindow, /window\?\.resetsAt\s*\? formatReset\(window\.resetsAt\)/);
+  assert.doesNotMatch(limitWindow, /formatReset\(window\?\.resetsAt\) \|\| window\?\.resetDescription/);
+  assert.match(homeLimits, /window\.resetsAt\s*\? resetAt \|\|/);
+  assert.doesNotMatch(app, /noActiveLimitWindow|formatResetDuration/);
+});
 
 test('capability tags explain how each provider is collected in settings', () => {
   assert.deepEqual(limitProviderCapabilityTags('claude'), ['Auto', 'OAuth/CLI']);
@@ -125,7 +236,9 @@ test('Grok CLI/Web capability tag is localized in settings', () => {
 
 test('API key account status distinguishes pending checks from completed failures', () => {
   assert.equal(apiKeyAccountStatus(null, false), 'notConfigured');
+  assert.equal(apiKeyAccountStatus(null, false, false), 'notConfigured');
   assert.equal(apiKeyAccountStatus(null, true), 'checking');
+  assert.equal(apiKeyAccountStatus(null, true, false), 'disabled');
   assert.equal(apiKeyAccountStatus({ status: 'ok' }, true), 'linked');
   assert.equal(apiKeyAccountStatus({ status: 'unauthorized' }, true), 'invalid');
   assert.equal(apiKeyAccountStatus({ status: 'rateLimited' }, true), 'limited');
@@ -347,12 +460,15 @@ test('tray primary-limit modes use the shared provider-aware resolver', () => {
   assert.match(renderBars, /secondaryWindow/);
   assert.doesNotMatch(renderBars, /\.find\(\(w\) => w\.kind/);
   assert.match(renderAllSessions, /trayBarsLayout\(height, \{ contentOnly: true \}\)/);
+  assert.match(renderAllSessions, /function renderAllSessionsIcon\(stats, height = 44, configOrder, colors = \{\}, options = \{\}\)/);
+  assert.match(renderAllSessions, /picks\.length === 1\) return renderBarsIcon\(stats, height, \(\) => picks\[0\], colors, options\)/);
 });
 
 test('limit percent tray mode renders provider icons into a generated tray image', () => {
   const app = readRendererFile('app.js');
   const main = fs.readFileSync(path.join(__dirname, '../../src/electron/main.js'), 'utf8');
   const renderLimitSessionsIcon = functionBody(app, 'renderLimitSessionsIcon', 'barsDataUrlForMode');
+  const drawProviderImage = functionBody(app, 'drawProviderImage', 'renderBarsIcon');
   const maybeUpdateBarsIcon = functionBody(app, 'maybeUpdateBarsIcon', 'loadImage');
   const updateTrayDisplay = functionBody(main, 'updateTrayDisplay', 'sendStatus');
 
@@ -363,18 +479,50 @@ test('limit percent tray mode renders provider icons into a generated tray image
   assert.match(renderLimitSessionsIcon, /primaryWindow/);
   assert.match(renderLimitSessionsIcon, /secondaryWindow/);
   assert.match(renderLimitSessionsIcon, /trayProviderImages\[pick\.providerRecord\.provider\]/);
+  assert.match(renderLimitSessionsIcon, /drawProviderImage\(ctx, entry\.image/);
+  assert.match(drawProviderImage, /shadowColor/);
+  assert.match(drawProviderImage, /shadowBlur/);
+  assert.doesNotMatch(drawProviderImage, /fillRect|\.fill\(/);
+  assert.match(app, /providerContrastHalo:\s*true/);
+  assert.match(app, /function floatingBubbleGeneratedColors\(\)/);
+  assert.match(app, /resolvedThemeColor\('text'\)/);
+  assert.match(app, /appliedThemeOverrides = themePresetsApi\.normalizeOverrides\(overrides/);
+  assert.match(app, /function applyThemeColors\(overrides\)[\s\S]*renderFloatingBubbleContent\(\);/);
+  assert.match(app, /function resolvedThemeColor\(key\)[\s\S]*appliedThemeOverrides\[key\]/);
   assert.match(renderLimitSessionsIcon, /`500 \$\{fontSize\}px/);
   assert.match(renderLimitSessionsIcon, /formatPercent\(limitFillPercent/);
   assert.match(renderLimitSessionsIcon, /·/);
-  assert.match(maybeUpdateBarsIcon, /limitsAllSessions/);
+  assert.match(maybeUpdateBarsIcon, /TokenMonitorTrayText\.isGeneratedTrayIconMode\(mode\)/);
   assert.match(maybeUpdateBarsIcon, /trayDataUrlForMode\(mode, 44\)/);
   assert.match(maybeUpdateBarsIcon, /\{ \[mode\]: dataUrl \|\| null \}/);
   assert.match(updateTrayDisplay, /mode === 'limitsAllSessions'/);
-  assert.match(updateTrayDisplay, /const barsImageMode = .*?!limitText && providerTrayIcons\[mode\]/);
+  assert.match(updateTrayDisplay, /const barsImageMode = isBarsTrayIconMode\(mode\) && !limitText && providerTrayIcons\[mode\]/);
   assert.match(updateTrayDisplay, /Boolean\(limitText\)/);
   assert.match(updateTrayDisplay, /const limitText = formatTrayText/);
   assert.match(updateTrayDisplay, /trayImageMode[\s\S]*?\? '' : limitText/);
   assert.match(main, /if \(dataUrl === null\) \{[\s\S]*?delete providerTrayIcons\[id\]/);
+  assert.match(main, /if \(shouldUseTemplateTrayIcon\(id, process\.platform, settings\?\.showTrayProviderBadge\)\) sized\.setTemplateImage\(true\)/);
+  assert.doesNotMatch(main, /process\.platform === 'darwin'\) sized\.setTemplateImage\(true\)/);
+});
+
+test('provider tray badges are opt-in and keep monochrome assets visible', () => {
+  const app = readRendererFile('app.js');
+  const html = readRendererFile('index.html');
+  const main = fs.readFileSync(path.join(__dirname, '../../src/electron/main.js'), 'utf8');
+  const defaults = functionBody(main, 'defaultSettings', 'normalizeCollectionMode');
+  const providerImage = functionBody(app, 'providerImageToPngDataUrl', 'deliverTrayProviderIcons');
+
+  assert.match(defaults, /showTrayProviderBadge:\s*false/);
+  assert.match(html, /<input id="showTrayProviderBadgeInput" type="checkbox" \/>/);
+  assert.match(html, /data-i18n="settings\.display\.trayProviderBadge"/);
+  assert.match(app, /showTrayProviderBadgeInput: document\.getElementById\('showTrayProviderBadgeInput'\)/);
+  assert.match(app, /saveSettings\(\{ showTrayProviderBadge: els\.showTrayProviderBadgeInput\.checked \}\)/);
+  assert.match(app, /deliverTrayProviderIcons\(patch\.showTrayProviderBadge === true\)/);
+  assert.match(app, /providerImageToPngDataUrl\(img, 44, showBadge\)/);
+  assert.match(app, /if \(!trayProviderIconDeliveryGuard\.isCurrent\(deliveryId\)\) return;/);
+  assert.match(providerImage, /if \(!showBadge\) return canvas\.toDataURL\('image\/png'\)/);
+  assert.match(providerImage, /shadowColor = 'rgba\(255, 255, 255, 0\.95\)'/);
+  assert.match(providerImage, /shadowBlur = Math\.max/);
 });
 
 test('Grok renders its single Monthly billing window full-width instead of an empty session/weekly pair', () => {
@@ -388,6 +536,52 @@ test('Grok renders its single Monthly billing window full-width instead of an em
   assert.match(renderProviderWindows, /windowForKind\(provider, 'billing'\)/);
   assert.match(renderProviderWindows, /limitWindowNode\(monthly\.label \|\| 'Monthly', monthly, color, 0\.68\)/);
   assert.match(renderProviderWindows, /limit-window-wide/);
+});
+
+test('Antigravity groups returned quota windows under dynamic model-family headings', () => {
+  const app = readRendererFile('app.js');
+  const quotaGroups = functionBody(app, 'antigravityQuotaGroups', 'formatLimitAmount');
+  const renderProviderWindows = functionBody(app, 'renderProviderWindows', 'renderLimitProviderRow');
+  const css = readRendererFile('styles.css');
+
+  const context = { limitProviderPresentationApi: { antigravityQuotaWindow } };
+  const grouped = vm.runInNewContext(`${quotaGroups}\nantigravityQuotaGroups({ windows: [
+    { kind: 'session', label: 'Gemini 5-hour' },
+    { kind: 'weekly', label: 'Gemini weekly' },
+    { kind: 'weekly', label: 'Future Group weekly' }
+  ] });`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(grouped)), [
+    {
+      label: 'Gemini',
+      windows: [
+        { groupLabel: 'Gemini', windowLabel: '5-hour', window: { kind: 'session', label: 'Gemini 5-hour' } },
+        { groupLabel: 'Gemini', windowLabel: 'Weekly', window: { kind: 'weekly', label: 'Gemini weekly' } }
+      ]
+    },
+    {
+      label: 'Future Group',
+      windows: [
+        { groupLabel: 'Future Group', windowLabel: 'Weekly', window: { kind: 'weekly', label: 'Future Group weekly' } }
+      ]
+    }
+  ]);
+  const legacy = vm.runInNewContext(`${quotaGroups}\nantigravityQuotaGroups({ windows: [
+    { kind: 'weekly', label: 'Gemini Pro' },
+    { kind: 'weekly', label: 'Claude' }
+  ] });`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(legacy)), []);
+
+  assert.match(quotaGroups, /limitProviderPresentationApi\.antigravityQuotaWindow\(window\)/);
+  assert.match(quotaGroups, /groups\.set\(entry\.groupLabel, \[\]\)/);
+  assert.match(quotaGroups, /entries\.some\(\(entry\) => entry === null\)/);
+  assert.match(renderProviderWindows, /provider\.provider === 'antigravity'/);
+  assert.match(renderProviderWindows, /const quotaGroups = antigravityQuotaGroups\(provider\)/);
+  assert.match(renderProviderWindows, /title\.textContent = group\.label/);
+  assert.match(renderProviderWindows, /entry\.windowLabel/);
+  assert.match(css, /\.limit-windows-antigravity-grouped \{[\s\S]*grid-template-columns: 1fr;[\s\S]*gap: 16px;/);
+  assert.match(css, /\.limit-window-group-items \{[\s\S]*grid-template-columns: 1fr 1fr;/);
+  assert.match(css, /\.limit-window-group-title \{[\s\S]*font-weight: 400;/);
+  assert.doesNotMatch(css, /\.limit-window-group \+ \.limit-window-group/);
 });
 
 test('Qoder renders its single Credits billing window full-width', () => {
@@ -513,16 +707,21 @@ test('Home uses explicit billing labels so Copilot Premium and Chat stay distinc
   const app = readRendererFile('app.js');
   const i18n = readRendererFile('i18n.js');
   const homeLabel = functionBody(app, 'homeLimitWindowLabel', 'renderHomeLimitModule');
+  const homeRows = functionBody(app, 'homeLimitRows', 'homeLimitWindowLabel');
   const homeModule = functionBody(app, 'renderHomeLimitModule', 'renderHomeModelModule');
   const valueFormatter = functionBody(app, 'formatHomeLimitWindowValue', 'balanceRemainingWindow');
 
   assert.match(homeLabel, /if \(window\?\.kind === 'billing'\) \{/);
+  assert.match(homeLabel, /limitProviderCompactWindowLabel\(providerId, window, visibleWindows\)/);
+  assert.match(homeRows, /limitProviderCompactWindows\(provider, provider\.windows\)/);
   assert.match(homeLabel, /const label = String\(window\?\.label \|\| ''\)\.trim\(\);/);
   assert.match(homeLabel, /if \(label\) return label;/);
   assert.match(homeLabel, /billing: 'home\.limit\.billing'/);
   assert.match(homeLabel, /if \(window\?\.kind === 'balance'\) return 'Balance';/);
   assert.match(homeModule, /const showUsed = Boolean\(state\.settings\?\.showLimitUsed\);/);
   assert.match(homeModule, /value\.textContent = window\.value \|\| formatHomeLimitWindowValue\(window, showUsed\);/);
+  assert.match(homeModule, /limitProviderCompactWindowPeriodLabel\(row\.providerId, window, row\.windows\)/);
+  assert.match(homeModule, /`\$\{periodLabel\} · \$\{resetLabel\}`/);
   assert.match(valueFormatter, /`\$\{formatMoney\(window\.amount, window\.currency\)\} left`/);
   assert.match(valueFormatter, /`\$\{formatPercent\(percent\)\} \$\{limitModeSuffix\(showUsed\)\}`/);
   assert.doesNotMatch(i18n, /home\.limit\.(balance|leftPercent|leftAmount)/);
@@ -608,7 +807,7 @@ test('main Limits plan text shows failure status before account labels', () => {
   const planBody = functionBody(app, 'limitProviderPlan', 'configuredLimitProviderOrder');
 
   assert.match(planBody, /if \(provider\?\.status && provider\.status !== 'ok' && !provider\.stale\) return limitStatusLabel\(provider\.status, false\);/);
-  assert.match(planBody, /const label = String\(provider\?\.accountLabel \|\| ''\)\.trim\(\);/);
+  assert.match(planBody, /const label = String\(provider\?\.planLabel \|\| provider\?\.accountLabel \|\| ''\)\.trim\(\);/);
 });
 
 test('settings provider status waits for stats and refreshes when stats arrive', () => {

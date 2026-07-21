@@ -7,6 +7,15 @@ const path = require('node:path');
 const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, Notification, screen, session, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { defaultDeviceId, generateHubSecret, lanIpv4Addresses, loadDotEnv, pidFilePath, sharedDataDir } = require('../shared/config');
+const {
+  CredentialStore,
+  credentialSettingsForRenderer,
+  hasCredentialSettings,
+  persistSettingsAndCredentials,
+  readRegularFileNoFollow,
+  stripCredentialSettings,
+  writePrivateJsonAtomic
+} = require('../shared/credentialStore');
 const { installSafeStdout } = require('../shared/safeStdio');
 const { appVersion } = require('../shared/appVersion');
 const { exportFileSet, exportSignature, EXPORT_FILENAMES } = require('../shared/exporter');
@@ -112,10 +121,12 @@ const {
   buildTrayIcon,
   createTray,
   formatTrayText,
+  isBarsTrayIconMode,
   pickUsageTrayIconId,
   popoverBounds,
   reconcileCodexAccountSelection,
-  sortCodexAccountsForDisplay
+  sortCodexAccountsForDisplay,
+  shouldUseTemplateTrayIcon
 } = require('./tray');
 const {
   macActivationPolicyMode,
@@ -158,7 +169,7 @@ if (!app.isPackaged) loadDotEnv();
 const APP_NAME = 'Token Monitor';
 const APP_ICON_PATH = path.join(__dirname, '..', '..', 'assets', 'icon.png');
 
-const DEFAULT_WINDOW = { width: 360, height: 500 };
+const DEFAULT_WINDOW = { width: 340, height: 650 };
 const WINDOW_LIMITS = { minWidth: 240, minHeight: 140, maxWidth: 1200, maxHeight: 1400 };
 const ZOOM_LIMITS = { min: 0.7, max: 1.6, step: 0.1 };
 const CSP_HEADER = [
@@ -201,6 +212,15 @@ if (process.platform === 'win32') app.setAppUserModelId('com.javis.tokenmonitor'
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.exit(0);
 
+const HOME_LIMIT_ACCOUNT_COUNT_DEFAULT = 3;
+const HOME_LIMIT_ACCOUNT_COUNT_MAX = 12;
+
+function normalizeHomeLimitAccountCount(value) {
+  const count = Math.trunc(Number(value));
+  if (!Number.isFinite(count)) return HOME_LIMIT_ACCOUNT_COUNT_DEFAULT;
+  return Math.max(1, Math.min(HOME_LIMIT_ACCOUNT_COUNT_MAX, count));
+}
+
 function defaultSettings() {
   const envHubUrl = process.env.TOKEN_MONITOR_HUB_URL || '';
   const windowBehavior = process.env.TOKEN_MONITOR_ALWAYS_ON_TOP === '0' ? 'normal' : 'floating';
@@ -225,6 +245,7 @@ function defaultSettings() {
     showToolIcons: true,
     titleIconOnly: true,
     showCompactTotalTokens: false,
+    heatmapMetric: 'cost',
     themeColors: {},
     vendorColors: {},
     floatingBubbleEnabled: false,
@@ -244,6 +265,7 @@ function defaultSettings() {
     homeModuleOrder: defaultHomeModulePreferences().homeModuleOrder,
     hiddenHomeModules: defaultHomeModulePreferences().hiddenHomeModules,
     showHomeLimitBars: false,
+    showHomeLimitProviderNames: false,
     projectsEnabled: parseBoolean(process.env.TOKEN_MONITOR_PROJECTS_ENABLED, false),
     historyEnabled: true,
     historyIntervalMs: normalizeHistoryIntervalMs(process.env.TOKEN_MONITOR_HISTORY_INTERVAL_MS),
@@ -266,6 +288,7 @@ function defaultSettings() {
     limitProviderOrder: defaultLimitProviderOrder(),
     homeLimitProviderOrder: '',
     hiddenHomeLimitProviders: '',
+    homeLimitAccountCount: HOME_LIMIT_ACCOUNT_COUNT_DEFAULT,
     limitsRefreshMs: normalizeLimitsRefreshMs(process.env.TOKEN_MONITOR_LIMITS_REFRESH_MS),
     showLimitSource: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_SOURCE, false),
     maskLimitAccountEmails: false,
@@ -275,6 +298,7 @@ function defaultSettings() {
     showTrayIcon: true,
     trayMode: false,
     trayContent: 'tokens',
+    showTrayProviderBadge: false,
     windowToggleShortcut: '',
     currency: normalizeCurrency(process.env.TOKEN_MONITOR_CURRENCY || 'USD'),
     currencyRates: {},
@@ -312,6 +336,12 @@ function normalizeCollectionMode(value, fallback = 'live') {
   const next = String(value || '').trim();
   if (COLLECTION_MODE_VALUES.has(next)) return next;
   return COLLECTION_MODE_VALUES.has(fallback) ? fallback : 'live';
+}
+
+function normalizeHeatmapMetric(value, fallback = 'cost') {
+  const next = String(value || '').trim();
+  if (next === 'tokens' || next === 'cost') return next;
+  return fallback === 'tokens' ? 'tokens' : 'cost';
 }
 
 function normalizeCollectionIntervalMs(value, fallback = DEFAULT_COLLECTION_INTERVAL_MS) {
@@ -521,7 +551,7 @@ function mimoManagedAccountsForCollector() {
   })).filter((account) => account.cookieHeader);
 }
 
-function mimoCredentialPath(id) {
+function legacyMimoCredentialPath(id) {
   const digest = crypto.createHash('sha256').update(String(id || '')).digest('hex');
   return path.join(app.getPath('userData'), 'mimo-credentials', `${digest}.cookie`);
 }
@@ -529,35 +559,24 @@ function mimoCredentialPath(id) {
 function writeMimoCredential(id, value) {
   const cookieHeader = normalizeMimoCookieHeader(value);
   if (!cookieHeader) return false;
-  const destination = mimoCredentialPath(id);
-  const temporary = `${destination}.${process.pid}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
-    fs.chmodSync(path.dirname(destination), 0o700);
-    fs.writeFileSync(temporary, `${cookieHeader}\n`, { encoding: 'utf8', mode: 0o600 });
-    fs.chmodSync(temporary, 0o600);
-    fs.renameSync(temporary, destination);
-    fs.chmodSync(destination, 0o600);
-    return true;
+    return ensureCredentialStore().writeMimoCredential(id, cookieHeader);
   } catch (_) {
-    try { fs.rmSync(temporary, { force: true }); } catch (_) {}
     return false;
   }
 }
 
 function readMimoCredential(id) {
   try {
-    return normalizeMimoCookieHeader(fs.readFileSync(mimoCredentialPath(id), 'utf8'));
+    return normalizeMimoCookieHeader(ensureCredentialStore().readMimoCredential(id));
   } catch (_) {
     return '';
   }
 }
 
 function removeMimoCredential(id) {
-  const target = mimoCredentialPath(id);
   try {
-    fs.rmSync(target, { force: true });
-    return !fs.existsSync(target);
+    return ensureCredentialStore().removeMimoCredential(id);
   } catch (_) {
     return false;
   }
@@ -575,6 +594,7 @@ async function addMimoManagedAccount(cookieValue) {
     return { ok: false, errorCode };
   }
   result.account.accountEmail = String(validation.accountEmail || '').trim().slice(0, 254);
+  const previousCookie = readMimoCredential(result.account.id);
   const credentialStored = writeMimoCredential(result.account.id, result.account.cookieHeader);
   delete result.account.cookieHeader;
   if (!credentialStored) return { ok: false, errorCode: 'credentialStorageUnavailable' };
@@ -582,7 +602,13 @@ async function addMimoManagedAccount(cookieValue) {
     ...accounts.filter((account) => account.accountKey !== result.account.accountKey),
     result.account
   ]);
-  saveSettings();
+  try {
+    saveSettings({ throwOnError: true });
+  } catch (_) {
+    if (previousCookie) writeMimoCredential(result.account.id, previousCookie);
+    else removeMimoCredential(result.account.id);
+    return { ok: false, errorCode: 'credentialStorageUnavailable' };
+  }
   pushSettingsToRenderer();
   sendMimoAccountsPush();
   startMode();
@@ -594,9 +620,15 @@ async function removeMimoManagedAccount(id) {
   const accounts = normalizeMimoManagedAccounts(settings.mimoManagedAccounts);
   const account = accounts.find((entry) => entry.id === accountId);
   if (!account) return { ok: false, error: 'Account not found' };
+  const previousCookie = readMimoCredential(accountId);
   if (!removeMimoCredential(accountId)) return { ok: false, error: 'Could not remove stored credential' };
   settings.mimoManagedAccounts = accounts.filter((entry) => entry.id !== accountId);
-  saveSettings();
+  try {
+    saveSettings({ throwOnError: true });
+  } catch (_) {
+    if (previousCookie) writeMimoCredential(accountId, previousCookie);
+    return { ok: false, error: 'Could not persist account removal' };
+  }
   pushSettingsToRenderer();
   sendMimoAccountsPush();
   startMode();
@@ -611,7 +643,11 @@ function setMimoManagedAccountEnabled(id, enabled) {
   account.enabled = Boolean(enabled);
   account.updatedAt = new Date().toISOString();
   settings.mimoManagedAccounts = accounts;
-  saveSettings();
+  try {
+    saveSettings({ throwOnError: true });
+  } catch (_) {
+    return { ok: false, error: 'Could not persist account state' };
+  }
   pushSettingsToRenderer();
   sendMimoAccountsPush();
   startMode();
@@ -681,13 +717,38 @@ function commitCodexManagedAccount(identity, homePath, existing, options = {}) {
     ...accounts.filter((account) => account.id !== id),
     record
   ]);
-  saveSettings();
+  if (options.persist !== false) saveSettings({ throwOnError: true });
   if (options.restart !== false) startMode();
   return codexAccountsForRenderer().find((account) => account.id === id);
 }
 
 function hasCodexIdentity(identity) {
   return Boolean(identity?.accountKey || identity?.email);
+}
+
+async function snapshotCodexAuthFile(authPath) {
+  let parentExisted = true;
+  try { await fs.promises.stat(path.dirname(authPath)); } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    parentExisted = false;
+  }
+  try {
+    return { authPath, data: await fs.promises.readFile(authPath, 'utf8'), existed: true, parentExisted };
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    return { authPath, data: '', existed: false, parentExisted };
+  }
+}
+
+async function restoreCodexAuthFileSnapshot(snapshot, options = {}) {
+  if (snapshot.existed) {
+    await writeCodexAuthFile(snapshot.authPath, snapshot.data);
+    return;
+  }
+  await fs.promises.rm(snapshot.authPath, { force: true });
+  if (options.removeNewParent && !snapshot.parentExisted) {
+    await removeManagedHomeIfSafe(path.dirname(snapshot.authPath));
+  }
 }
 
 async function preserveLiveCodexAuthAsManagedAccount(targetIdentity) {
@@ -704,11 +765,22 @@ async function preserveLiveCodexAuthAsManagedAccount(targetIdentity) {
   const existing = findExistingCodexAccount(accounts, liveMaterial.identity);
   const homePath = codexManagedHomePath(codexAccountId(liveMaterial.identity, existing));
   if (!homePath) return null;
-  await writeCodexAuthFile(path.join(homePath, 'auth.json'), liveMaterial.data);
-  return commitCodexManagedAccount(liveMaterial.identity, homePath, existing, {
-    enabled: existing?.enabled ?? true,
-    restart: false
-  });
+  const authSnapshot = await snapshotCodexAuthFile(path.join(homePath, 'auth.json'));
+  try {
+    await writeCodexAuthFile(authSnapshot.authPath, liveMaterial.data);
+    const account = commitCodexManagedAccount(liveMaterial.identity, homePath, existing, {
+      enabled: existing?.enabled ?? true,
+      persist: false,
+      restart: false
+    });
+    return {
+      account,
+      rollback: () => restoreCodexAuthFileSnapshot(authSnapshot, { removeNewParent: true })
+    };
+  } catch (error) {
+    await restoreCodexAuthFileSnapshot(authSnapshot, { removeNewParent: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function codexLoginErrorMessage(result) {
@@ -840,7 +912,11 @@ async function removeCodexManagedAccount(id) {
   const account = accounts.find((entry) => entry.id === accountId);
   if (!account) return { ok: false, error: 'Account not found' };
   settings.codexManagedAccounts = accounts.filter((entry) => entry.id !== accountId);
-  saveSettings();
+  try {
+    saveSettings({ throwOnError: true });
+  } catch (error) {
+    return { ok: false, error: error?.message || 'Could not persist account removal' };
+  }
   await removeManagedHomeIfSafe(account.homePath);
   startMode();
   return { ok: true, accounts: codexAccountsForRenderer() };
@@ -853,7 +929,11 @@ function setCodexManagedAccountEnabled(id, enabled) {
   if (!account) return { ok: false, error: 'Account not found' };
   account.enabled = Boolean(enabled);
   settings.codexManagedAccounts = accounts;
-  saveSettings();
+  try {
+    saveSettings({ throwOnError: true });
+  } catch (error) {
+    return { ok: false, error: error?.message || 'Could not persist account state' };
+  }
   startMode();
   return { ok: true, accounts: codexAccountsForRenderer() };
 }
@@ -875,14 +955,25 @@ async function switchCodexSystemAccount(id) {
     return { ok: false, error: 'Could not identify the selected Codex account credentials.' };
   }
 
+  const previousAccounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
+  const liveAuthPath = liveCodexAuthPath(process.env);
+  let liveAuthSnapshot;
   try {
-    await preserveLiveCodexAuthAsManagedAccount(targetMaterial.identity);
-    await writeCodexAuthFile(liveCodexAuthPath(process.env), targetMaterial.data);
+    liveAuthSnapshot = await snapshotCodexAuthFile(liveAuthPath);
+  } catch (error) {
+    return { ok: false, error: `Could not back up the local Codex account: ${error?.message || error}` };
+  }
+  let preservedLiveAccount = null;
+  try {
+    preservedLiveAccount = await preserveLiveCodexAuthAsManagedAccount(targetMaterial.identity);
+    await writeCodexAuthFile(liveAuthPath, targetMaterial.data);
     const refreshedAccounts = normalizeCodexManagedAccounts(settings.codexManagedAccounts);
     const refreshed = refreshedAccounts.find((entry) => entry.id === account.id) || account;
     commitCodexManagedAccount(targetMaterial.identity, refreshed.homePath, refreshed, {
-      enabled: refreshed.enabled !== false
+      enabled: refreshed.enabled !== false,
+      restart: false
     });
+    try { startMode(); } catch (error) { console.warn('Could not restart after switching Codex account:', error?.message || error); }
     const activeAccountId = codexAccountId(targetMaterial.identity, refreshed);
     const accountsForRenderer = codexAccountsForRenderer();
     return {
@@ -892,7 +983,14 @@ async function switchCodexSystemAccount(id) {
       accounts: accountsForRenderer
     };
   } catch (error) {
-    return { ok: false, error: `Could not switch the local Codex account: ${error?.message || error}` };
+    settings.codexManagedAccounts = previousAccounts;
+    const rollbackErrors = [];
+    try { await restoreCodexAuthFileSnapshot(liveAuthSnapshot); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+    try { await preservedLiveAccount?.rollback?.(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+    const rollbackDetail = rollbackErrors.length > 0
+      ? ` Rollback also failed: ${rollbackErrors.map((rollbackError) => rollbackError?.message || rollbackError).join('; ')}`
+      : '';
+    return { ok: false, error: `Could not switch the local Codex account: ${error?.message || error}.${rollbackDetail}` };
   }
 }
 
@@ -1051,6 +1149,7 @@ function floatingBubblePayload() {
 function ensureSettingsLoaded() {
   if (settings) return settings;
   settings = readSettings();
+  persistedSettingsSnapshot = cloneSettingsSnapshot(settings);
   rendererViewState = normalizeInitialRendererViewState(settings.lastViewState, rendererViewState);
   return settings;
 }
@@ -1323,13 +1422,91 @@ function normalizeCurrencyOverrides(value) {
   return out;
 }
 
+function ensureCredentialStore() {
+  if (!credentialStore) credentialStore = new CredentialStore(app.getPath('userData'));
+  return credentialStore;
+}
+
+function reportCredentialStorageError(context, error) {
+  const detail = error?.message || String(error || 'Unknown error');
+  console.error(`[credentials] ${context}: ${detail}`);
+  if (credentialStorageErrorShown || !app.isReady()) return;
+  credentialStorageErrorShown = true;
+  try {
+    dialog.showErrorBox(
+      'Credential storage error',
+      `Token Monitor could not safely access credentials.json (${context}). The save was stopped and previous data was restored where possible. Check the file's JSON and permissions, then restart the app.\n\n${detail}`
+    );
+  } catch (_) {}
+}
+
+function loadCredentialSettings(saved) {
+  try {
+    const store = ensureCredentialStore();
+    store.migrateLegacySettings(saved);
+    const stored = store.settingsCredentials();
+    // Cleanup is intentionally independent from the migration marker. If the
+    // first cleanup write fails after credentials.json was committed, retry on
+    // every startup until no credential keys remain in settings.json.
+    if (hasCredentialSettings(saved)) {
+      try {
+        writePrivateJsonAtomic(settingsPath, stripCredentialSettings(saved));
+      } catch (error) {
+        reportCredentialStorageError('could not remove migrated credentials from settings.json', error);
+      }
+    }
+    return stored;
+  } catch (error) {
+    reportCredentialStorageError('could not load credentials.json', error);
+    return {};
+  }
+}
+
+function migrateLegacyMimoCredentialFiles(accounts) {
+  const entries = [];
+  for (const account of accounts || []) {
+    try {
+      const cookieHeader = normalizeMimoCookieHeader(readRegularFileNoFollow(legacyMimoCredentialPath(account.id), {
+        fs,
+        description: 'Legacy MiMo credential',
+        encoding: 'utf8'
+      }));
+      if (cookieHeader) entries.push({ id: account.id, cookieHeader });
+    } catch (_) {}
+  }
+  if (entries.length === 0) return;
+  try {
+    ensureCredentialStore().migrateLegacyMimoCredentials(entries);
+    for (const entry of entries) {
+      if (!readMimoCredential(entry.id)) continue;
+      try { fs.rmSync(legacyMimoCredentialPath(entry.id), { force: true }); } catch (_) {}
+    }
+    try { fs.rmdirSync(path.join(app.getPath('userData'), 'mimo-credentials')); } catch (_) {}
+  } catch (error) {
+    console.warn(`[credentials] Could not migrate MiMo credentials: ${error.message}`);
+  }
+}
+
 function readSettings() {
   settingsPath = path.join(app.getPath('userData'), 'settings.json');
   try {
     const defaults = defaultSettings();
-    const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    let saved = {};
+    try {
+      saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+    } catch (error) {
+      if (error.code !== 'ENOENT') console.warn(`[settings] Could not load settings.json: ${error.message}`);
+    }
+    if (process.platform !== 'win32') {
+      try {
+        const stat = fs.lstatSync(settingsPath);
+        if (stat.isFile() && !stat.isSymbolicLink()) fs.chmodSync(settingsPath, 0o600);
+      } catch (_) {}
+    }
+    const storedCredentials = loadCredentialSettings(saved);
     if (!saved.secret && defaults.secret) delete saved.secret;
-    const merged = { ...defaults, ...saved };
+    const merged = { ...defaults, ...saved, ...storedCredentials };
     // Migrate older configs that predate hubMode: infer from hubUrl.
     if (saved.hubMode === undefined) {
       merged.hubMode = (saved.hubUrl && String(saved.hubUrl).trim()) ? 'client' : 'local';
@@ -1362,12 +1539,14 @@ function readSettings() {
       merged.hiddenHomeModules = normalizeHiddenHomeModules(saved.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST);
     }
     merged.showHomeLimitBars = parseBoolean(merged.showHomeLimitBars, false);
+    merged.showHomeLimitProviderNames = parseBoolean(merged.showHomeLimitProviderNames, false);
     if (saved.homeLimitProviderOrder !== undefined) {
       merged.homeLimitProviderOrder = migrateHomeLimitProviderOrder(saved.homeLimitProviderOrder);
     }
     if (saved.hiddenHomeLimitProviders !== undefined) {
       merged.hiddenHomeLimitProviders = normalizeHiddenLimitProviders(saved.hiddenHomeLimitProviders);
     }
+    merged.homeLimitAccountCount = normalizeHomeLimitAccountCount(merged.homeLimitAccountCount);
     if (saved.historyEnabled !== undefined) {
       merged.historyEnabled = parseBoolean(saved.historyEnabled, false);
     }
@@ -1383,6 +1562,7 @@ function readSettings() {
     merged.collectionMode = normalizeCollectionMode(merged.collectionMode);
     merged.collectionIntervalMs = normalizeCollectionIntervalMs(merged.collectionIntervalMs);
     merged.syncUploadIntervalMs = normalizeSyncUploadIntervalMs(merged.syncUploadIntervalMs);
+    merged.heatmapMetric = normalizeHeatmapMetric(merged.heatmapMetric);
     merged.reduceMotion = motionPreferenceApi.normalize(merged.reduceMotion);
     if (saved.serviceProviderDisplayOrder !== undefined) {
       merged.serviceProviderDisplayOrder = String(saved.serviceProviderDisplayOrder || '');
@@ -1412,11 +1592,13 @@ function readSettings() {
     delete merged.edgeDrawerEnabled;
     merged.floatingBubbleTrigger = merged.floatingBubbleTrigger === 'hover' ? 'hover' : 'click';
     merged.floatingBubbleContent = normalizeTrayContent(merged.floatingBubbleContent, 'icon');
+    merged.showTrayProviderBadge = parseBoolean(merged.showTrayProviderBadge, false);
     merged.windowToggleShortcut = normalizeWindowToggleShortcut(merged.windowToggleShortcut);
     // 如果设置了 opencodeCookie 但没有 profiles，自动迁移
     if (merged.opencodeCookie && Object.keys(merged.opencodeProfiles || {}).length === 0) {
       merged.opencodeProfiles = { default: { cookie: merged.opencodeCookie, enabled: true } };
     }
+    migrateLegacyMimoCredentialFiles(merged.mimoManagedAccounts);
     Object.assign(merged, normalizeTrayModeSettings(merged));
     return normalizeWindowBehaviorSettings(merged);
   }
@@ -1427,9 +1609,27 @@ function readSettings() {
   }
 }
 
-function saveSettings() {
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+function cloneSettingsSnapshot(value) {
+  return JSON.parse(JSON.stringify(value || {}));
+}
+
+function saveSettings(options = {}) {
+  const previousSettings = cloneSettingsSnapshot(persistedSettingsSnapshot || settings);
+  try {
+    persistSettingsAndCredentials({
+      store: ensureCredentialStore(),
+      settingsPath,
+      settings,
+      previousSettings
+    });
+    persistedSettingsSnapshot = cloneSettingsSnapshot(settings);
+    return true;
+  } catch (error) {
+    settings = previousSettings;
+    reportCredentialStorageError('could not persist settings', error);
+    if (options.throwOnError) throw error;
+    return false;
+  }
 }
 
 function loginItemEnabledHere() {
@@ -1567,7 +1767,7 @@ function applyWindowSettings() {
 }
 
 function nativeBlurEnabled(source = settings) {
-  return floatingBubbleNativeGlassEnabled(source, floatingBubbleState, process.platform);
+  return floatingBubbleNativeGlassEnabled(source);
 }
 
 function keepNativeBlurActive() {
@@ -1782,6 +1982,8 @@ function startSyncCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
+    dailyHistoryArchiveEnabled: settings.sessionUsageArchiveEnabled !== false,
+    dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
     projectsEnabled: settings.projectsEnabled !== false,
     historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
@@ -1855,6 +2057,8 @@ function startHostCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
+    dailyHistoryArchiveEnabled: settings.sessionUsageArchiveEnabled !== false,
+    dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
     projectsEnabled: settings.projectsEnabled !== false,
     historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
@@ -2044,7 +2248,7 @@ function updateTrayDisplay() {
     limitProviders: settings?.limitProviders,
     showLimitUsed: settings?.showLimitUsed
   });
-  const barsImageMode = (mode === 'bars' || mode === 'barsSession' || mode === 'barsWeekly' || mode === 'barsAllSessions') && !limitText && providerTrayIcons[mode];
+  const barsImageMode = isBarsTrayIconMode(mode) && !limitText && providerTrayIcons[mode];
   // A renderer-generated icon is cached in the main process. Only reuse it
   // while the current stats still have quota text; otherwise it can outlive
   // the provider data that generated it.
@@ -2091,6 +2295,8 @@ function startLocalCollector() {
     agentRuntime: 'electron-widget',
     intervalMs: collectorIntervalMs(),
     historyEnabled: settings.historyEnabled !== false,
+    dailyHistoryArchiveEnabled: settings.sessionUsageArchiveEnabled !== false,
+    dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
     projectsEnabled: settings.projectsEnabled !== false,
     historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
     watchEnabled: collectorWatchEnabled(),
@@ -2361,20 +2567,20 @@ function settingsForRenderer() {
     : kimiToken(process.env)
       ? 'env'
       : '';
+  // Default-deny every credential field added to the canonical store. The two
+  // hub secrets remain explicit exceptions because the existing sync UI must
+  // prefill/copy them; provider credentials only cross as blank/configured state.
+  const redactedCredentials = credentialSettingsForRenderer(settings, {
+    expose: ['hubHostSecret', 'secret']
+  });
   return {
     ...settings,
-    deepseekApiKey: '',
-    minimaxApiKey: '',
-    copilotApiToken: '',
-    zaiApiKey: '',
+    ...redactedCredentials,
     zaiApiRegion: normalizeZaiApiRegion(settings?.zaiApiRegion || 'global'),
-    zaiTeamApiKey: '',
     zaiTeamOrganizationId: settings?.zaiTeamOrganizationId ? 'set' : '',
     zaiTeamProjectId: settings?.zaiTeamProjectId ? 'set' : '',
     volcengineAccessKeyId: settings?.volcengineAccessKeyId ? 'set' : '',
-    volcengineSecretAccessKey: '',
     qoderCookie: settings?.qoderCookie ? 'set' : '',
-    kimiApiKey: '',
     ollamaCookie: settings?.ollamaCookie ? 'set' : '',
     // Never ship OpenCode session cookies to the renderer; the UI only needs to
     // know whether a cookie is configured, not its value.
@@ -2828,7 +3034,11 @@ async function writeExportTo(dir, periods, options = {}) {
 
 async function fetchStats(options = {}) {
   const force = Boolean(options?.force);
-  const tickOptions = force ? { forceLimits: true } : {};
+  // forceHistory stays independent of `force` on purpose: tool settings, account
+  // sign-ins and limits actions all refresh with { force: true }, so folding the
+  // history rescan into it would spawn the expensive `tokscale graph` on each one.
+  // Only the manual refresh button opts in.
+  const tickOptions = force ? { forceLimits: true, forceHistory: Boolean(options?.forceHistory) } : {};
   if (mode === 'local') {
     if (force && localCollectorHandle) await localCollectorHandle.tick('manual', tickOptions);
     if (localStats) return localStats;
@@ -3297,7 +3507,7 @@ function createWindow(boundsOverride, options = {}) {
   });
   mainWindow = win;
   mainWindowChrome = { collapsedFloatingBubble };
-  applyWindowsChrome(win, { round: !collapsedFloatingBubble });
+  applyWindowsChrome(win, { round: true });
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
     return { action: 'deny' };
@@ -3337,11 +3547,14 @@ function createWindow(boundsOverride, options = {}) {
   loadWindowFile(win, {
     waitForContent: options.waitForContent === true,
     inactive: options.inactive === true,
-    query: floatingBubbleInitialRendererQuery(floatingBubbleState, {
-      collapsedWindow: collapsedFloatingBubble,
-      suppressInitialNumberAnimation: options.suppressInitialNumberAnimation === true,
-      viewState: rendererViewState
-    })
+    query: {
+      ...floatingBubbleInitialRendererQuery(floatingBubbleState, {
+        collapsedWindow: collapsedFloatingBubble,
+        suppressInitialNumberAnimation: options.suppressInitialNumberAnimation === true,
+        viewState: rendererViewState
+      }),
+      ...(settings?.systemGlass === false ? { systemGlassDisabled: '1' } : {})
+    }
   });
 }
 
@@ -3559,6 +3772,7 @@ app.whenReady().then(() => {
     if (isExternalAgentActive()) return { ok: false, error: 'agentActive' };
     try {
       clearSessionUsageArchive();
+      clearDailyHistoryArchive();
       sessionUsageArchive = normalizeSessionUsageArchive({});
       return { ok: true };
     } catch (error) {
@@ -3615,6 +3829,7 @@ app.whenReady().then(() => {
     const previousShowTrayIcon = settings.showTrayIcon;
     const previousTrayMode = settings.trayMode;
     const previousTrayContent = settings.trayContent;
+    const previousShowTrayProviderBadge = settings.showTrayProviderBadge;
     const previousCurrency = settings.currency;
     const previousStartAtLogin = settings.startAtLogin;
     const previousCustomModelPricing = JSON.stringify(settings.customModelPricing || []);
@@ -3643,6 +3858,7 @@ app.whenReady().then(() => {
     if (patch.collectionMode !== undefined) normalizedPatch.collectionMode = normalizeCollectionMode(patch.collectionMode, settings.collectionMode);
     if (patch.collectionIntervalMs !== undefined) normalizedPatch.collectionIntervalMs = normalizeCollectionIntervalMs(patch.collectionIntervalMs, settings.collectionIntervalMs);
     if (patch.syncUploadIntervalMs !== undefined) normalizedPatch.syncUploadIntervalMs = normalizeSyncUploadIntervalMs(patch.syncUploadIntervalMs, settings.syncUploadIntervalMs);
+    if (patch.heatmapMetric !== undefined) normalizedPatch.heatmapMetric = normalizeHeatmapMetric(patch.heatmapMetric, settings.heatmapMetric);
     settings = normalizeWindowBehaviorSettings({
       ...settings,
       ...normalizedPatch,
@@ -3673,8 +3889,10 @@ app.whenReady().then(() => {
       homeModuleOrder: patch.homeModuleOrder !== undefined ? normalizeHomeModuleOrder(patch.homeModuleOrder, DEFAULT_HOME_MODULE_LIST).join(',') : normalizeHomeModuleOrder(settings.homeModuleOrder, DEFAULT_HOME_MODULE_LIST).join(','),
       hiddenHomeModules: patch.hiddenHomeModules !== undefined ? normalizeHiddenHomeModules(patch.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST) : normalizeHiddenHomeModules(settings.hiddenHomeModules, DEFAULT_HOME_MODULE_LIST),
       showHomeLimitBars: parseBoolean(patch.showHomeLimitBars ?? settings.showHomeLimitBars, false),
+      showHomeLimitProviderNames: parseBoolean(patch.showHomeLimitProviderNames ?? settings.showHomeLimitProviderNames, false),
       homeLimitProviderOrder: patch.homeLimitProviderOrder !== undefined ? migrateHomeLimitProviderOrder(patch.homeLimitProviderOrder) : (settings.homeLimitProviderOrder || ''),
       hiddenHomeLimitProviders: patch.hiddenHomeLimitProviders !== undefined ? normalizeHiddenLimitProviders(patch.hiddenHomeLimitProviders) : normalizeHiddenLimitProviders(settings.hiddenHomeLimitProviders),
+      homeLimitAccountCount: normalizeHomeLimitAccountCount(patch.homeLimitAccountCount ?? settings.homeLimitAccountCount),
       historyEnabled: parseBoolean(patch.historyEnabled ?? settings.historyEnabled, false),
       projectsEnabled: parseBoolean(patch.projectsEnabled ?? settings.projectsEnabled, true),
       historyIntervalMs: normalizeHistoryIntervalMs(patch.historyIntervalMs ?? settings.historyIntervalMs),
@@ -3696,6 +3914,7 @@ app.whenReady().then(() => {
         trayMode: patch.trayMode ?? settings.trayMode
       }),
       trayContent: normalizeTrayContent(patch.trayContent ?? settings.trayContent),
+      showTrayProviderBadge: parseBoolean(patch.showTrayProviderBadge ?? settings.showTrayProviderBadge, false),
       floatingBubbleContent: normalizeTrayContent(patch.floatingBubbleContent ?? settings.floatingBubbleContent, 'icon'),
       windowToggleShortcut: normalizeWindowToggleShortcut(patch.windowToggleShortcut ?? settings.windowToggleShortcut),
       currency: normalizedCurrency,
@@ -3724,7 +3943,7 @@ app.whenReady().then(() => {
     settings.archivedClientUsage = normalizeArchivedClientUsage(settings.archivedClientUsage);
     if (settings.clients !== previousClients) updateArchivedClientUsage(previousClients, settings.clients);
     delete settings.edgeDrawerEnabled;
-    saveSettings();
+    saveSettings({ throwOnError: true });
     if (JSON.stringify(settings.customModelPricing || []) !== previousCustomModelPricing) {
       regenerateTokscalePricing();
       refreshAfterPricingChange();
@@ -3732,7 +3951,7 @@ app.whenReady().then(() => {
     configureWindowToggleShortcut();
     if (settings.startAtLogin !== previousStartAtLogin) {
       settings.startAtLogin = applyLoginItem(settings.startAtLogin);
-      saveSettings();
+      saveSettings({ throwOnError: true });
     }
     if (patch.zoomFactor !== undefined) applyZoomFactor();
     if (settings.discordRpcEnabled && !previousDiscordRpcEnabled) {
@@ -3794,7 +4013,11 @@ app.whenReady().then(() => {
     if (settings.trayMode !== previousTrayMode) {
       if (settings.trayMode) enterTrayMode();
       else exitTrayMode();
-    } else if (settings.trayContent !== previousTrayContent || settings.currency !== previousCurrency) {
+    } else if (
+      settings.trayContent !== previousTrayContent ||
+      settings.showTrayProviderBadge !== previousShowTrayProviderBadge ||
+      settings.currency !== previousCurrency
+    ) {
       updateTrayDisplay();
     }
     if (patch.currency !== undefined || patch.currencyRates !== undefined) {
@@ -3905,7 +4128,7 @@ app.whenReady().then(() => {
       // Resize by height only; aspect ratio is preserved, so wide bar-style
       // icons keep their width while square provider icons stay 20x20.
       const sized = img.resize({ height: 20, quality: 'best' });
-      if (process.platform === 'darwin') sized.setTemplateImage(true);
+      if (shouldUseTemplateTrayIcon(id, process.platform, settings?.showTrayProviderBadge)) sized.setTemplateImage(true);
       providerTrayIcons[id] = sized;
     }
     updateTrayDisplay();
@@ -3943,7 +4166,7 @@ app.whenReady().then(() => {
   ipcMain.handle('hub:getInfo', () => getHubInfo());
   ipcMain.handle('hub:regenerateSecret', () => {
     settings.hubHostSecret = generateHubSecret();
-    saveSettings();
+    saveSettings({ throwOnError: true });
     if (settings.hubMode === 'host') startMode();
     return getHubInfo();
   });
@@ -4015,7 +4238,11 @@ app.whenReady().then(() => {
     if (!cookie) {
       settings.opencodeProfiles = {};
       settings.opencodeCookie = '';
-      saveSettings();
+      try {
+        saveSettings({ throwOnError: true });
+      } catch (error) {
+        return { ok: false, error: error?.message || 'Could not persist OpenCode credentials' };
+      }
       opencodeStatusCache = { value: null, at: 0 };
       startMode();
       return { ok: true, cleared: true };
@@ -4032,7 +4259,7 @@ app.whenReady().then(() => {
       profiles.default = { cookie, enabled: true };
       settings.opencodeProfiles = profiles;
       settings.opencodeCookie = cookie;
-      saveSettings();
+      saveSettings({ throwOnError: true });
       opencodeStatusCache = { value: null, at: 0 };
       startMode();
       return { ok: true };
@@ -4053,7 +4280,7 @@ app.whenReady().then(() => {
     try {
       settings.opencodeProfiles = {};
       settings.opencodeCookie = '';
-      saveSettings();
+      saveSettings({ throwOnError: true });
       opencodeStatusCache = { value: null, at: 0 };
       startMode();
       return { ok: true };
@@ -4149,7 +4376,7 @@ app.whenReady().then(() => {
       const profiles = settings.opencodeProfiles || {};
       profiles[name] = { cookie, enabled: true };
       settings.opencodeProfiles = profiles;
-      saveSettings();
+      saveSettings({ throwOnError: true });
       opencodeStatusCache = { value: null, at: 0 };
       startMode();
       return { ok: true };
@@ -4165,7 +4392,11 @@ app.whenReady().then(() => {
       settings.opencodeCookie = '';
     }
     settings.opencodeProfiles = profiles;
-    saveSettings();
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist OpenCode profile deletion' };
+    }
     opencodeStatusCache = { value: null, at: 0 };
     startMode();
     return { ok: true };
@@ -4178,7 +4409,11 @@ app.whenReady().then(() => {
     profiles[newName] = profiles[oldName];
     delete profiles[oldName];
     settings.opencodeProfiles = profiles;
-    saveSettings();
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist OpenCode profile rename' };
+    }
     opencodeStatusCache = { value: null, at: 0 };
     startMode();
     return { ok: true };
@@ -4188,7 +4423,11 @@ app.whenReady().then(() => {
     if (!profiles[name]) return { ok: false, error: 'Profile not found' };
     profiles[name].enabled = Boolean(enabled);
     settings.opencodeProfiles = profiles;
-    saveSettings();
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist OpenCode profile state' };
+    }
     opencodeStatusCache = { value: null, at: 0 };
     startMode();
     return { ok: true };
@@ -4274,7 +4513,7 @@ app.whenReady().then(() => {
         return { ok: false, error: copilotLoginErrorMessage({ status: 'cancelled' }), flowId };
       }
       settings.copilotApiToken = normalizeCopilotApiToken(result.accessToken);
-      saveSettings();
+      saveSettings({ throwOnError: true });
       pushSettingsToRenderer();
       startMode();
       return { ok: true, flowId };

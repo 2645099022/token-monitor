@@ -61,6 +61,20 @@ Token Monitor は **トークン使用量**、**アカウント制限**、**セ�
 | <img src=".github/assets/tools-icon/qoder.png" width="28" alt="Qoder" /> | Qoder | Qoder dashboard cookie（Qoder usage API で big-model credits 取得） | — | ✅ | — |
 | <img src=".github/assets/tools-icon/ollama.png" width="28" alt="Ollama" /> | Ollama | Ollama Cloud cookie（ollama.com/settings で session/weekly 使用量を取得） | — | ✅ | — |
 
+## ショーケース
+
+| ホームビュー | 制限ビュー | ツールビュー |
+|:---:|:---:|:---:|
+| ![ホームビュー](.github/assets/home-view.png) | ![制限ビュー](.github/assets/limits-view.png) | ![ツールビュー](.github/assets/tools-view.png) |
+
+| セッションビュー | モデルビュー | サービスステータス |
+|:---:|:---:|:---:|
+| ![セッションビュー](.github/assets/sessions-view.png) | ![モデルビュー](.github/assets/models-view.png) | ![サービスステータス](.github/assets/status-view.png) |
+
+| 使用ダッシュボード — 概要 | 使用ダッシュボード — トレンド |
+|:---:|:---:|
+| ![使用ダッシュボード概要](.github/assets/dashboard-overview.png) | ![使用ダッシュボードトレンド](.github/assets/dashboard-trends.png) |
+
 ## Token Monitor を使う理由
 
 多くの使用量モニターは、実行しているマシン上でのみ役立ちます。Token Monitor はマルチデバイス作業のために設計されています。各デバイスがローカルログを監視し、hub にサマリーを送信すると、接続されたすべてのウィジェットがトークンの変化をほぼリアルタイムで確認できます。
@@ -88,26 +102,14 @@ Token Monitor は **トークン使用量**、**アカウント制限**、**セ�
 - **セルフホスト同期** — ウィジェット内 hub、Node CLI hub、Cloudflare Worker
 - **iOS ウィジェット** — Worker hub + Widgy、Scriptable
 - **Discord Rich Presence** — 本日のトークン・コスト・主要クライアント（オプトイン）
-- **プライバシー優先** — サマリー数値のみがデバイス外に送信される
-
-| 制限ビュー | デバイスビュー | モデルビュー |
-|:---:|:---:|:---:|
-| ![制限ビュー](.github/assets/limits-view.png) | ![デバイスビュー](.github/assets/devices-view.png) | ![モデルビュー](.github/assets/models-view.png) |
-
-| セッションビュー | セッション詳細 | サービスステータス |
-|:---:|:---:|:---:|
-| ![セッションビュー](.github/assets/sessions-view.png) | ![セッション詳細](.github/assets/session-details.png) | ![サービスステータス](.github/assets/status-view.png) |
-
-| 使用ダッシュボード — 概要 | 使用ダッシュボード — トレンド |
-|:---:|:---:|
-| ![使用ダッシュボード概要](.github/assets/dashboard-overview.png) | ![使用ダッシュボードトレンド](.github/assets/dashboard-trends.png) |
+- **プライバシー優先** — プロンプト、応答、ソースコード、ファイル内容はすべてデバイス内に保持
 
 ## インストール
 
 [GitHub Releases](https://github.com/Javis603/token-monitor/releases) からダウンロードできます。
 
 - **macOS (Apple Silicon)** — `.dmg`、署名および notarize 済み
-- **Windows 10/11** — インストーラー `.exe`。署名は準備中のため SmartScreen が表示される場合があります
+- **Windows 10/11** — インストーラー版とポータブル版の `.exe`、[SignPath Foundation](docs/code-signing.md) により署名済み
 - **Linux x64** — `.AppImage`
 
 パッケージ版は GitHub Releases を自動確認します。新しいバージョンがある場合は画面に更新インジケーターが表示され、対応プラットフォームでは 設定 → 一般 からもインストールできます。
@@ -189,6 +191,20 @@ npm run pack       # インストーラーなしのアプリディレクトリ�
 
 ウィジェットは **設定 → マルチデバイス同期** に応じてローカル/同期を選択します。hub は `npm run hub`、Cloudflare Worker、またはウィジェット内 Host モードで実行できます。同期モードでは hub が SSE で集計統計をプッシュし、1 台の変更が数秒以内に他のデバイスに反映されます。
 
+## セッションデータの保持期間
+
+アクティビティヒートマップとトレンドダッシュボードは、各ツールがディスクに残しているセッションファイルから構築されます。**Claude Code はデフォルトで 30 日を過ぎたトランスクリプトを削除します**（`cleanupPeriodDays`）。**削除されたセッション使用量を保持**（設定 → 収集）を有効にすると、Token Monitor は今日/今月/全期間のセッション合計に加え、一度観測した日別のツール/モデル情報を期限なしですべてローカルに保存します。ヒートマップと同期データは引き続き 370 日のローリング期間を使用し、それより古い観測データは将来の表示用にローカルへ残ります。その後に元データが削除されても観測済みの日は消えませんが、Token Monitor が初めて観測する前に削除済みだったデータは、このアーカイブでは復元できません。
+
+ヒートマップのローリング 1 年分を保つには、期限が過ぎる前に `~/.claude/settings.json` で Claude Code の保持期間を延長してください：
+
+```json
+{
+  "cleanupPeriodDays": 370
+}
+```
+
+370 はヒートマップの表示期間に対応します。値を大きくすればより多く残せますが、その分トランスクリプトがディスク上に残り続けます。他のツールのデフォルト値と設定ファイルのパスは、tokscale の [Session Data Retention](https://github.com/junhoyeo/tokscale#session-data-retention) の表を参照してください。
+
 ## 設定
 
 ### ウィジェット (GUI)
@@ -235,15 +251,7 @@ npm run agent -- --clients=claude,codex,opencode --once
 
 ## プライバシー
 
-hub と agent はサマリーフィールドのみを送信します。
-
-- デバイス id、ホスト名、プラットフォーム
-- 期間別の総トークン（本日 / 今月 / 全期間）
-- コスト合計（`tokscale` がコストを返す場合）
-- クライアント・モデル別の内訳
-- AI ツール制限有効時の正規化された Claude Code/Codex/Cursor/Antigravity/OpenCode/Grok/Minimax/MiMo/GitHub Copilot/Kiro/GLM/Volcengine/Qoder/Kimi/Ollama 制限ステータス
-
-生の AI ログ、プロンプト、ソースコード、会話内容、OAuth・トークン・メール・プロバイダー生レスポンスは送信しません。`.env`、`data/`、`node_modules/` は gitignore されます。
+Token Monitor は使用ログをローカルで処理し、プロジェクトのメンテナーに分析データやテレメトリを送信しません。ネットワークアクセスは、文書化された機能またはユーザーが有効にした機能に限られます。アップデート、プロバイダー連携、Discord Rich Presence、任意のマルチデバイス同期で使用されるデータについては、[プライバシーポリシー](docs/privacy.md)を参照してください。
 
 ## 要件
 
@@ -269,6 +277,7 @@ Issue や PR を歓迎します。プロジェクトの規約、アーキテク�
 
 - [tokscale](https://github.com/junhoyeo/tokscale) — ログ解析とトークン集計
 - [CodexBar](https://github.com/steipete/CodexBar) — AI ツール制限の調査
+- **[コード署名ポリシー](docs/code-signing.md)：** 無償のコード署名は [SignPath.io](https://signpath.io/) が提供し、証明書は [SignPath Foundation](https://signpath.org/) が提供します。
 
 ## ライセンス
 

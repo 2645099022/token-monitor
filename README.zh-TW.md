@@ -61,6 +61,20 @@ Token Monitor 對「Token 用量」「帳戶額度」與「session 明細」分�
 | <img src=".github/assets/tools-icon/qoder.png" width="28" alt="Qoder" /> | Qoder | Qoder dashboard cookie（透過 Qoder usage API 查詢 big-model credits） | — | ✅ | — |
 | <img src=".github/assets/tools-icon/ollama.png" width="28" alt="Ollama" /> | Ollama | Ollama Cloud cookie（透過 ollama.com/settings 查詢 session／每週用量） | — | ✅ | — |
 
+## 介面展示
+
+| 主頁檢視 | 額度檢視 | 工具檢視 |
+|:---:|:---:|:---:|
+| ![主頁檢視](.github/assets/home-view.png) | ![額度檢視](.github/assets/limits-view.png) | ![工具檢視](.github/assets/tools-view.png) |
+
+| Session 檢視 | 模型檢視 | 服務狀態 |
+|:---:|:---:|:---:|
+| ![Session 檢視](.github/assets/sessions-view.png) | ![模型檢視](.github/assets/models-view.png) | ![服務狀態](.github/assets/status-view.png) |
+
+| 使用儀表板 — 總覽 | 使用儀表板 — 趨勢 |
+|:---:|:---:|
+| ![使用儀表板 總覽](.github/assets/dashboard-overview.png) | ![使用儀表板 趨勢](.github/assets/dashboard-trends.png) |
+
 ## 為什麼要用 Token Monitor？
 
 大多數用量監控工具只在它執行的那台機器上有用。Token Monitor 是為多裝置工作流而設計的：每台裝置監看自己的本機紀錄、把摘要更新送到你的 hub，每個連線中的小工具幾乎都能即時看到 Token 變化。
@@ -88,26 +102,14 @@ Token Monitor 對「Token 用量」「帳戶額度」與「session 明細」分�
 - **自架同步後端**：小工具內 hub、Node CLI hub 或 Cloudflare Worker
 - **iOS 小工具支援**：透過 Worker hub 搭配 Widgy、Scriptable
 - **Discord Rich Presence**：將今日 Token、花費與主要工具廣播到你的 Discord 個人檔案（需手動開啟）
-- **隱私優先**：只有摘要數字會離開你的機器
-
-| 額度檢視 | 裝置檢視 | 模型檢視 |
-|:---:|:---:|:---:|
-| ![額度檢視](.github/assets/limits-view.png) | ![裝置檢視](.github/assets/devices-view.png) | ![模型檢視](.github/assets/models-view.png) |
-
-| Session 檢視 | Session 明細 | 服務狀態 |
-|:---:|:---:|:---:|
-| ![Session 檢視](.github/assets/sessions-view.png) | ![Session 明細](.github/assets/session-details.png) | ![服務狀態](.github/assets/status-view.png) |
-
-| 使用儀表板 — 總覽 | 使用儀表板 — 趨勢 |
-|:---:|:---:|
-| ![使用儀表板 總覽](.github/assets/dashboard-overview.png) | ![使用儀表板 趨勢](.github/assets/dashboard-trends.png) |
+- **隱私優先**：提示詞、回應、原始碼與檔案內容都留在你的機器上
 
 ## 安裝
 
 從 [GitHub Releases](https://github.com/Javis603/token-monitor/releases) 下載。
 
 - **macOS（Apple Silicon）** — `.dmg`，已簽章並 notarize
-- **Windows 10/11** — 安裝版 `.exe`；簽章還在準備中，可能會出現 SmartScreen
+- **Windows 10/11** — 安裝版與可攜版 `.exe`，均已透過 [SignPath Foundation](docs/code-signing.md) 簽章
 - **Linux x64** — `.AppImage`
 
 打包版會自動檢查 GitHub Releases。有新版本時，介面會顯示更新提示；支援的平台也可在 設定 → 一般 中安裝更新。
@@ -189,6 +191,20 @@ npm run pack       # 未封裝的 app 目錄（無安裝檔），方便本機快
 
 小工具會根據 設定 → 多裝置同步 決定走本地或同步模式。hub 本身可以是獨立的 `npm run hub` 程序、Cloudflare Worker，或直接跑在某一個小工具裡（Host 模式）。同步模式下，hub 透過 Server-Sent Events 把彙總後的統計推送給每個連線中的小工具，所以一台裝置上的更新會在數秒內出現在其他裝置上。
 
+## 會話資料保留期
+
+活動熱力圖與趨勢儀錶板，是由各工具仍留在磁碟上的會話檔建構的。**Claude Code 預設會清除 30 天前的 transcript**（`cleanupPeriodDays`）。開啟**保留已刪除會話用量**（設定 → 採集）後，Token Monitor 除了保留今日／本月／全部的會話總量，也會在本機不設期限地保存所有已觀測到的每日工具／模型資料。熱力圖與同步資料仍採用 370 天的滾動視窗，更舊的觀測資料則留在本機供未來檢視。來源日後清理檔案時，已觀測的日期不會再消失；但在 Token Monitor 首次觀測前就已刪除的資料，無法由這份封存記錄救回。
+
+若要保住熱力圖完整的滾動年份，請在時限過去之前，於 `~/.claude/settings.json` 調高 Claude Code 的保留期：
+
+```json
+{
+  "cleanupPeriodDays": 370
+}
+```
+
+370 對應熱力圖的窗口；設更大能留更多，代價是 transcript 會依你設定的期限一直留在磁碟上。其他工具的預設值與設定檔路徑，請見 tokscale 的 [Session Data Retention](https://github.com/junhoyeo/tokscale#session-data-retention) 表。
+
 ## 設定
 
 ### 小工具（GUI）
@@ -235,15 +251,7 @@ npm run agent -- --clients=claude,codex,opencode --once
 
 ## 隱私
 
-hub 與代理只傳輸摘要欄位：
-
-- 裝置 id、主機名稱、平台
-- 每個時段的 Token 總數（今日 / 本月 / 全部）
-- 成本總額（若 `tokscale` 回傳成本資料）
-- 依客戶端與模型的分項統計
-- 啟用 AI 工具額度時，正規化後的 Claude Code／Codex／Cursor／Antigravity／OpenCode／Grok／Minimax／MiMo／GitHub Copilot／Kiro／GLM／Volcengine／Qoder／Kimi／Ollama 額度狀態
-
-完全不會傳輸原始 AI 紀錄、提示詞、原始碼或對話內容。也不會傳輸 OAuth 憑證、存取權杖、刷新權杖、電子郵件或供應商原始回應。`.env`、`data/`、`node_modules/` 已加入 gitignore。
+Token Monitor 會在本機處理使用紀錄，不會向專案維護者傳送分析或遙測資料。網路存取僅用於文件中說明或由使用者啟用的功能；更新、供應商整合、Discord Rich Presence 與可選多裝置同步所使用的資料，請參閱[隱私權政策](docs/privacy.md)。
 
 ## 系統需求
 
@@ -269,6 +277,7 @@ hub 與代理只傳輸摘要欄位：
 
 - [tokscale](https://github.com/junhoyeo/tokscale) 提供紀錄解析與 Token 計算。
 - [CodexBar](https://github.com/steipete/CodexBar) 提供 AI 工具額度的研究參考。
+- **[程式碼簽章政策](docs/code-signing.md)：** 免費程式碼簽章由 [SignPath.io](https://signpath.io/) 提供，憑證由 [SignPath Foundation](https://signpath.org/) 提供。
 
 ## 授權
 

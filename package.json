@@ -1,7 +1,7 @@
 {
   "name": "token-monitor",
   "productName": "Token Monitor",
-  "version": "0.29.0",
+  "version": "0.32.0",
   "description": "Live token & cost widget for Claude Code, Codex & Hermes — local-first, optional multi-device sync.",
   "main": "src/electron/main.js",
   "scripts": {
@@ -17,10 +17,14 @@
     "prepack": "npm run icons",
     "predist:mac": "npm run icons",
     "predist:win": "npm run icons",
+    "predist:win:dir": "npm run icons",
+    "predist:win:prepackaged": "npm run icons",
     "predist:linux": "npm run icons",
     "pack": "electron-builder --dir",
     "dist:mac": "electron-builder --mac --arm64 --publish never",
     "dist:win": "electron-builder --win --x64 --publish never",
+    "dist:win:dir": "electron-builder --win dir --x64 --publish never",
+    "dist:win:prepackaged": "electron-builder --prepackaged dist/win-unpacked --win nsis portable --x64 --publish never",
     "dist:linux": "electron-builder --linux --x64 --publish never",
     "verify:release-artifact-names": "node scripts/verify-updater-artifact-names.js dist",
     "lint": "eslint .",
@@ -83,7 +87,11 @@
           ]
         }
       ],
-      "icon": "build/icons/icon.ico"
+      "icon": "build/icons/icon.ico",
+      "verifyUpdateCodeSignature": true,
+      "signtoolOptions": {
+        "publisherName": "SignPath Foundation"
+      }
     },
     "linux": {
       "artifactName": "Token-Monitor-${version}.${ext}",
@@ -148,7 +156,8 @@
     "koffi": "^3.0.2",
     "semver": "^7.8.1",
     "tar": "^7.5.15",
-    "tokscale": "^4.5.2"
+    "tokscale": "^4.5.3",
+    "undici": "^7.25.0"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.1.0",

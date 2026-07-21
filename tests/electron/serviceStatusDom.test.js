@@ -230,6 +230,9 @@ test('Home limit provider settings stay compact and list only enabled providers'
   assert.match(homeLimitRows, /const hasConfiguredOrder = Boolean\(state\.settings\?\.homeLimitProviderOrder\)/);
   assert.doesNotMatch(homeLimitRows, /normalizeLimitProviderOrder\(state\.settings\?\.limitProviderOrder, LIMIT_PROVIDERS\)\.join\(','\) !== DEFAULT_LIMIT_PROVIDER_ORDER/);
   assert.match(homeLimitRows, /sort: hasConfiguredOrder \? 'configured' : 'remaining'/);
+  assert.match(homeLimitRows, /homeLimitAccountTitle\(id, provider, index\)/);
+  assert.match(homeLimitRows, /showHomeLimitProviderNames === true \|\| state\.settings\?\.showToolIcons === false/);
+  assert.match(homeLimitRows, /`\$\{providerTitle\} · \$\{accountTitle\}`/);
   assert.match(renderHomeLimitProviderList, /enabledLimitProviderSet\(\)/);
   assert.match(renderHomeLimitProviderList, /orderedLimitProviders\(LIMIT_PROVIDERS, homeLimitProviderOrderValue\(\)\)/);
   assert.match(renderHomeLimitProviderList, /const hasCustomOrder = Boolean\(state\.settings\?\.homeLimitProviderOrder\);/);
@@ -284,7 +287,7 @@ test('view switcher preserves click-to-cycle and direct selection without crowdi
   assert.match(cssRule(css, '.view-switcher'), /flex:\s*0 1 auto/);
   assert.match(cssRule(css, '.view-switcher-current'), /min-width:\s*0/);
   assert.match(cssRule(css, '.view-switcher-current'), /color:\s*var\(--muted\)/);
-  assert.doesNotMatch(cssRule(css, '.view-switcher-current'), /color:\s*var\(--green\)/);
+  assert.doesNotMatch(cssRule(css, '.view-switcher-current'), /color:\s*var\(--accent\)/);
   assert.match(cssRule(css, '.view-switcher-disclosure'), /flex:\s*0 0 24px/);
   assert.match(cssRule(css, '.view-switcher-menu'), /position:\s*absolute/);
   assert.match(cssRule(css, '.view-switcher-menu'), /width:\s*100%/);
@@ -303,8 +306,9 @@ test('view switcher preserves click-to-cycle and direct selection without crowdi
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.view-switcher-menu/);
   assert.match(cssRule(css, '.view-switcher-menu-item'), /grid-template-columns:\s*16px minmax\(0, 1fr\)/);
   assert.doesNotMatch(css, /\.view-switcher-menu-item\.is-current::after/);
-  assert.match(cssRule(css, '#footerActionSlot .icon-button'), /flex:\s*0 0 34px/);
-  assert.match(cssRule(css, '#footerActionSlot .refresh-button'), /flex:\s*0 0 34px/);
+  assert.match(cssRule(css, '.utility-actions'), /flex:\s*0 0 34px/);
+  assert.match(cssRule(css, '.utility-actions .refresh-button'), /position:\s*absolute/);
+  assert.match(cssRule(css, '.utility-actions .refresh-button'), /right:\s*calc\(100% \+ 6px\)/);
   assert.doesNotMatch(css, /@media \(max-width: 280px\)[\s\S]*\.view-switcher-current > \.view-switcher-icon/);
   assert.match(cssRule(css, '.view-switcher-icon'), /flex:\s*0 0 auto/);
   assert.doesNotMatch(css, /\.view-dock/);
@@ -336,13 +340,15 @@ test('Projects TOTAL view explains an incomplete cross-device breakdown', () => 
   const app = readRendererFile('app.js');
   const css = readRendererFile('styles.css');
   assert.match(app, /projectRowsApi\.projectBreakdownIncomplete\(state\.stats, state\.period\)/);
-  assert.match(app, /hint\.className = 'project-incomplete-hint'/);
+  assert.match(app, /hint\.className = 'breakdown-incomplete-hint'/);
   assert.doesNotMatch(app, /hint\.dataset\.key/);
   assert.match(app, /children\.filter\(\(child\) => child !== existingHint\)/);
   assert.match(app, /JSON\.stringify\(\[state\.breakdown, hintText, rows\.map\(\(row\) => row\.key\)\]\)/);
   assert.match(app, /hint\.setAttribute\('role', 'status'\)/);
-  assert.match(app, /t\('projects\.incomplete'\)/);
-  assert.match(cssRule(css, '.project-incomplete-hint'), /color:\s*var\(--muted\)/);
+  assert.match(app, /incompleteHint = 'projects\.incomplete'/);
+  assert.match(app, /incompleteHint = 'sessions\.incomplete'/);
+  assert.match(app, /t\(incompleteHint\)/);
+  assert.match(cssRule(css, '.breakdown-incomplete-hint'), /color:\s*var\(--muted\)/);
 });
 
 test('project rows use a fuller icon without changing the navigation icon', () => {

@@ -15,12 +15,14 @@ const { applyPeriodDelta, emptyPeriod, extractUsageFromTokscale, mergePeriods } 
 const { collectWslUsage: collectWslUsageImpl, emptyWslBundle, probeWslState: probeWslStateImpl } = require('./wslUsage');
 const { hermesProfileWatchDirs, resolveHermesHome } = require('./hermesProfiles');
 const { mergeHistories, parseGraphResult, normalizeHistory } = require('./history');
+const { retainDailyHistory } = require('./dailyHistoryArchive');
 const { collectLimitsOnce, createLimitsCollector } = require('./limitCollector');
 const cursorAuth = require('./cursorAuth');
 const { findSessionFiles, codexSessionFile } = require('./sessionFiles');
 const opencodeSession = require('./opencodeSession');
 const { buildPromaHistoryGraph, buildPromaPeriods, collectPromaRows } = require('./promaUsage');
 const { hashKey } = require('./hashKey');
+const { hostOsInfo, normalizeOsInfo } = require('./osVersion');
 
 function toUnpackedPath(p) {
   // electron-builder asarUnpack stores real files at .../app.asar.unpacked/...
@@ -380,6 +382,9 @@ function sessionTimestampMap(periods, home = os.homedir(), deps = {}) {
   const metadata = deps.metadataCache || new Map();
   const resolvedSessionKeys = deps.resolvedSessionKeys || new Set();
   const attemptedSessionKeys = deps.attemptedSessionKeys || new Set();
+  // Timestamps are always backfilled (the session view sorts by recency); project
+  // identity is the part gated by the Projects opt-out (issue #182).
+  const resolveProjects = deps.resolveProjects !== false;
   const byClient = new Map();
   for (const ref of refs.values()) {
     const key = `${ref.client}:${ref.sessionId}`;
@@ -392,7 +397,7 @@ function sessionTimestampMap(periods, home = os.homedir(), deps = {}) {
   const applyFile = (client, sessionId, filePath) => {
     const startedAt = timestampFromSessionId(sessionId);
     const lastUsedAt = lastJsonlTimestamp(filePath) || startedAt;
-    const identity = projectIdentity(projectPathFromJsonl(filePath));
+    const identity = resolveProjects ? projectIdentity(projectPathFromJsonl(filePath)) : {};
     const key = `${client}:${sessionId}`;
     metadata.set(key, { startedAt, lastUsedAt, ...identity });
     if (identity.projectId) resolvedSessionKeys.add(key);
@@ -407,7 +412,7 @@ function sessionTimestampMap(periods, home = os.homedir(), deps = {}) {
     for (const [sessionId, meta] of readOpencodeMeta(opencodeIds)) {
       const startedAt = meta.startedAt || '';
       const lastUsedAt = meta.lastUsedAt || startedAt;
-      const identity = projectIdentity(meta.projectPath);
+      const identity = resolveProjects ? projectIdentity(meta.projectPath) : {};
       const key = `opencode:${sessionId}`;
       if (startedAt || lastUsedAt || identity.projectId) metadata.set(key, { startedAt, lastUsedAt, ...identity });
       if (identity.projectId) resolvedSessionKeys.add(key);
@@ -545,18 +550,37 @@ async function collectHistoryOnce(options) {
   const clients = normalizeClientsCsv(options.clients);
   if (options.historyEnabled === false) return null;
   const histories = [];
+  const rawGraphs = [];
   const runGraph = options.runGraph || runTokscaleGraph;
   const capDays = Number.isFinite(options.capDays) ? options.capDays : HISTORY_CAP_DAYS;
   const todayKey = options.todayKey || localTodayKey();
   if (clients) {
     try {
       const graphJson = await runGraph({ clients, commandTimeoutMs: options.commandTimeoutMs || HISTORY_TIMEOUT_MS });
+      rawGraphs.push(graphJson);
       histories.push(normalizeHistory(parseGraphResult(graphJson), { capDays, todayKey }));
     } catch (error) {
       if (typeof options.logger === 'function') options.logger(`tokscale graph failed: ${error.message}`);
     }
   }
-  if (options.promaGraph) histories.push(normalizeHistory(parseGraphResult(options.promaGraph), { capDays, todayKey }));
+  if (options.promaGraph) {
+    rawGraphs.push(options.promaGraph);
+    histories.push(normalizeHistory(parseGraphResult(options.promaGraph), { capDays, todayKey }));
+  }
+  if (options.dailyHistoryArchiveEnabled) {
+    try {
+      const retainedGraph = retainDailyHistory(rawGraphs, {
+        ...(options.dailyHistoryArchiveOptions || {}),
+        todayKey,
+        capDays,
+        writeEnabled: options.dailyHistoryArchiveWriteEnabled
+      });
+      const retained = normalizeHistory(parseGraphResult(retainedGraph), { capDays, todayKey });
+      return retained.daily.length || retained.monthly.length ? retained : null;
+    } catch (error) {
+      if (typeof options.logger === 'function') options.logger(`daily history archive failed: ${error.message}`);
+    }
+  }
   if (histories.length === 0) return null;
   const history = histories.length === 1 ? histories[0] : mergeHistories(histories, { todayKey });
   return history.daily.length || history.monthly.length ? history : null;
@@ -581,6 +605,9 @@ async function collectUsageOnce(options) {
   // build path on a non-Windows CI box (the real process.platform stays for
   // tokscale binary resolution, which is genuinely platform-bound).
   const platformValue = options.platform || process.platform;
+  const osInfo = options.osInfo === undefined
+    ? hostOsInfo()
+    : normalizeOsInfo(options.osInfo);
   const normalizedClients = normalizeClientsCsv(clients);
   const projectsEnabled = options.projectsEnabled !== false;
   const localSessionMetadataDeps = {
@@ -592,7 +619,7 @@ async function collectUsageOnce(options) {
   const decorateLocalPeriods = (periods, { retryMisses = false } = {}) => applySessionTimestamps(
     periods,
     options.homeDir || os.homedir(),
-    { ...localSessionMetadataDeps, retryMisses }
+    { ...localSessionMetadataDeps, retryMisses, resolveProjects: projectsEnabled }
   );
   // tokscale doesn't know about Proma yet — filter it out of the subprocess
   // calls so --client doesn't reject an unknown value. Proma is parsed
@@ -647,28 +674,30 @@ async function collectUsageOnce(options) {
       // is what let the issue #15 self-trigger loop spike tokscale past 500% CPU.
       const todayJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs });
       today = extractUsageFromTokscale(todayJson);
-      if (projectsEnabled && typeof options.onProgress === 'function') decorateLocalPeriods({ today });
+      if (typeof options.onProgress === 'function') decorateLocalPeriods({ today });
       try { if (typeof options.onProgress === 'function') options.onProgress({ today, updatedAt: new Date().toISOString() }); } catch (_) {}
       const monthJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--month'], commandTimeoutMs });
       month = extractUsageFromTokscale(monthJson);
-      if (projectsEnabled && typeof options.onProgress === 'function') decorateLocalPeriods({ today, month });
+      if (typeof options.onProgress === 'function') decorateLocalPeriods({ today, month });
       try { if (typeof options.onProgress === 'function') options.onProgress({ today, month, updatedAt: new Date().toISOString() }); } catch (_) {}
       const allTimeJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--since', allTimeSince], commandTimeoutMs });
       allTime = extractUsageFromTokscale(allTimeJson);
     }
-    if (projectsEnabled) {
-      if (anchorUsed) {
-        // Watch tick: `today` is a fresh scan and must be decorated, but month/
-        // allTime are derived from the last full-scan anchor and already carry each
-        // session's project label + timestamps through applyPeriodDelta. Decorating
-        // them again would re-stat every historical session file every few seconds
-        // (the perceived UI stutter). Decorate only today, then propagate its freshly
-        // resolved identities onto sessions that started today (absent from the anchor).
-        decorateLocalPeriods({ today }, { retryMisses: true });
-        propagateTodayProjects(today, [month, allTime]);
-      } else {
-        decorateLocalPeriods({ today, month, allTime }, { retryMisses: true });
-      }
+    // Always decorate: session timestamps drive the recency sort regardless of the
+    // Projects opt-out (issue #182). decorateLocalPeriods gates only project identity
+    // on projectsEnabled, so opting out still costs the timestamp backfill and nothing
+    // more.
+    if (anchorUsed) {
+      // Watch tick: `today` is a fresh scan and must be decorated, but month/
+      // allTime are derived from the last full-scan anchor and already carry each
+      // session's project label + timestamps through applyPeriodDelta. Decorating
+      // them again would re-stat every historical session file every few seconds
+      // (the perceived UI stutter). Decorate only today, then propagate its freshly
+      // resolved identities onto sessions that started today (absent from the anchor).
+      decorateLocalPeriods({ today }, { retryMisses: true });
+      propagateTodayProjects(today, [month, allTime]);
+    } else {
+      decorateLocalPeriods({ today, month, allTime }, { retryMisses: true });
     }
     if (promaPeriods && !anchorUsed) {
       today = mergePeriods(today, promaPeriods.today);
@@ -706,7 +735,7 @@ async function collectUsageOnce(options) {
           pricingRevision: options.pricingRevision
         }),
         logger: options.logger,
-        decoratePeriods: projectsEnabled ? (periods, home) => applySessionTimestamps(periods, home, { scopedHome: true }) : undefined
+        decoratePeriods: (periods, home) => applySessionTimestamps(periods, home, { scopedHome: true, resolveProjects: projectsEnabled })
       });
       wslBundle = wslResult.bundle;
       wslDetected = wslResult.detected;
@@ -726,7 +755,7 @@ async function collectUsageOnce(options) {
           pricingRevision: options.pricingRevision
         }),
         logger: options.logger,
-        decoratePeriods: projectsEnabled ? (periods, home) => applySessionTimestamps(periods, home, { scopedHome: true }) : undefined
+        decoratePeriods: (periods, home) => applySessionTimestamps(periods, home, { scopedHome: true, resolveProjects: projectsEnabled })
       });
       wslBundle = wslResult.bundle;
       wslDetected = wslResult.detected;
@@ -771,6 +800,8 @@ async function collectUsageOnce(options) {
     deviceId,
     hostname: os.hostname(),
     platform: `${process.platform}-${process.arch}`,
+    ...(osInfo.name ? { osName: osInfo.name } : {}),
+    ...(osInfo.version ? { osVersion: osInfo.version } : {}),
     updatedAt: collectedAt.toISOString(),
     agentVersion,
     ...(agentRuntime ? { agentRuntime } : {}),
@@ -794,6 +825,9 @@ async function collectUsageOnce(options) {
       capDays: options.historyCapDays,
       todayKey: localTodayKey(collectedAt),
       runGraph: options.runGraph,
+      dailyHistoryArchiveEnabled: options.dailyHistoryArchiveEnabled,
+      dailyHistoryArchiveWriteEnabled: options.dailyHistoryArchiveWriteEnabled,
+      dailyHistoryArchiveOptions: options.dailyHistoryArchiveOptions,
       logger: options.logger
     });
     if (history) summary.history = history;
@@ -1074,6 +1108,74 @@ function configFingerprint(clientsCsv, allTimeSince, projectsEnabled = true) {
 // valid, so a long-running session periodically rescans month/allTime
 // and picks up any changes that the delta-derivation might miss.
 const FULL_SCAN_INTERVAL_MS = 60 * 60 * 1000;
+const LIMITS_RESET_BOUNDARY_DELAY_MS = 30 * 1000;
+const LIMITS_RESET_BOUNDARY_MIN_TIMER_MS = 5 * 1000;
+const LIMITS_RESET_BOUNDARY_MAX_TIMER_MS = 2_147_483_647;
+
+function limitResetBoundaryEntries(limits) {
+  const entries = [];
+  for (const provider of limits?.providers || []) {
+    const providerKey = [
+      provider?.provider,
+      provider?.accountKey,
+      provider?.accountEmail,
+      provider?.accountLabel
+    ].map((value) => String(value || '').trim()).join(':');
+    const scope = {
+      provider: String(provider?.provider || '').trim(),
+      accountKey: String(provider?.accountKey || '').trim(),
+      accountEmail: String(provider?.accountEmail || '').trim().toLowerCase(),
+      accountName: String(provider?.accountName || '').trim(),
+      accountLabel: String(provider?.accountLabel || '').trim(),
+      sourceDetail: String(provider?.sourceDetail || '').trim()
+    };
+    for (const window of provider?.windows || []) {
+      const resetAt = Date.parse(window?.resetsAt || '');
+      if (!Number.isFinite(resetAt)) continue;
+      entries.push({
+        resetAt,
+        key: `${providerKey}:${String(window?.kind || '').trim()}:${new Date(resetAt).toISOString()}`,
+        scope
+      });
+    }
+  }
+  return entries;
+}
+
+function nextLimitsResetBoundary(limits, nowMs = Date.now(), attempted = new Set()) {
+  let refreshAt = Infinity;
+  let keys = [];
+  let scopes = new Map();
+  for (const entry of limitResetBoundaryEntries(limits)) {
+    if (attempted.has(entry.key)) continue;
+    const candidate = entry.resetAt + LIMITS_RESET_BOUNDARY_DELAY_MS;
+    if (candidate < refreshAt) {
+      refreshAt = candidate;
+      keys = [entry.key];
+      scopes = new Map([[JSON.stringify(entry.scope), entry.scope]]);
+    } else if (candidate === refreshAt) {
+      keys.push(entry.key);
+      scopes.set(JSON.stringify(entry.scope), entry.scope);
+    }
+  }
+  if (!Number.isFinite(refreshAt)) return null;
+  return {
+    refreshAt,
+    delayMs: Math.min(
+      LIMITS_RESET_BOUNDARY_MAX_TIMER_MS,
+      Math.max(LIMITS_RESET_BOUNDARY_MIN_TIMER_MS, refreshAt - nowMs)
+    ),
+    keys,
+    scopes: [...scopes.values()]
+  };
+}
+
+function pruneAttemptedResetBoundaries(limits, attempted) {
+  const currentKeys = new Set(limitResetBoundaryEntries(limits).map((entry) => entry.key));
+  for (const key of attempted) {
+    if (!currentKeys.has(key)) attempted.delete(key);
+  }
+}
 
 function startCollector(options) {
   const {
@@ -1081,8 +1183,18 @@ function startCollector(options) {
     intervalMs, historyIntervalMs = 15 * 60 * 1000, historyEnabled = true, watchEnabled, watchDebounceMs, limitsEnabled,
     onUpdate, onPreview, onError, logger
   } = options;
+  const deviceOsInfo = options.osInfo === undefined
+    ? hostOsInfo()
+    : normalizeOsInfo(options.osInfo);
   const log = logger || (() => {});
   const limitsCollector = limitsEnabled !== false ? createLimitsCollector(options) : null;
+  const resetBoundaryNow = typeof options.resetBoundaryNow === 'function' ? options.resetBoundaryNow : Date.now;
+  const setResetBoundaryTimer = typeof options.resetBoundarySetTimeout === 'function'
+    ? options.resetBoundarySetTimeout
+    : setTimeout;
+  const clearResetBoundaryTimer = typeof options.resetBoundaryClearTimeout === 'function'
+    ? options.resetBoundaryClearTimeout
+    : clearTimeout;
   let tickInFlight = false;
   let tickPending = false;
   let pendingForceLimits = false;
@@ -1099,7 +1211,10 @@ function startCollector(options) {
   let pendingWaiters = [];
   let debounceTimer = null;
   let intervalTimer = null;
+  let resetBoundaryTimer = null;
+  let lastSummary = null;
   let stopped = false;
+  const attemptedResetBoundaries = new Set();
   const watchers = [];
 
   // On-disk anchor: persist full-scan snapshots so the collector can reuse
@@ -1138,6 +1253,56 @@ function startCollector(options) {
     for (const resolve of waiters) resolve();
   }
 
+  function clearScheduledResetBoundary() {
+    if (!resetBoundaryTimer) return;
+    clearResetBoundaryTimer(resetBoundaryTimer);
+    resetBoundaryTimer = null;
+  }
+
+  function scheduleLimitsResetBoundary(limits) {
+    clearScheduledResetBoundary();
+    if (stopped || !limitsCollector) return;
+    // Keep stale keys that are still present so a failed/source-stale refresh
+    // cannot loop, but discard historical windows once a fresh snapshot no
+    // longer contains them. This bounds the set to the current limits shape.
+    pruneAttemptedResetBoundaries(limits, attemptedResetBoundaries);
+    const next = nextLimitsResetBoundary(limits, resetBoundaryNow(), attemptedResetBoundaries);
+    if (!next) return;
+    resetBoundaryTimer = setResetBoundaryTimer(() => {
+      resetBoundaryTimer = null;
+      if (resetBoundaryNow() < next.refreshAt) {
+        scheduleLimitsResetBoundary(lastSummary?.limits);
+        return;
+      }
+      for (const key of next.keys) attemptedResetBoundaries.add(key);
+      refreshLimitsAtResetBoundary(next.scopes);
+    }, next.delayMs);
+  }
+
+  async function refreshLimitsAtResetBoundary(scopes) {
+    if (stopped || !limitsCollector || !lastSummary) return;
+    try {
+      let limits = lastSummary.limits;
+      for (const scope of scopes || []) {
+        limits = await limitsCollector.refreshScope(scope);
+      }
+      if (stopped) return;
+      const summary = {
+        ...lastSummary,
+        updatedAt: new Date(resetBoundaryNow()).toISOString(),
+        limits,
+        limitsOnly: true
+      };
+      lastSummary = summary;
+      scheduleLimitsResetBoundary(limits);
+      await onUpdate?.(summary, 'limits-reset-boundary');
+    } catch (error) {
+      if (stopped) return;
+      if (onError) onError(error, 'limits-reset-boundary');
+      else log(`collector tick failed (limits-reset-boundary): ${error.message}`);
+    }
+  }
+
   async function performTick(reason, tickOptions = {}) {
     const includeHistory = shouldIncludeHistory(Date.now(), lastHistoryAt, historyIntervalMs, Boolean(tickOptions.forceHistory), historyEnabled);
     if (includeHistory) lastHistoryAt = Date.now();
@@ -1154,6 +1319,7 @@ function startCollector(options) {
         deviceId,
         agentVersion,
         agentRuntime,
+        osInfo: deviceOsInfo,
         limitsCollector,
         includeHistory,
         forceLimits: Boolean(tickOptions.forceLimits),
@@ -1172,6 +1338,8 @@ function startCollector(options) {
               const preview = {
                 deviceId, hostname: os.hostname(),
                 platform: `${process.platform}-${process.arch}`,
+                ...(deviceOsInfo.name ? { osName: deviceOsInfo.name } : {}),
+                ...(deviceOsInfo.version ? { osVersion: deviceOsInfo.version } : {}),
                 updatedAt: partial.updatedAt,
                 agentVersion, agentRuntime,
                 trackedClients: (clients || '').split(',').filter(Boolean),
@@ -1231,6 +1399,8 @@ function startCollector(options) {
         wslAnchor = captured.wslBundle;
         wslStatusAnchor = captured.wslStatus || null;
       }
+      lastSummary = summary;
+      scheduleLimitsResetBoundary(summary.limits);
       await onUpdate?.(summary, reason);
     } catch (error) {
       if (stopped) return;
@@ -1320,6 +1490,7 @@ function startCollector(options) {
     stopped = true;
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
     if (intervalTimer) { clearTimeout(intervalTimer); intervalTimer = null; }
+    clearScheduledResetBoundary();
     for (const watcher of watchers) {
       try { watcher.close(); } catch (_) {}
     }
@@ -1347,12 +1518,15 @@ module.exports = {
   decideResolver,
   DEFAULT_HISTORY_INTERVAL_MS,
   HISTORY_INTERVAL_VALUES,
+  LIMITS_RESET_BOUNDARY_MAX_TIMER_MS,
   localTodayKey,
+  nextLimitsResetBoundary,
   normalizeHistoryIntervalMs,
   sessionTimestampMap,
   locateBundledBinary,
   lookupModelPricing,
   normalizePromaPricing,
+  pruneAttemptedResetBoundaries,
   readDownloadedPointer,
   resolvePlatformBinary,
   resolvePromaPricing,
