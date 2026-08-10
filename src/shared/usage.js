@@ -12,6 +12,10 @@ const { normalizeSyncUploadIntervalMs, staleAfterMsForSyncUpload } = require('./
 // deleting the source session file does not destroy the audit trail.
 let persistenceWriter = null;
 function setPersistenceWriter(writer) { persistenceWriter = writer; }
+function persistUsageRows(rows) {
+  if (!persistenceWriter || rows.length === 0) return;
+  try { persistenceWriter.ingestRows(rows); } catch (_) { /* swallow */ }
+}
 const TOKEN_KEYS = ['totalTokens', 'total_tokens', 'totalTokenCount', 'total_token_count', 'tokens', 'tokenCount', 'token_count'];
 // Additive components for a token total. `reasoning` is deliberately excluded: OpenAI/Codex report
 // reasoning_output_tokens WITHIN output_tokens (tokscale's `output` already includes it and exposes
@@ -672,9 +676,7 @@ function extractUsageBundleFromTokscale(json) {
   // Best-effort persistence hook. Failures must never affect the in-memory
   // aggregation result — the local DB is a convenience layer, not a source
   // of truth for the UI.
-  if (persistenceWriter && rows.length > 0) {
-    try { persistenceWriter.ingestRows(rows); } catch (_) { /* swallow */ }
-  }
+  persistUsageRows(rows);
   if (rows.length === 0 && json && typeof json === 'object') {
     const period = fallbackUsagePeriod(json);
     return {
@@ -697,6 +699,7 @@ function extractUsageBundleFromTokscale(json) {
 function extractUsageFromTokscale(json) {
   const rows = [];
   collectUsageRows(json, rows);
+  persistUsageRows(rows);
   if (rows.length === 0 && json && typeof json === 'object') return fallbackUsagePeriod(json);
   const period = emptyPeriod();
   for (const row of rows) addUsageRowToPeriod(period, row);
@@ -1176,4 +1179,4 @@ function deltaValue(base, fresh, anchor, key) {
   return base ?? fresh;
 }
 
-module.exports = { PERIODS, addPeriodInto, aggregateDevices, aggregateHistory, applyPeriodDelta, applyProjectRollups, canonicalProjectKey, carryDeviceHistory, emptyPeriod, extractUsageFromTokscale, mergeDeviceRecord, mergePeriods, normalizeDeviceRecord, normalizePeriod, projectRollupFromSessions, setPersistenceWriter };
+module.exports = { PERIODS, UNATTRIBUTED_USAGE_CLIENT, addPeriodInto, aggregateDevices, aggregateHistory, applyPeriodDelta, applyProjectRollups, canonicalProjectKey, carryDeviceHistory, emptyPeriod, extractUsageBundleFromTokscale, extractUsageFromTokscale, mergeDeviceRecord, mergePeriods, normalizeClientName, normalizeDeviceRecord, normalizePeriod, projectRollupFromSessions, setPersistenceWriter };

@@ -376,6 +376,57 @@ body.is-windows.floating-bubble-collapsed-right .floating-bubble-tab {
 #footerActionSlot .icon-button { flex: 0 0 34px; }
 #footerActionSlot .refresh-button { flex: 0 0 34px; }
 #footerActionSlot .icon-button, #footerActionSlot .refresh-button { width: 34px; height: 30px; font-size: 16px; }
+.utility-actions {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 34px;
+  width: 34px;
+  isolation: isolate;
+}
+.utility-actions::before {
+  content: "";
+  position: absolute;
+  inset: 0 100% 0 auto;
+  width: 6px;
+}
+.utility-actions .settings-icon-button {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 34px;
+}
+.utility-actions .refresh-button {
+  position: absolute;
+  right: calc(100% + 6px);
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(8px) scale(0.96);
+}
+.utility-actions:not(.is-swapped):hover .refresh-button,
+.utility-actions:not(.is-swapped):has(:focus-visible) .refresh-button,
+.shell.settings-open .utility-actions:not(.is-swapped) .refresh-button,
+.utility-actions .refresh-button:is(.is-refreshing, .is-refreshed, .is-refresh-error),
+.utility-actions.is-swapped .refresh-button {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+.utility-actions.is-swapped .settings-icon-button {
+  position: absolute;
+  right: calc(100% + 6px);
+  opacity: 0;
+  pointer-events: none;
+}
+.utility-actions.is-swapped:hover .settings-icon-button,
+.utility-actions.is-swapped:has(:focus-visible) .settings-icon-button,
+.shell.settings-open .utility-actions.is-swapped .settings-icon-button {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+#footerActionSlot .utility-actions,
+#footerActionSlot .utility-actions .icon-button,
+#footerActionSlot .utility-actions .refresh-button { height: 30px; font-size: 16px; }
 .title-controls .tabs {
   grid-row: 2;
   position: relative;

@@ -142,7 +142,6 @@ const {
   aggregateDevices,
   aggregateHistory,
   applyProjectRollups,
-  carryDeviceHistory,
   setPersistenceWriter: setUsageWriter
 } = require('../shared/usage');
 const { openDb: openUsageDb } = require('../shared/persistence/db');
@@ -286,6 +285,7 @@ let mainWindow = null;
 let dashboardWindow = null;
 let settingsPath = null;
 let settings = null;
+let claudeWebCookieMutationRevision = 0;
 let usagePersistenceHandle = null;
 let persistedSettingsSnapshot = null;
 let credentialStore = null;
@@ -4609,6 +4609,11 @@ function performQuit() {
   } catch (error) {
     console.log(`[quit] stopAll failed: ${error?.message || error}`);
   }
+  if (usagePersistenceHandle) {
+    try { usagePersistenceHandle.db.close(); } catch (_) {}
+    usagePersistenceHandle = null;
+    setUsageWriter(null);
+  }
   app.exit(0);
 }
 
@@ -6880,7 +6885,15 @@ app.whenReady().then(() => {
 
 app.on('second-instance', focusExistingWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { quitRequested = true; if (rateRefreshTimer) clearInterval(rateRefreshTimer); if (appUpdateBackgroundTimer) clearInterval(appUpdateBackgroundTimer); unregisterWindowToggleShortcut(); stopAll(); if (usagePersistenceHandle) { try { usagePersistenceHandle.db.close(); } catch (_) {} usagePersistenceHandle = null; setUsageWriter(null); } });
+app.on('before-quit', () => {
+  quitRequested = true;
+  resetMacWidgetReloadThrottle();
+  if (rateRefreshTimer) clearInterval(rateRefreshTimer);
+  if (appUpdateBackgroundTimer) clearInterval(appUpdateBackgroundTimer);
+  unregisterWindowToggleShortcut();
+  if (skipForcedQuit) return;
+  performQuit();
+});
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.once(signal, requestAppQuit);
 }
