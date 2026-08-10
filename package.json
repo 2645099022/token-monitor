@@ -171,5 +171,11 @@
   },
   "engines": {
     "node": ">=22.13.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "electron-winstaller@5.4.0": true,
+    "koffi@3.0.2": true,
+    "phantomjs-prebuilt@2.1.16": true
   }
 }

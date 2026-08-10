@@ -346,17 +346,11 @@ body.is-windows.floating-bubble-collapsed-right .floating-bubble-tab {
 .icon-button.active { border-color: rgba(var(--accent-rgb), 0.58); color: var(--green); background: rgba(var(--accent-rgb), 0.08); }
 @media (max-width: 300px) {
   .titlebar { gap: 6px; }
-  .title-controls {
-    grid-template-columns: minmax(136px, 1fr);
-    flex-basis: 142px;
-    gap: 3px;
-  }
+  .title-controls { grid-template-columns: minmax(136px, 1fr); flex-basis: 142px; gap: 3px; }
   .window-actions { gap: 2px; }
   .window-actions .icon-button,
   #titlebarActionSlot .icon-button,
-  #titlebarActionSlot .refresh-button {
-    width: 26px;
-  }
+  #titlebarActionSlot .refresh-button { width: 26px; }
   .tab { font-size: 8px; }
 }
 .settings-panel {

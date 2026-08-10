@@ -1139,7 +1139,7 @@ function runClaudeDirectUsageCli(deps = {}) {
   if (!command) throw errorWithStatus('notConfigured', 'Claude CLI not found');
   // This is an internal quota probe, not a user conversation. Keep it out of
   // Claude Code's project history even when the widget was launched from a repo.
-  const probeDir = deps.claudeProbeDir || path.join(os.tmpdir(), 'token-monitor-claude-probe');
+  const probeDir = deps.claudeProbeDir || env.TOKEN_MONITOR_CLAUDE_PROBE_DIR || path.join(os.tmpdir(), 'token-monitor-claude-probe');
   fs.mkdirSync(probeDir, { recursive: true });
   return runProcessText(command, ['--no-session-persistence', '/usage'], {
     ...deps,

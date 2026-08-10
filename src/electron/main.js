@@ -95,6 +95,7 @@ const {
   sessionUsageArchiveDate,
   writeSessionUsageArchive
 } = require('../shared/sessionUsageArchive');
+const { clearDailyHistoryArchive } = require('../shared/dailyHistoryArchive');
 const {
   aggregateDevices,
   aggregateHistory,
@@ -201,6 +202,9 @@ let dashboardWindow = null;
 let settingsPath = null;
 let settings = null;
 let usagePersistenceHandle = null;
+let persistedSettingsSnapshot = null;
+let credentialStore = null;
+let credentialStorageErrorShown = false;
 let sessionUsageArchive = null;
 let rendererViewState = normalizeInitialRendererViewState();
 const serviceStatusClient = createServiceStatusClient();
