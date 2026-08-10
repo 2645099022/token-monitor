@@ -180,6 +180,7 @@ test('Home activity heatmap contains horizontal overscroll and prevents native p
   const app = readRendererFile('app.js');
   const css = readRendererFile('styles.css');
   const setupBody = functionBody(app, 'setupHomeActivityScroller', 'renderHomeTrendsModule');
+  assert.match(cssRule(css, '.home-activity-scroll'), /cursor:\s*default/);
   assert.match(cssRule(css, '.home-activity-scroll'), /overscroll-behavior-x:\s*contain/);
   assert.match(setupBody, /pointerdown[\s\S]*event\.preventDefault\(\)/);
   assert.match(setupBody, /pointermove[\s\S]*event\.preventDefault\(\)/);
@@ -230,7 +231,7 @@ test('Home limit provider settings stay compact and list only enabled providers'
   assert.match(homeLimitRows, /const hasConfiguredOrder = Boolean\(state\.settings\?\.homeLimitProviderOrder\)/);
   assert.doesNotMatch(homeLimitRows, /normalizeLimitProviderOrder\(state\.settings\?\.limitProviderOrder, LIMIT_PROVIDERS\)\.join\(','\) !== DEFAULT_LIMIT_PROVIDER_ORDER/);
   assert.match(homeLimitRows, /sort: hasConfiguredOrder \? 'configured' : 'remaining'/);
-  assert.match(homeLimitRows, /homeLimitAccountTitle\(id, provider, index\)/);
+  assert.match(homeLimitRows, /limitAccountTitle\(id, provider, index, providerEntries\)/);
   assert.match(homeLimitRows, /showHomeLimitProviderNames === true \|\| state\.settings\?\.showToolIcons === false/);
   assert.match(homeLimitRows, /`\$\{providerTitle\} · \$\{accountTitle\}`/);
   assert.match(renderHomeLimitProviderList, /enabledLimitProviderSet\(\)/);
@@ -254,9 +255,9 @@ test('Home limit provider settings expand with the shared accordion transition',
   assert.match(renderHomeSettingsList, /accordion-animation-inner/);
   assert.match(renderHomeSettingsList, /container\.classList\.toggle\('hidden', !state\.homeLimitSettingsExpanded\)/);
   assert.doesNotMatch(renderHomeSettingsList, /if \(id === 'limits' && state\.homeLimitSettingsExpanded\) wrap\.append\(renderHomeLimitProviderList\(\)\)/);
-  assert.match(css, /\.home-settings-list,\s*\.home-limit-provider-list,\s*\.cursor-settings-details-inner/);
-  assert.match(css, /\.home-settings-list > \* \+ \*,\s*\.home-limit-provider-list > \* \+ \*/);
-  assert.doesNotMatch(cssRule(css, '.home-settings-list'), /gap:\s*6px/);
+  assert.match(css, /\.tool-preference-list,\s*\.settings-nested-list,\s*\.cursor-settings-details-inner/);
+  assert.match(css, /\.tool-preference-list > \* \+ \*,\s*\.settings-nested-list > \* \+ \*/);
+  assert.doesNotMatch(cssRule(css, '.settings-nested-list'), /gap:\s*6px/);
 });
 
 test('view switcher preserves click-to-cycle and direct selection without crowding settings', () => {
@@ -314,10 +315,46 @@ test('view switcher preserves click-to-cycle and direct selection without crowdi
   assert.doesNotMatch(css, /\.view-dock/);
 });
 
+test('Home-launched secondary views expose an accessible return action', () => {
+  const html = readRendererFile('index.html');
+  const app = readRendererFile('app.js');
+  const css = readRendererFile('styles.css');
+  const homeModuleShellBody = functionBody(app, 'homeModuleShell', 'renderHomeLimitModule');
+  const setBreakdownBody = functionBody(app, 'setBreakdown', 'renderBreakdownChange');
+
+  assert.match(html, /id="viewBackRow" class="view-back-row hidden"/);
+  assert.match(html, /id="backHomeButton"[^>]*data-i18n-title="views\.backHome"[^>]*data-i18n-aria-label="views\.backHome"/);
+  assert.match(html, /class="back-home-icon" aria-hidden="true"><\/span>/);
+  assert.doesNotMatch(html, /class="back-home-icon"[^>]*>←<\/span>/);
+  assert.match(app, /state\.homeReturnVisible = false/);
+  assert.match(homeModuleShellBody, /renderBreakdownChange\(viewId, \{ fromHome: true \}\)/);
+  assert.equal((homeModuleShellBody.match(/\{ fromHome: true \}/g) || []).length, 2);
+  assert.match(setBreakdownBody, /state\.homeReturnVisible = options\.fromHome === true && state\.breakdown === 'home' && next !== 'home'/);
+  assert.match(app, /els\.viewBackRow\?\.classList\.toggle\('hidden', state\.breakdown === 'home' \|\| !state\.homeReturnVisible\)/);
+  assert.match(app, /els\.backHomeButton\?\.addEventListener\('click',[\s\S]*?renderBreakdownChange\('home'\)/);
+  const backRowRule = cssRule(css, '.view-back-row');
+  const backButtonRule = cssRule(css, '.back-home-button');
+  const backInteractionRule = cssRule(css, '.back-home-button:hover,\n.back-home-button:active');
+  const backIconRule = cssRule(css, '.back-home-icon');
+  assert.match(backRowRule, /min-height:\s*26px/);
+  assert.match(backRowRule, /padding:\s*0\s*;/);
+  assert.match(cssRule(css, '.view-back-row.hidden'), /display:\s*none/);
+  assert.match(backButtonRule, /height:\s*26px/);
+  assert.match(backButtonRule, /margin-left:\s*0\s*;/);
+  assert.match(backButtonRule, /padding:\s*0 6px 0 0\s*;/);
+  assert.match(backInteractionRule, /color:\s*var\(--text\)/);
+  assert.doesNotMatch(backInteractionRule, /background:/);
+  assert.match(cssRule(css, '.back-home-button:focus-visible'), /outline:\s*2px solid/);
+  assert.match(backIconRule, /width:\s*12px/);
+  assert.match(backIconRule, /flex:\s*0 0 12px/);
+  assert.match(backIconRule, /mask:\s*url\("icons\/actions\/arrow-left\.svg"\)/);
+  assert.match(backIconRule, /transform:\s*translateX\(-2px\)/);
+});
+
 test('Projects view separates visibility from metadata collection', () => {
   const app = readRendererFile('app.js');
   assert.match(app, /state\.projectSettingsExpanded = false/);
-  assert.match(app, /id === 'project' && !projectsEnabled/);
+  assert.match(app, /projectsEnabled === false\) ids\.push\('project'\)/);
   assert.match(app, /projectSettingsContainer/);
   assert.match(app, /function renderProjectSettingsList/);
   assert.match(app, /settings\.views\.enableProjects/);

@@ -6,20 +6,26 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { appVersion } = require('./appVersion');
+const { BROWSER_USER_AGENT } = require('./browserUserAgent');
+const { LIMIT_PROVIDER_IDS } = require('./limitProviders');
 const {
   DEFAULT_LIMITS_REFRESH_MS,
-  mergeCodexTransientWindows,
   normalizeLimitProvider,
-  normalizeLimitsSummary
+  normalizeLimitsSummary,
+  openCodeWindowKey
 } = require('./limits');
+const { parseRetryAfterHeader } = require('./limitsRetryPolicy');
+const { abortError } = require('./probeDeadline');
 const cursorAuth = require('./cursorAuth');
 const cursorProbe = require('./cursorProbe');
 const antigravityProbe = require('./antigravityProbe');
 const opencodeLimits = require('./opencodeLimits');
 const opencodeWeb = require('./opencodeWeb');
+const openrouterLimits = require('./openrouterLimits');
+const thirdPartyLimits = require('./thirdPartyLimits');
 const { sharedDataDir } = require('./config');
 const { recordConsumption } = require('./deepseekBalanceHistory');
-const { codexAuthIdentity } = require('./codexAuth');
+const { codexAccountKey, codexAuthIdentity } = require('./codexAuth');
 const minimaxLimits = require('./minimaxLimits');
 const { minimaxToken, minimaxBaseUrl, parseMinimaxTiers, fetchMinimaxLimits } = minimaxLimits;
 const mimoLimits = require('./mimoLimits');
@@ -40,7 +46,7 @@ const { qoderCookie, fetchQoderLimits } = qoderLimits;
 const ollamaLimits = require('./ollamaLimits');
 const { ollamaSessionCookie, fetchOllamaLimits } = ollamaLimits;
 const kimiLimits = require('./kimiLimits');
-const { kimiToken, fetchKimiLimits } = kimiLimits;
+const { kimiToken, kimiWebToken, fetchKimiLimits } = kimiLimits;
 const {
   grokCredential,
   readAuthJson,
@@ -51,12 +57,24 @@ const {
   fetchGrokLimits
 } = grokLimits;
 
-const LIMIT_PROVIDER_IDS = ['claude', 'codex', 'cursor', 'antigravity', 'opencode', 'deepseek', 'minimax', 'mimo', 'grok', 'copilot', 'kiro', 'zai', 'volcengine', 'qoder', 'zaiteam', 'kimi', 'ollama'];
+const DEFAULT_PROVIDER_PHYSICAL_BOUND_MS = 120_000;
+const PROVIDER_CLEANUP_GRACE_MS = 5_000;
 const LIMIT_REFRESH_VALUES = new Set([60_000, 120_000, 300_000, 900_000, 1_800_000]);
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const CLAUDE_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile';
+const CLAUDE_WEB_BASE_URL = 'https://claude.ai';
 const CLAUDE_OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
 const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const CLAUDE_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
+const CLAUDE_IDENTITY_CACHE_TTL_MS = 60 * 60 * 1000;
+const CLAUDE_IDENTITY_CACHE_MAX_ENTRIES = 16;
+const CLAUDE_IDENTITY_CACHE_STATE_KEY = 'claude.identity-cache';
+// A prepaid credit pool only moves when credits are spent or a grant expires, so
+// it is refreshed far less often than usage. Without this the steady-state Web
+// refresh would cost two requests instead of the documented one.
+const CLAUDE_PREPAID_CACHE_TTL_MS = 10 * 60 * 1000;
+const CLAUDE_PREPAID_IDLE_TTL_FACTOR = 6;
+const CLAUDE_PREPAID_CACHE_STATE_KEY = 'claude.prepaid-cache';
 const CLAUDE_SESSION_WINDOW_MINUTES = 5 * 60;
 const CLAUDE_WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 const CODEX_CHATGPT_BASE_URL = 'https://chatgpt.com/backend-api';
@@ -111,6 +129,45 @@ function errorWithStatus(status, message) {
 
 function shouldTryClaudeCliFallback(error) {
   return ['notConfigured', 'sourceRateLimited', 'unavailable', 'error'].includes(error?.status);
+}
+
+function normalizeClaudeWebCookie(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  if (/[\s;]/.test(raw)) return '';
+  const sessionKey = raw.startsWith('sessionKey=') ? raw.slice('sessionKey='.length) : raw;
+  return sessionKey.startsWith('sk-ant-') && sessionKey.length > 'sk-ant-'.length
+    ? `sessionKey=${sessionKey}`
+    : '';
+}
+
+function normalizeClaudeWebCookieInput(value) {
+  const raw = typeof value === 'string' ? value : String(value || '');
+  const normalized = normalizeClaudeWebCookie(raw);
+  if (raw.trim() && !normalized) {
+    const error = new Error('Claude Web sessionKey must be an sk-ant- value');
+    error.code = 'INVALID_CLAUDE_WEB_SESSION_KEY';
+    throw error;
+  }
+  return normalized;
+}
+
+// Reading the prepaid pool is a scope step beyond the quota data the Web cookie
+// was supplied for, so it stays switchable. Default on: the account gate above
+// already limits it to people who deliberately enabled usage credits.
+function claudePrepaidBalanceEnabled(env = process.env, options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'claudePrepaidBalanceEnabled')) {
+    return options.claudePrepaidBalanceEnabled !== false;
+  }
+  const configured = env.TOKEN_MONITOR_CLAUDE_PREPAID_BALANCE;
+  return configured === undefined || configured === '' ? true : parseBoolean(configured, true);
+}
+
+function claudeWebCookie(env = process.env, options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'claudeWebCookie')) {
+    return normalizeClaudeWebCookie(options.claudeWebCookie);
+  }
+  return normalizeClaudeWebCookie(env.CLAUDE_WEB_COOKIE);
 }
 
 async function readJsonFile(filePath, deps) {
@@ -236,28 +293,31 @@ function displayPlanText(raw, maxWords = 3) {
   return visible.map(displayPlanWord).join(' ');
 }
 
+const PLAN_LABEL_ALIASES = {
+  free: 'Free',
+  plus: 'Plus',
+  pro: 'Pro',
+  max: 'Max',
+  team: 'Team',
+  teams: 'Team',
+  enterprise: 'Enterprise',
+  ultra: 'Ultra'
+};
+
 function planLabelFromParts(...parts) {
   const text = parts.map((part) => String(part || '')).find(Boolean) || '';
   const raw = cleanPlanText(text);
   if (!raw || raw.includes('@')) return '';
-  const aliases = {
-    free: 'Free',
-    plus: 'Plus',
-    pro: 'Pro',
-    max: 'Max',
-    team: 'Team',
-    teams: 'Team',
-    enterprise: 'Enterprise',
-    ultra: 'Ultra'
-  };
-  if (aliases[raw]) return aliases[raw];
+  if (PLAN_LABEL_ALIASES[raw]) return PLAN_LABEL_ALIASES[raw];
   return displayPlanText(raw);
 }
 
 function claudeRateLimitTierLabel(rateLimitTier) {
   const raw = cleanPlanText(rateLimitTier, []);
   if (!raw) return '';
-  const words = raw.split(/\s+/).filter((word) => !['default', 'claude', 'ai'].includes(word));
+  // `raven` is the internal codename an enterprise tier carries (`default_raven`),
+  // not something to render: without it that tier would read as a plan called Raven.
+  const words = raw.split(/\s+/).filter((word) => !['default', 'claude', 'ai', 'raven'].includes(word));
   if (words.length === 0) return '';
   return planLabelFromParts(words.join(' '));
 }
@@ -477,28 +537,45 @@ function readWindowsCredentialSecret(_service, targets, deps = {}) {
 
 function readMacKeychainSecret(service, deps = {}) {
   const spawnFn = deps.spawn || spawn;
+  const signal = deps.signal;
+  if (signal?.aborted) return Promise.reject(abortError(signal));
   return new Promise((resolve, reject) => {
     const child = spawnFn('security', ['find-generic-password', '-s', service, '-w'], { windowsHide: true });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
+      callback(value);
+    };
+    const onAbort = () => {
+      try { child.kill('SIGTERM'); } catch (_) {}
+      finish(reject, abortError(signal));
+    };
     const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error('macOS keychain lookup timed out'));
+      try { child.kill('SIGTERM'); } catch (_) {}
+      finish(reject, new Error('macOS keychain lookup timed out'));
     }, 5000);
     child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
     child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('error', (error) => finish(reject, error));
     child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code !== 0) reject(new Error(stderr.trim() || `security exited ${code}`));
-      else resolve(stdout.trim());
+      if (code !== 0) finish(reject, new Error(stderr.trim() || `security exited ${code}`));
+      else finish(resolve, stdout.trim());
     });
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
 function runProcessText(command, args = [], options = {}) {
   const spawnFn = options.spawn || spawn;
   const timeoutMs = Number(options.timeoutMs || 30000);
+  const signal = options.signal;
+  if (signal?.aborted) return Promise.reject(abortError(signal));
   return new Promise((resolve, reject) => {
     const child = spawnFn(command, args, {
       cwd: options.cwd,
@@ -508,34 +585,61 @@ function runProcessText(command, args = [], options = {}) {
     });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
+      callback(value);
+    };
+    const stopChild = () => {
       try { child.kill('SIGTERM'); } catch (_) {}
-      reject(errorWithStatus('unavailable', `${command} timed out`));
+    };
+    const onAbort = () => {
+      stopChild();
+      finish(reject, abortError(signal));
+    };
+    const timer = setTimeout(() => {
+      stopChild();
+      finish(reject, errorWithStatus('unavailable', `${command} timed out`));
     }, timeoutMs);
     child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
     child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
+    child.on('error', (error) => finish(reject, error));
     child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0 && stdout.trim()) resolve(stdout);
-      else reject(errorWithStatus('unavailable', stderr.trim() || `${command} exited ${code}`));
+      if (code === 0 && stdout.trim()) finish(resolve, stdout);
+      else finish(reject, errorWithStatus('unavailable', stderr.trim() || `${command} exited ${code}`));
     });
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
-async function fetchJson(url, headers, deps = {}) {
+async function fetchJson(url, headers, deps = {}, options = {}) {
   const fetchFn = deps.fetch || fetch;
   const timeoutMs = Number(deps.fetchTimeoutMs || 12000);
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
     const response = await fetchFn(url, { headers, ...(controller ? { signal: controller.signal } : {}) });
+    if (typeof options.onResponse === 'function') await options.onResponse(response);
     if (!response.ok) {
-      const status = response.status === 401 ? 'unauthorized' : response.status === 429 ? 'sourceRateLimited' : 'unavailable';
-      throw errorWithStatus(status, `${url} returned ${response.status}`);
+      const sourceChallenge = response.status === 403
+        && String(response.headers?.get?.('cf-mitigated') || '').toLowerCase() === 'challenge';
+      const status = response.status === 401
+        || (options.forbiddenIsUnauthorized && response.status === 403 && !sourceChallenge)
+        ? 'unauthorized'
+        : response.status === 429
+          ? 'sourceRateLimited'
+          : 'unavailable';
+      const error = errorWithStatus(status, `${url} returned ${response.status}`);
+      // The normalized status collapses 404 and 5xx into `unavailable`, which
+      // loses the only thing a caller needs to tell a permanent refusal from an
+      // outage. Absent on timeouts and network errors, which are never either.
+      error.httpStatus = response.status;
+      if (sourceChallenge) error.code = 'CLAUDE_WEB_SOURCE_CHALLENGE';
+      throw error;
     }
     return response.json();
   } catch (error) {
@@ -544,6 +648,21 @@ async function fetchJson(url, headers, deps = {}) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function fetchClaudeWebJson(url, headers, deps = {}, options = {}) {
+  const viaChromium = typeof deps.claudeWebFetch === 'function';
+  const webDeps = viaChromium ? { ...deps, fetch: deps.claudeWebFetch } : deps;
+  // Chromium sends its own browser agent, and setting one here would override it
+  // with a version that no longer matches the runtime. undici sends none at all,
+  // and claude.ai's Cloudflare answers both that and an honest
+  // `token-monitor/<version>` agent with `403 cf-mitigated: challenge`, so that
+  // path has to present as a browser.
+  const webHeaders = viaChromium ? headers : { ...headers, 'user-agent': BROWSER_USER_AGENT };
+  return fetchJson(url, webHeaders, webDeps, {
+    forbiddenIsUnauthorized: true,
+    onResponse: options.onResponse
+  });
 }
 
 function valueFromAliases(object, aliases) {
@@ -582,6 +701,71 @@ function claudeFableWeeklyWindow(usage) {
   return null;
 }
 
+// `spend` amounts are self-describing: `{amount_minor, currency, exponent}`.
+function claudeSpendMoney(value) {
+  if (!value || typeof value !== 'object') return null;
+  const minor = Number(valueFromAliases(value, ['amount_minor', 'amountMinor']));
+  if (!Number.isFinite(minor)) return null;
+  const exponent = Number(valueFromAliases(value, ['exponent']));
+  const scale = Number.isFinite(exponent) ? 10 ** exponent : 100;
+  return {
+    amount: minor / scale,
+    currency: String(valueFromAliases(value, ['currency']) || '').trim().toUpperCase() || null
+  };
+}
+
+// `extra_usage` carries bare minor-unit numbers plus one shared `decimal_places`.
+function claudeExtraUsageMoney(extra, key) {
+  const raw = Number(valueFromAliases(extra || {}, [key]));
+  if (!Number.isFinite(raw)) return null;
+  const places = Number(valueFromAliases(extra || {}, ['decimal_places', 'decimalPlaces']));
+  return raw / 10 ** (Number.isFinite(places) && places >= 0 ? places : 2);
+}
+
+// Gate on the enable flags, never on "is there a value": a credits-off account
+// reports used 0, and so does one enabled a minute ago. Also gates the prepaid
+// balance request, which is why it is a named helper.
+function claudeUsageCreditsEnabled(usage) {
+  const spend = valueFromAliases(usage, ['spend']) || null;
+  const extra = valueFromAliases(usage, ['extra_usage', 'extraUsage']) || null;
+  return spend?.enabled === true
+    || valueFromAliases(extra || {}, ['is_enabled', 'isEnabled']) === true;
+}
+
+// Usage credits: `spend` and `extra_usage` are the same money in two spellings
+// (both report 235/2000 on a live account), so this yields one window. `spend`
+// wins because its units are self-describing.
+function claudeUsageCreditsWindow(usage) {
+  if (!claudeUsageCreditsEnabled(usage)) return null;
+  const spend = valueFromAliases(usage, ['spend']) || null;
+  const extra = valueFromAliases(usage, ['extra_usage', 'extraUsage']) || null;
+
+  const spendUsed = claudeSpendMoney(spend?.used);
+  const spendLimit = claudeSpendMoney(spend?.limit);
+  const used = spendUsed ? spendUsed.amount : claudeExtraUsageMoney(extra, 'used_credits');
+  if (used === null) return null;
+  const limit = spendLimit ? spendLimit.amount : claudeExtraUsageMoney(extra, 'monthly_limit');
+  const currency = (spendUsed && spendUsed.currency)
+    || String(valueFromAliases(extra || {}, ['currency']) || 'USD').trim().toUpperCase();
+
+  return {
+    kind: 'billing',
+    // `spend` is the machine-readable role: a `billing` window alone cannot be
+    // told apart from the Balance window, and renderers must not key off a
+    // display label. Headline is money already consumed, not money remaining.
+    metric: 'spend',
+    label: 'Usage credits',
+    used,
+    // A null limit means "no monthly cap". No percentage is passed in either
+    // case: `percentFromWindow` derives it from used/limit when a limit exists,
+    // and `spend.percent` must never be forwarded — it reports 0, not null,
+    // when unlimited, which would paint a 0% meter over real spending.
+    limit,
+    currency,
+    showMeter: limit !== null
+  };
+}
+
 function mapClaudeUsageToProvider(usage, meta = {}) {
   const windows = [];
   const session = valueFromAliases(usage, ['five_hour', 'fiveHour']);
@@ -602,10 +786,14 @@ function mapClaudeUsageToProvider(usage, meta = {}) {
   }
   const fableWeekly = claudeFableWeeklyWindow(usage);
   if (fableWeekly) windows.push(fableWeekly);
+  const usageCredits = claudeUsageCreditsWindow(usage);
+  if (usageCredits) windows.push(usageCredits);
   return normalizeLimitProvider({
     provider: 'claude',
     accountKey: meta.accountKey || '',
     accountLabel: meta.accountLabel || '',
+    accountName: meta.accountName || '',
+    accountEmail: meta.accountEmail || '',
     source: meta.source || 'oauth',
     status: 'ok',
     updatedAt: meta.updatedAt,
@@ -696,6 +884,600 @@ function callClaudeUsage(accessToken, deps = {}) {
   }, deps);
 }
 
+function callClaudeProfile(accessToken, deps = {}) {
+  return fetchJson(CLAUDE_PROFILE_URL, {
+    accept: 'application/json',
+    authorization: `Bearer ${accessToken}`,
+    'user-agent': TOKEN_MONITOR_USER_AGENT
+  }, deps);
+}
+
+function claudeWebOrganizations(body) {
+  if (Array.isArray(body)) return body;
+  if (Array.isArray(body?.organizations)) return body.organizations;
+  if (Array.isArray(body?.data)) return body.data;
+  return [];
+}
+
+function claudeWebOrganizationId(organization) {
+  return String(organization?.uuid || organization?.id || organization?.organization_uuid || '').trim();
+}
+
+function claudeWebOrganizationCapabilities(organization) {
+  if (!Array.isArray(organization?.capabilities)) return new Set();
+  return new Set(
+    organization.capabilities
+      .map((capability) => String(capability || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+// On a personal claude.ai account the plan is not on the membership at all:
+// `seat_tier` is null and neither `rate_limit_tier` nor `billing_type` exists
+// at that level. The organization's capability list carries it, and it is the
+// same list that already decides which organization to read. Returns the shared
+// alias key rather than a display string, so a plan read here renders
+// identically to the same plan read from OAuth credentials.
+//
+// `raven` covers Team and Enterprise together; `raven_type` separates them, and
+// claude.ai treats a raven organization without one as unknown rather than as
+// Team. This mirrors that: a capability that cannot name the plan yields
+// nothing and lets the seat tier answer instead.
+function claudeCapabilityPlan(capabilities, organization) {
+  if (capabilities.has('claude_max')) return 'max';
+  if (capabilities.has('claude_pro')) return 'pro';
+  if (!capabilities.has('raven')) return '';
+  const ravenType = String(organization?.raven_type || '').trim().toLowerCase();
+  if (!ravenType) return '';
+  return ravenType === 'enterprise' ? 'enterprise' : 'team';
+}
+
+// A seat tier is `<plan>_<seat level>` (`enterprise_standard`), and only the
+// plan half belongs in a plan label: keeping the level renders "Enterprise
+// Standard" where the same account over OAuth renders "Enterprise".
+//
+// A value with no recognized plan in front contributes nothing. A bare seat
+// level says which seat someone holds, not which plan they are on, so rendering
+// it puts membership bookkeeping where the plan goes: `standard` would read as
+// a plan called Standard, and `unassigned` (what claude.ai substitutes for a
+// member holding no seat) as one called Unassigned.
+function claudeSeatTier(membership) {
+  const [plan] = cleanPlanText(membership?.seat_tier).split(' ');
+  return PLAN_LABEL_ALIASES[plan] ? plan : '';
+}
+
+function selectClaudeWebOrganization(organizations) {
+  const candidates = organizations.filter((candidate) => claudeWebOrganizationId(candidate));
+  const hasChatCapability = (candidate) => (
+    claudeWebOrganizationCapabilities(candidate).has('chat')
+  );
+  const isApiOnly = (candidate) => {
+    const capabilities = claudeWebOrganizationCapabilities(candidate);
+    return capabilities.size === 1 && capabilities.has('api');
+  };
+  return candidates.find(hasChatCapability)
+    || candidates.find((candidate) => !isApiOnly(candidate))
+    || candidates[0]
+    || null;
+}
+
+// Exact matches only. Everything read off a membership is scoped to its own
+// organization, so falling back to "whichever membership came first" labels the
+// organization we resolved usage for with a different one's plan and name. On a
+// multi-organization account that is not a near miss, it is the wrong answer.
+// The selected organization carries the same fields and is always available.
+function claudeWebMembership(accountBody, organizationId) {
+  if (!organizationId) return null;
+  const account = accountBody?.account && typeof accountBody.account === 'object'
+    ? accountBody.account
+    : accountBody;
+  const memberships = Array.isArray(account?.memberships)
+    ? account.memberships
+    : Array.isArray(accountBody?.memberships)
+      ? accountBody.memberships
+      : [];
+  return memberships.find((membership) => (
+    claudeWebOrganizationId(membership?.organization || membership) === organizationId
+  )) || null;
+}
+
+function claudeStableIdentity(accountId, organizationId, accountEmail) {
+  if (accountId) return `account:${accountId}`;
+  if (organizationId) return `organization:${organizationId}`;
+  return accountEmail;
+}
+
+function claudeWebAccountIdentity(accountBody, organization) {
+  const organizationId = claudeWebOrganizationId(organization);
+  const membership = claudeWebMembership(accountBody, organizationId);
+  const account = accountBody?.account && typeof accountBody.account === 'object'
+    ? accountBody.account
+    : accountBody || {};
+  const memberOrganization = membership?.organization && typeof membership.organization === 'object'
+    ? membership.organization
+    : {};
+  const accountId = String(account.uuid || account.id || account.account_uuid || '').trim();
+  const accountEmail = String(
+    account.email_address || account.email || accountBody?.email_address || accountBody?.email || ''
+  ).trim().toLowerCase();
+  const accountName = String(
+    memberOrganization.name
+      || memberOrganization.display_name
+      || organization?.name
+      || organization?.display_name
+      || account.name
+      || account.display_name
+      || ''
+  ).trim();
+  const stableIdentity = claudeStableIdentity(accountId, organizationId, accountEmail);
+  if (!stableIdentity) {
+    throw claudeIdentityUnavailable('Claude Web account did not include a stable account identity');
+  }
+  // The organization we resolved usage for, falling back to the membership's
+  // own copy only when no organization was passed in at all.
+  const planOrganization = organization && typeof organization === 'object'
+    ? organization
+    : memberOrganization;
+  // The organization states the plan; a seat tier only implies one, so it
+  // answers second. `billing_type` is deliberately not consulted at all: it is
+  // a payment method (`apple_subscription`), never a plan, so reading it would
+  // label a Pro account "Apple subscription".
+  const accountLabel = claudePlanLabelFromParts(
+    claudeCapabilityPlan(claudeWebOrganizationCapabilities(planOrganization), planOrganization)
+      || claudeSeatTier(membership)
+      || account?.subscription_type,
+    membership?.rate_limit_tier || planOrganization?.rate_limit_tier || account?.rate_limit_tier
+  );
+  return {
+    accountKey: hashKey('claude-account', stableIdentity),
+    accountEmail,
+    accountName,
+    accountLabel
+  };
+}
+
+function claudeIdentityCache(deps = {}) {
+  if (!(deps.providerRuntimeState instanceof Map)) return null;
+  let cache = deps.providerRuntimeState.get(CLAUDE_IDENTITY_CACHE_STATE_KEY);
+  if (!(cache instanceof Map)) {
+    cache = new Map();
+    deps.providerRuntimeState.set(CLAUDE_IDENTITY_CACHE_STATE_KEY, cache);
+  }
+  return cache;
+}
+
+function claudeIdentityCacheTtlMs(deps = {}) {
+  const configured = Number(deps.claudeIdentityCacheTtlMs);
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : CLAUDE_IDENTITY_CACHE_TTL_MS;
+}
+
+function claudeCachedIdentity(fingerprint, deps = {}, options = {}) {
+  const cache = claudeIdentityCache(deps);
+  if (!cache || !fingerprint) return null;
+  const entry = cache.get(fingerprint);
+  if (!entry) return null;
+  cache.delete(fingerprint);
+  cache.set(fingerprint, entry);
+  if (options.allowStale) return entry;
+  const nowMs = (deps.now || Date.now)();
+  return nowMs - entry.resolvedAt <= claudeIdentityCacheTtlMs(deps) ? entry : null;
+}
+
+function cacheClaudeIdentity(fingerprint, entry, deps = {}) {
+  const cache = claudeIdentityCache(deps);
+  if (!cache || !fingerprint || !entry?.identity?.accountKey) return entry;
+  const previous = cache.get(fingerprint);
+  const resolved = {
+    ...entry,
+    identity: {
+      ...entry.identity,
+      ...(previous?.identity?.accountKey ? { accountKey: previous.identity.accountKey } : {})
+    },
+    resolvedAt: (deps.now || Date.now)()
+  };
+  cache.delete(fingerprint);
+  cache.set(fingerprint, resolved);
+  while (cache.size > CLAUDE_IDENTITY_CACHE_MAX_ENTRIES) {
+    cache.delete(cache.keys().next().value);
+  }
+  return resolved;
+}
+
+function claudeWebIdentityFingerprint(cookie) {
+  return cookie ? hashKey('claude-web-identity-cache', cookie) : '';
+}
+
+function claudeWebSessionKey(cookie) {
+  return String(cookie || '').replace(/^sessionKey=/, '');
+}
+
+function claudeWebSetCookieValues(response) {
+  const headers = response?.headers;
+  if (!headers) return [];
+  if (typeof headers.getSetCookie === 'function') {
+    const values = headers.getSetCookie();
+    if (Array.isArray(values)) return values;
+  }
+  const value = typeof headers.get === 'function' ? headers.get('set-cookie') : '';
+  return value ? [value] : [];
+}
+
+function claudeWebRenewedSessionKey(response) {
+  if (!response?.ok) return '';
+  let latest = '';
+  for (const header of claudeWebSetCookieValues(response)) {
+    const pattern = /(?:^|[,\r\n])\s*sessionKey=([^;,\r\n]+)/ig;
+    for (const match of String(header || '').matchAll(pattern)) {
+      const value = String(match[1] || '').trim();
+      if (value.startsWith('sk-ant-')) latest = value;
+    }
+  }
+  return latest;
+}
+
+function createClaudeWebSession(cookie) {
+  const initialCookie = normalizeClaudeWebCookieInput(cookie);
+  let sessionKey = claudeWebSessionKey(initialCookie);
+  return {
+    headers() {
+      return {
+        accept: 'application/json',
+        cookie: `sessionKey=${sessionKey}`
+      };
+    },
+    observe(response) {
+      sessionKey = claudeWebRenewedSessionKey(response) || sessionKey;
+    },
+    cookie() {
+      return `sessionKey=${sessionKey}`;
+    },
+    initialCookie
+  };
+}
+
+function claudeOauthIdentityFingerprint(credentials) {
+  const secret = credentials?.refreshToken || credentials?.accessToken;
+  return secret
+    ? hashKey('claude-oauth-identity-cache', credentials?.source || '', secret)
+    : '';
+}
+
+function carryClaudeCachedIdentity(previousCredentials, nextCredentials, deps = {}) {
+  const previousFingerprint = claudeOauthIdentityFingerprint(previousCredentials);
+  const nextFingerprint = claudeOauthIdentityFingerprint(nextCredentials);
+  if (!previousFingerprint || !nextFingerprint || previousFingerprint === nextFingerprint) return;
+  const cached = claudeCachedIdentity(previousFingerprint, deps, { allowStale: true });
+  if (cached) cacheClaudeIdentity(nextFingerprint, cached, deps);
+}
+
+// claude.ai's prepaid credit pool. Web-session only: the same path under an
+// OAuth bearer returns 403 account_session_invalid, and api.anthropic.com has no
+// equivalent, so this never runs on the OAuth path.
+function claudeTrancheAmount(entry) {
+  const minor = Number(
+    entry?.remaining_amount_minor_units
+    ?? entry?.remainingAmountMinorUnits
+    ?? entry?.amount_minor
+  );
+  return Number.isFinite(minor) ? minor / 100 : null;
+}
+
+function claudePrepaidBalance(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const minor = Number(payload.amount);
+  // A genuine 0 is kept, matching the documented balance contract: an account
+  // that has spent its pool dry still needs the row — that is precisely when it
+  // matters most. Callers gate on whether usage credits are enabled at all.
+  if (!Number.isFinite(minor) || minor < 0) return null;
+  const currency = String(payload.currency || 'USD').trim().toUpperCase();
+  // Purchased and granted credits share one pool in the UI; merge them and let
+  // normalization sort by expiry.
+  const entries = [
+    ...(Array.isArray(payload.tranches) ? payload.tranches : []),
+    ...(Array.isArray(payload.promo_tranches) ? payload.promo_tranches : [])
+  ];
+  const tranches = [];
+  for (const entry of entries) {
+    const amount = claudeTrancheAmount(entry);
+    if (amount === null) continue;
+    tranches.push({
+      amount,
+      currency: String(entry.currency || currency).trim().toUpperCase(),
+      expiresAt: entry.expires_at ?? entry.expiresAt ?? null
+    });
+  }
+  return {
+    amount: minor / 100,
+    currency,
+    expiresAt: payload.next_expires_at ?? payload.nextExpiresAt ?? null,
+    tranches
+  };
+}
+
+// "Has this account ever put money in the pool?" An account that never bought
+// credits and one that bought some look identical apart from this.
+function claudePrepaidFunded(balance) {
+  if (!balance) return false;
+  if (Number(balance.amount) > 0) return true;
+  return Array.isArray(balance.tranches) && balance.tranches.length > 0;
+}
+
+function claudePrepaidCache(deps = {}) {
+  if (!(deps.providerRuntimeState instanceof Map)) return null;
+  let cache = deps.providerRuntimeState.get(CLAUDE_PREPAID_CACHE_STATE_KEY);
+  if (!(cache instanceof Map)) {
+    cache = new Map();
+    deps.providerRuntimeState.set(CLAUDE_PREPAID_CACHE_STATE_KEY, cache);
+  }
+  return cache;
+}
+
+// Derived from the limits refresh interval rather than exposed as its own knob:
+// nobody can reason about "should my balance refresh every 10 or 15 minutes",
+// and two competing cadence settings in one panel is worse than one. Doubling
+// the interval keeps the balance off every other refresh at any interval.
+function claudePrepaidBaseTtlMs(deps, options) {
+  const configured = Number(deps.claudePrepaidCacheTtlMs);
+  if (Number.isFinite(configured) && configured >= 0) return configured;
+  const refreshMs = Number(options.limitsRefreshMs ?? options.refreshMs ?? deps.limitsRefreshMs);
+  return Number.isFinite(refreshMs) && refreshMs > 0
+    ? refreshMs * 2
+    : CLAUDE_PREPAID_CACHE_TTL_MS;
+}
+
+// `idle` is an unfunded pool on an account that is not spending credits either
+// — the shape of everyone who never bought any. Nothing is displayed for them
+// and nothing changes until they buy, so they back off to a request an hour.
+// It is evaluated per read rather than frozen into the entry: enabling usage
+// credits must bring the balance back at the normal cadence.
+function claudePrepaidCacheTtlMs(deps = {}, options = {}, idle = false) {
+  const base = claudePrepaidBaseTtlMs(deps, options);
+  return idle ? base * CLAUDE_PREPAID_IDLE_TTL_FACTOR : base;
+}
+
+// Returns the cached balance when it is still fresh. A cached `null` counts:
+// re-probing an account that has no prepaid credits every refresh would be the
+// same wasted request, just for the majority of users.
+function claudeCachedPrepaid(key, deps = {}, options = {}, creditsEnabled = false) {
+  const cache = claudePrepaidCache(deps);
+  if (!cache || !key) return null;
+  const entry = cache.get(key);
+  if (!entry) return null;
+  const nowMs = (deps.now || Date.now)();
+  const ttlMs = claudePrepaidCacheTtlMs(deps, options, !creditsEnabled && !entry.funded);
+  return nowMs - entry.resolvedAt <= ttlMs ? entry : null;
+}
+
+// The prepaid cache is keyed on the resolved account and the organization whose
+// pool it is, never on the cookie digest the identity cache uses. A sessionKey
+// rotates mid-session, and a credential-keyed entry is stranded the moment it
+// does: the next refresh re-reads the pool, and a read that fails then has no
+// last-good balance left to fall back on. Both parts are already hashed or
+// public identifiers — the pool belongs to the organization, and the account
+// decides whether it may be read at all.
+function claudePrepaidKey(context) {
+  const accountKey = context?.identity?.accountKey;
+  if (!accountKey) return '';
+  return `${accountKey}|${context?.organizationId || ''}`;
+}
+
+// The last balance read for this account, however old. Serving it through an
+// outage keeps a real balance on screen instead of blanking the row until the
+// endpoint recovers; the pool moves slowly enough that a stale figure beats no
+// figure, and the next successful read corrects it.
+function staleClaudePrepaid(key, deps = {}) {
+  const cache = claudePrepaidCache(deps);
+  if (!cache || !key) return null;
+  return cache.get(key)?.balance ?? null;
+}
+
+// A refusal this account will get again: reading the pool is not permitted, or
+// there is nothing at that path. A 403 carrying a Cloudflare challenge is not
+// one — that is an interstitial, and it clears.
+function claudePrepaidRefused(error) {
+  if (error?.code === 'CLAUDE_WEB_SOURCE_CHALLENGE') return false;
+  return error?.httpStatus === 403 || error?.httpStatus === 404;
+}
+
+function cacheClaudePrepaid(key, balance, deps = {}) {
+  const cache = claudePrepaidCache(deps);
+  if (!cache || !key) return balance;
+  cache.delete(key);
+  cache.set(key, {
+    balance,
+    funded: claudePrepaidFunded(balance),
+    resolvedAt: (deps.now || Date.now)()
+  });
+  while (cache.size > CLAUDE_IDENTITY_CACHE_MAX_ENTRIES) {
+    cache.delete(cache.keys().next().value);
+  }
+  return balance;
+}
+
+async function fetchClaudeWebLimits(cookie, deps = {}, options = {}) {
+  const nowMs = (deps.now || Date.now)();
+  const baseUrl = String(deps.claudeWebBaseUrl || CLAUDE_WEB_BASE_URL).replace(/\/$/, '');
+  const session = createClaudeWebSession(cookie);
+  let reportedCookie = session.initialCookie;
+  const observeResponse = async (response) => {
+    session.observe(response);
+    const renewedCookie = session.cookie();
+    if (renewedCookie === reportedCookie) return;
+    const previousCookie = reportedCookie;
+    try {
+      const persisted = await deps.onClaudeWebCookieRenewed?.({
+        previousCookie,
+        cookie: renewedCookie
+      });
+      if (persisted !== false) reportedCookie = renewedCookie;
+    } catch (error) {
+      deps.logger?.(`[limits] Claude Web session renewal could not be persisted: ${error.message}`);
+    }
+  };
+  const fetchWebJson = (url) => fetchClaudeWebJson(url, session.headers(), deps, {
+    onResponse: observeResponse
+  });
+  const fingerprint = claudeWebIdentityFingerprint(cookie);
+  let context = claudeCachedIdentity(fingerprint, deps);
+  let usage;
+  if (!context) {
+    const stale = claudeCachedIdentity(fingerprint, deps, { allowStale: true });
+    const organizationsBody = await fetchWebJson(`${baseUrl}/api/organizations`);
+    const organizations = claudeWebOrganizations(organizationsBody);
+    const organization = selectClaudeWebOrganization(organizations);
+    const organizationId = claudeWebOrganizationId(organization);
+    if (!organizationId) throw errorWithStatus('unavailable', 'Claude Web organization not found');
+    usage = await fetchWebJson(
+      `${baseUrl}/api/organizations/${encodeURIComponent(organizationId)}/usage`
+    );
+    try {
+      const accountBody = await fetchWebJson(`${baseUrl}/api/account`);
+      context = cacheClaudeIdentity(fingerprint, {
+        organizationId,
+        identity: claudeWebAccountIdentity(accountBody, organization)
+      }, deps);
+    } catch (error) {
+      if (!stale) {
+        throw claudeIdentityUnavailable('Claude Web usage is available, but stable account identity could not be resolved', error);
+      }
+      context = {
+        organizationId,
+        identity: stale.identity,
+        resolvedAt: stale.resolvedAt
+      };
+    }
+  } else {
+    usage = await fetchWebJson(
+      `${baseUrl}/api/organizations/${encodeURIComponent(context.organizationId)}/usage`
+    );
+  }
+  const renewedCookie = session.cookie();
+  if (renewedCookie !== session.initialCookie) {
+    const renewedFingerprint = claudeWebIdentityFingerprint(renewedCookie);
+    if (renewedFingerprint !== fingerprint) cacheClaudeIdentity(renewedFingerprint, context, deps);
+  }
+  // The pool is read whenever the setting allows it, deliberately not only when
+  // the account has usage credits switched on: switching them off is what you
+  // do to stop a balance you still hold from being spent, and the money and its
+  // expiry dates are exactly what you want to see while it is off.
+  const wantsPrepaid = claudePrepaidBalanceEnabled(deps.env || process.env, options);
+  const creditsEnabled = claudeUsageCreditsEnabled(usage);
+  const prepaidKey = claudePrepaidKey(context);
+  // Best-effort and throttled: a 403/404/timeout here must not cost the account
+  // its usage row, and the pool moves too slowly to re-read every refresh.
+  const cachedPrepaid = wantsPrepaid
+    ? claudeCachedPrepaid(prepaidKey, deps, options, creditsEnabled)
+    : null;
+  let balance = cachedPrepaid ? cachedPrepaid.balance : null;
+  if (wantsPrepaid && !cachedPrepaid) {
+    try {
+      const prepaid = await fetchWebJson(
+        `${baseUrl}/api/organizations/${encodeURIComponent(context.organizationId)}/prepaid/credits`
+      );
+      balance = cacheClaudePrepaid(prepaidKey, claudePrepaidBalance(prepaid), deps);
+    } catch (error) {
+      deps.logger?.(`[limits] Claude prepaid credits unavailable: ${error.message}`);
+      if (claudePrepaidRefused(error)) {
+        // Cache the refusal. An endpoint that refuses this account refuses it
+        // every refresh, and without an entry there is nothing to back off from.
+        cacheClaudePrepaid(prepaidKey, null, deps);
+      } else {
+        // A timeout, a 429 or a 5xx says nothing about this account. Caching it
+        // as "no balance" would blank a balance that is still there — and on a
+        // credits-off account the idle backoff would hold that blank for an
+        // hour. Keep the last figure and let the next refresh retry.
+        balance = staleClaudePrepaid(prepaidKey, deps);
+      }
+    }
+  }
+  // A pool nobody ever funded is not a balance. Reporting it would put a $0.00
+  // row on every Web account that has never touched credits. With usage credits
+  // on, a pool spent dry is precisely when the row matters, so zero is kept.
+  if (balance && !creditsEnabled && !claudePrepaidFunded(balance)) balance = null;
+  const provider = mapClaudeUsageToProvider(usage, {
+    ...context.identity,
+    updatedAt: nowIso(nowMs),
+    source: 'web'
+  });
+  if (!balance) return provider;
+  return normalizeLimitProvider({
+    ...provider,
+    balance,
+    // Emit the credits window ourselves. normalizeLimitProvider synthesizes a
+    // metered one whenever a balance has no credits window, and that meter
+    // derives amount/(amount+monthSpend) — a denominator this pool doesn't have.
+    windows: [
+      ...provider.windows,
+      {
+        kind: 'billing',
+        metric: 'credits',
+        label: 'Balance',
+        remaining: balance.amount,
+        currency: balance.currency,
+        showMeter: false
+      }
+    ]
+  });
+}
+
+function claudeIdentityUnavailable(message, cause) {
+  const error = errorWithStatus('unavailable', message);
+  error.code = 'CLAUDE_IDENTITY_UNAVAILABLE';
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function claudeOauthAccountIdentity(profile) {
+  const account = profile?.account && typeof profile.account === 'object' ? profile.account : {};
+  const organization = profile?.organization && typeof profile.organization === 'object'
+    ? profile.organization
+    : {};
+  const accountId = String(account.uuid || account.id || profile?.account_uuid || '').trim();
+  const organizationId = String(
+    organization.uuid || organization.id || profile?.organization_uuid || ''
+  ).trim();
+  const accountEmail = String(
+    account.email || account.email_address || profile?.email || profile?.email_address || ''
+  ).trim().toLowerCase();
+  const accountName = String(
+    account.display_name
+      || account.full_name
+      || account.name
+      || organization.display_name
+      || organization.name
+      || ''
+  ).trim();
+  const stableIdentity = claudeStableIdentity(accountId, organizationId, accountEmail);
+  if (!stableIdentity) {
+    throw claudeIdentityUnavailable('Claude profile did not include a stable account identity');
+  }
+
+  return {
+    accountKey: hashKey('claude-account', stableIdentity),
+    accountEmail,
+    accountName
+  };
+}
+
+async function resolveClaudeOauthIdentity(credentials, deps = {}) {
+  const fingerprint = claudeOauthIdentityFingerprint(credentials);
+  const fresh = claudeCachedIdentity(fingerprint, deps);
+  if (fresh) return fresh.identity;
+  const stale = claudeCachedIdentity(fingerprint, deps, { allowStale: true });
+  try {
+    const identity = claudeOauthAccountIdentity(
+      await callClaudeProfile(credentials.accessToken, deps)
+    );
+    return cacheClaudeIdentity(fingerprint, { identity }, deps).identity;
+  } catch (error) {
+    if (stale) return stale.identity;
+    if (error?.code === 'CLAUDE_IDENTITY_UNAVAILABLE') throw error;
+    throw claudeIdentityUnavailable('Claude profile lookup failed', error);
+  }
+}
+
 async function delegatedClaudeRefresh(currentCredentials, deps = {}) {
   // Spawn `claude /status` in a PTY and let Claude Code itself refresh the token.
   // Matches CodexBar's strategy — Claude Code is a native Anthropic application,
@@ -720,18 +1502,28 @@ async function refreshClaudeCredentials(currentCredentials, deps = {}) {
   return { ...currentCredentials, ...refreshed };
 }
 
-async function fetchClaudeLimits(_options = {}, deps = {}) {
+async function fetchClaudeLimits(options = {}, deps = {}) {
   const nowMs = (deps.now || Date.now)();
   const platform = deps.platform || process.platform;
+  const webCookie = claudeWebCookie(deps.env || process.env, options);
+  if (webCookie) return fetchClaudeWebLimits(webCookie, deps, options);
+  let oauthIdentity = null;
   try {
     let credentials = await readClaudeCredentials(deps);
+    oauthIdentity = claudeCachedIdentity(
+      claudeOauthIdentityFingerprint(credentials),
+      deps,
+      { allowStale: true }
+    )?.identity || null;
 
     // Proactive refresh only on non-darwin: mac uses delegated (spawning Claude Code)
     // which is expensive; CodexBar's design likewise refreshes reactively, not on expiry.
     if (platform !== 'darwin' && credentials.refreshToken && credentials.expiresAt
       && credentials.expiresAt - nowMs < CLAUDE_REFRESH_LEEWAY_MS) {
       try {
+        const previousCredentials = credentials;
         credentials = await refreshClaudeCredentials(credentials, deps);
+        carryClaudeCachedIdentity(previousCredentials, credentials, deps);
       } catch (_) { /* fall through; reactive retry below may still succeed */ }
     }
 
@@ -740,25 +1532,47 @@ async function fetchClaudeLimits(_options = {}, deps = {}) {
       usage = await callClaudeUsage(credentials.accessToken, deps);
     } catch (error) {
       if (error?.status !== 'unauthorized') throw error;
+      const previousCredentials = credentials;
       credentials = await refreshClaudeCredentials(credentials, deps);
+      carryClaudeCachedIdentity(previousCredentials, credentials, deps);
       usage = await callClaudeUsage(credentials.accessToken, deps);
     }
 
+    try {
+      oauthIdentity = await resolveClaudeOauthIdentity(credentials, deps);
+    } catch (error) {
+      if (error?.cause?.status !== 'unauthorized') throw error;
+      const previousCredentials = credentials;
+      credentials = await refreshClaudeCredentials(credentials, deps);
+      carryClaudeCachedIdentity(previousCredentials, credentials, deps);
+      oauthIdentity = await resolveClaudeOauthIdentity(credentials, deps);
+    }
     const provider = mapClaudeUsageToProvider(usage, {
-      accountKey: hashKey('claude', credentials.identity),
+      ...oauthIdentity,
       accountLabel: credentials.accountLabel,
       updatedAt: nowIso(nowMs),
       source: 'oauth'
     });
     return provider;
   } catch (error) {
+    // A successful quota response without a stable account identity must not
+    // create a new row keyed by credential storage location or a different
+    // fallback source. Let LimitsRuntime retain the previous account row.
+    if (error?.code === 'CLAUDE_IDENTITY_UNAVAILABLE') throw error;
     if (!shouldTryClaudeCliFallback(error)) throw error;
     try {
       const text = await runClaudeUsageCli(deps);
-      return mapClaudeCliUsageToProvider(text, {
+      const provider = mapClaudeCliUsageToProvider(text, {
         updatedAt: nowIso(nowMs),
         now: new Date(nowMs)
       });
+      if (!oauthIdentity) return provider;
+      return {
+        ...provider,
+        accountKey: oauthIdentity.accountKey,
+        accountEmail: oauthIdentity.accountEmail,
+        accountName: oauthIdentity.accountName
+      };
     } catch (_) {
       throw error;
     }
@@ -920,6 +1734,8 @@ function parseClaudeCliUsageText(text, now = new Date()) {
     secondaryResetDescription,
     primaryResetsAt: parseClaudeResetDate(primaryResetDescription, now),
     secondaryResetsAt: parseClaudeResetDate(secondaryResetDescription, now),
+    accountEmail,
+    accountName: accountOrganization,
     accountLabel,
     accountKey: [accountEmail, accountOrganization].filter(Boolean).join('|') || 'claude-cli'
   };
@@ -946,6 +1762,8 @@ function mapClaudeCliUsageToProvider(text, meta = {}) {
     provider: 'claude',
     accountKey: hashKey('claude-cli', parsed.accountKey),
     accountLabel: parsed.accountLabel,
+    accountName: parsed.accountName,
+    accountEmail: parsed.accountEmail,
     source: 'cli',
     status: 'ok',
     updatedAt: meta.updatedAt,
@@ -1444,8 +2262,18 @@ function shouldRetryCodexEmptyQuotaPayload(payload = {}) {
 async function waitForCodexEmptyQuotaRetry(deps = {}) {
   const delayMs = Number(deps.codexEmptyQuotaRetryDelayMs ?? CODEX_EMPTY_QUOTA_RETRY_DELAY_MS);
   if (!Number.isFinite(delayMs) || delayMs <= 0) return;
-  await new Promise((resolve) => {
-    setTimeout(resolve, delayMs);
+  if (deps.signal?.aborted) throw abortError(deps.signal);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(finish, delayMs);
+    const onAbort = () => finish(abortError(deps.signal));
+    function finish(error) {
+      clearTimeout(timer);
+      deps.signal?.removeEventListener?.('abort', onAbort);
+      if (error) reject(error);
+      else resolve();
+    }
+    deps.signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (deps.signal?.aborted) onAbort();
   });
 }
 
@@ -1466,7 +2294,9 @@ function mapCodexRateLimitsToProvider(payload, meta = {}) {
     provider: 'codex',
     accountKey: meta.accountKey || '',
     accountLabel: meta.accountLabel || codexAccountLabel(payload),
+    accountName: meta.accountName || '',
     accountEmail: meta.accountEmail || payload.account?.email || '',
+    workspaceKind: meta.workspaceKind || '',
     source: meta.source || 'rpc',
     sourceDetail: meta.sourceDetail || payload.sourceDetail,
     status: 'ok',
@@ -1551,6 +2381,13 @@ function codexLoginSpawnSpec(command, platform = process.platform) {
   };
 }
 
+// Absolute path on purpose: a bare `taskkill` is resolved through PATH, and a user
+// PATH that lost %SystemRoot%\System32 turns every tree-kill into a spawn ENOENT.
+function windowsTaskkillCommand(env = process.env) {
+  const root = env.SystemRoot || env.SYSTEMROOT || env.windir || 'C:\\Windows';
+  return path.win32.join(root, 'System32', 'taskkill.exe');
+}
+
 function killCodexLoginProcess(child, platform = process.platform, deps = {}) {
   if (!child || typeof child.kill !== 'function') return;
   const spawnFn = deps.spawn || spawn;
@@ -1558,7 +2395,17 @@ function killCodexLoginProcess(child, platform = process.platform, deps = {}) {
     // Login spawns a browser/callback helper, so kill the whole tree, not just codex.
     if (platform === 'win32') {
       if (child.pid) {
-        try { spawnFn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true }); } catch (_) {}
+        try {
+          const killer = spawnFn(
+            windowsTaskkillCommand(deps.env || process.env),
+            ['/pid', String(child.pid), '/t', '/f'],
+            { windowsHide: true }
+          );
+          // spawn() reports a missing or blocked taskkill.exe asynchronously as an
+          // 'error' event, so the enclosing try/catch never sees it. Without a
+          // listener the EventEmitter rethrows and crashes the main process.
+          killer?.on?.('error', () => {});
+        } catch (_) {}
       }
       child.kill();
       return;
@@ -1616,7 +2463,7 @@ function runCodexLoginWithCommand(command, options = {}, deps = {}) {
       resolve({ outcome, exitCode: exitCode ?? null, output: output.trim() });
     };
     const onAbort = () => {
-      killCodexLoginProcess(child, platform, { spawn: spawnFn });
+      killCodexLoginProcess(child, platform, { spawn: spawnFn, env });
       finish('cancelled', null);
     };
     child.stdout?.on('data', append);
@@ -1629,7 +2476,7 @@ function runCodexLoginWithCommand(command, options = {}, deps = {}) {
       return;
     }
     timer = setTimer(() => {
-      killCodexLoginProcess(child, platform, { spawn: spawnFn });
+      killCodexLoginProcess(child, platform, { spawn: spawnFn, env });
       finish('timedOut', null);
     }, timeoutMs);
   });
@@ -1846,8 +2693,16 @@ function createJsonRpcClient(child, timeoutMs) {
   const pending = new Map();
 
   function rejectAll(error) {
-    for (const { reject } of pending.values()) reject(error);
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
     pending.clear();
+  }
+
+  function abort(error) {
+    closed = true;
+    rejectAll(error);
   }
 
   function handleMessage(message) {
@@ -1896,7 +2751,7 @@ function createJsonRpcClient(child, timeoutMs) {
     if (!closed) child.stdin.write(`${JSON.stringify(params === undefined ? { method } : { method, params })}\n`);
   }
 
-  return { send, notify, rejectAll };
+  return { abort, send, notify, rejectAll };
 }
 
 function shouldTryNextCodexCommand(error) {
@@ -1925,15 +2780,27 @@ function codexRpcPayload(rateLimitResult, account, command, deps = {}) {
 
 async function readCodexRpcWithCommand(command, deps = {}) {
   const timeoutMs = Number(deps.codexRpcTimeoutMs || CODEX_RPC_TIMEOUT_MS);
+  const platform = deps.platform || process.platform;
+  const signal = deps.signal;
+  if (signal?.aborted) throw abortError(signal);
   const child = spawnCodexAppServer({ ...deps, codexCommand: command });
   const rpc = createJsonRpcClient(child, timeoutMs);
+  const onAbort = () => {
+    rpc.abort(abortError(signal));
+    killCodexLoginProcess(child, platform, deps);
+  };
+  signal?.addEventListener?.('abort', onAbort, { once: true });
   try {
+    if (signal?.aborted) throw abortError(signal);
     await rpc.send('initialize', {
       clientInfo: { name: 'token-monitor', title: 'Token Monitor', version: appVersion() }
     });
     rpc.notify('initialized', {});
     let rateLimitResult = await rpc.send('account/rateLimits/read');
-    const accountResult = await rpc.send('account/read').catch(() => null);
+    const accountResult = await rpc.send('account/read').catch(() => {
+      if (signal?.aborted) throw abortError(signal);
+      return null;
+    });
     const account = accountResult?.account || null;
     let payload = codexRpcPayload(rateLimitResult, account, command, deps);
     if (deps.codexEmptyQuotaRetry !== false && shouldRetryCodexEmptyQuotaPayload(payload)) {
@@ -1947,14 +2814,19 @@ async function readCodexRpcWithCommand(command, deps = {}) {
             rateLimitResetCredits: retryPayload.rateLimitResetCredits || payload.rateLimitResetCredits
           };
         }
-      } catch (_) {}
+      } catch (_) {
+        if (signal?.aborted) throw abortError(signal);
+      }
     }
     if (!account && !hasCodexRateLimitWindows(codexRateLimitSnapshot(payload))) {
       throw errorWithStatus('notConfigured', 'Codex account not configured');
     }
+    if (signal?.aborted) throw abortError(signal);
     return payload;
   } finally {
-    try { child.kill('SIGTERM'); } catch (_) {}
+    signal?.removeEventListener?.('abort', onAbort);
+    rpc.abort(new Error('codex app-server closed'));
+    if (!signal?.aborted) killCodexLoginProcess(child, platform, deps);
   }
 }
 
@@ -1987,6 +2859,9 @@ function normalizeCodexManagedAccounts(value) {
       email: String(account.email || '').trim().toLowerCase(),
       accountKey: String(account.accountKey || '').trim(),
       accountLabel: String(account.accountLabel || account.plan || '').trim(),
+      workspaceAccountId: String(account.workspaceAccountId || account.providerAccountId || '').trim().toLowerCase(),
+      workspaceLabel: String(account.workspaceLabel || '').trim(),
+      workspaceKind: account.workspaceKind === 'personal' ? 'personal' : '',
       enabled: account.enabled !== false
     };
   }).filter(Boolean);
@@ -1995,6 +2870,31 @@ function normalizeCodexManagedAccounts(value) {
 function codexAccountKeyFromSeed(seed) {
   const raw = String(seed || '').trim();
   return raw.startsWith('sha256:') ? raw : hashKey('codex', raw || 'account');
+}
+
+function resolvedCodexAccountKey(email, workspaceAccountId, fallbackSeed) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const normalizedWorkspaceAccountId = String(workspaceAccountId || '').trim().toLowerCase();
+  if (normalizedEmail && normalizedWorkspaceAccountId) {
+    return codexAccountKey(normalizedEmail, normalizedWorkspaceAccountId);
+  }
+  return codexAccountKeyFromSeed(fallbackSeed || normalizedEmail || normalizedWorkspaceAccountId);
+}
+
+function managedCodexAccountKey(account, authIdentity = {}, resolvedEmail = '') {
+  const email = String(resolvedEmail || authIdentity.email || account.email || '').trim().toLowerCase();
+  const workspaceAccountId = String(
+    authIdentity.workspaceAccountId
+    || authIdentity.providerAccountId
+    || account.workspaceAccountId
+    || account.providerAccountId
+    || ''
+  ).trim().toLowerCase();
+  return resolvedCodexAccountKey(
+    email,
+    workspaceAccountId,
+    account.accountKey || authIdentity.accountKey || email || account.id || account.homePath
+  );
 }
 
 async function fetchManagedCodexAccountLimits(account, _options = {}, deps = {}) {
@@ -2010,25 +2910,29 @@ async function fetchManagedCodexAccountLimits(account, _options = {}, deps = {})
     codexAuthPath: account.authPath || pathApi.join(account.homePath, 'auth.json')
   };
   const reader = deps.readCodexRpc || readCodexRpc;
-  const accountKeySeed = account.accountKey || account.email || account.id || account.homePath;
+  const authIdentity = readLiveCodexIdentity(accountDeps);
   try {
     const payload = await withCodexOAuthResetCredits(await reader(accountDeps), accountDeps);
-    const email = payload.account?.email || account.email;
-    const identity = account.accountKey || email || account.id || account.homePath;
+    const email = authIdentity.email || payload.account?.email || account.email;
     return mapCodexRateLimitsToProvider(payload, {
-      accountKey: codexAccountKeyFromSeed(identity),
+      accountKey: managedCodexAccountKey(account, authIdentity, email),
       accountEmail: email,
       accountLabel: account.accountLabel || codexAccountLabel(payload),
+      accountName: account.workspaceLabel,
+      workspaceKind: account.workspaceKind,
       updatedAt: nowIso(nowMs),
       source: 'rpc',
       sourceDetail: 'managed'
     });
   } catch (error) {
+    const email = authIdentity.email || account.email;
     return normalizeLimitProvider({
       provider: 'codex',
-      accountKey: codexAccountKeyFromSeed(accountKeySeed),
-      accountEmail: account.email,
+      accountKey: managedCodexAccountKey(account, authIdentity, email),
+      accountEmail: email,
       accountLabel: account.accountLabel,
+      accountName: account.workspaceLabel,
+      workspaceKind: account.workspaceKind,
       source: 'rpc',
       sourceDetail: 'managed',
       status: providerStatusFromError(error),
@@ -2038,10 +2942,10 @@ async function fetchManagedCodexAccountLimits(account, _options = {}, deps = {})
   }
 }
 
-// Reads the live login's identity (email + stable account id) from its
+// Reads the live login's identity (email + selected workspace id) from its
 // auth.json. The RPC `account/read` often omits the email, so the JWT in
-// auth.json is the reliable source — and keying on the account id keeps the
-// live account consistent with managed accounts for cross-device dedup.
+// auth.json is the reliable source. The shared composite key keeps the live
+// account consistent with managed accounts for cross-device dedup.
 function readLiveCodexIdentity(deps = {}) {
   const read = deps.readFileSync || fs.readFileSync;
   const authPath = deps.codexAuthPath || codexAuthPath(deps.env || process.env);
@@ -2052,16 +2956,26 @@ function readLiveCodexIdentity(deps = {}) {
   }
 }
 
-async function fetchLiveCodexAccount(deps = {}, nowMs = Date.now()) {
+async function fetchLiveCodexAccount(deps = {}, nowMs = Date.now(), managedAccounts = []) {
   const reader = deps.readCodexRpc || readCodexRpc;
   const payload = await withCodexOAuthResetCredits(await reader(deps), deps);
   const authIdentity = readLiveCodexIdentity(deps);
   const email = authIdentity.email || payload.account?.email || '';
   const fallbackSeed = payload.account?.email || `${payload.account?.type || 'account'}:${payload.account?.planType || ''}:${deps.codexAuthPath || codexAuthPath(deps.env || process.env)}`;
+  const accountKey = resolvedCodexAccountKey(
+    email,
+    authIdentity.workspaceAccountId || authIdentity.providerAccountId,
+    authIdentity.accountKey || fallbackSeed
+  );
+  const matchingManagedAccount = managedAccounts.find(
+    (account) => managedCodexAccountKey(account, {}, account.email) === accountKey
+  );
   return mapCodexRateLimitsToProvider(payload, {
-    accountKey: authIdentity.accountKey || hashKey('codex', fallbackSeed),
+    accountKey,
     accountEmail: email,
     accountLabel: codexAccountLabel(payload),
+    accountName: matchingManagedAccount?.workspaceLabel || '',
+    workspaceKind: matchingManagedAccount?.workspaceKind || '',
     updatedAt: nowIso(nowMs),
     source: 'rpc',
     sourceDetail: payload.sourceDetail
@@ -2078,7 +2992,7 @@ async function fetchCodexLimits(options = {}, deps = {}) {
     .filter((account) => {
       if (!scope) return true;
       if (scope.sourceDetail && scope.sourceDetail !== 'managed') return false;
-      const accountKey = codexAccountKeyFromSeed(account.accountKey || account.email || account.id || account.homePath);
+      const accountKey = managedCodexAccountKey(account, {}, account.email);
       if (scope.accountKey) return accountKey === scope.accountKey;
       if (scope.accountEmail) return account.email === scope.accountEmail;
       if (scope.accountLabel) return account.accountLabel === scope.accountLabel;
@@ -2099,15 +3013,14 @@ async function fetchCodexLimits(options = {}, deps = {}) {
   }
 
   const providers = [];
-  // Dedupe by account id (accountKey) first, then email — so signing in the
-  // account that's already the live login shows ONE row, even if one side has
-  // no email. Both paths key on the stable account id, so the same account
-  // matches regardless of how it was added.
+  // Prefer the composite account key; use email only for legacy providers that
+  // do not expose one. This keeps same-email workspaces distinct while still
+  // collapsing the live and managed views of the exact same login.
   const seen = new Set();
-  const identityKeys = (provider) => [
-    provider.accountKey ? `key:${provider.accountKey}` : '',
-    provider.accountEmail ? `email:${provider.accountEmail}` : ''
-  ].filter(Boolean);
+  const identityKeys = (provider) => {
+    if (provider.accountKey) return [`key:${provider.accountKey}`];
+    return provider.accountEmail ? [`email:${provider.accountEmail}`] : [];
+  };
   const markSeen = (provider) => { for (const key of identityKeys(provider)) seen.add(key); };
   const alreadySeen = (provider) => identityKeys(provider).some((key) => seen.has(key));
   // The live system account (the one the Codex app/CLI is currently signed into)
@@ -2116,7 +3029,7 @@ async function fetchCodexLimits(options = {}, deps = {}) {
   // only live account just drops out, leaving the managed accounts.
   if (includeLiveAccount) {
     try {
-      const live = await fetchLiveCodexAccount(deps, nowMs);
+      const live = await fetchLiveCodexAccount(deps, nowMs, managedAccounts);
       providers.push(live);
       markSeen(live);
     } catch (_) {}
@@ -2181,6 +3094,49 @@ async function fetchAntigravityLimits(_options = {}, deps = {}) {
   }
 }
 
+function openCodeWebIdentity(goWeb, zen, cookie) {
+  const goWorkspaceId = goWeb?.status === 'ok' ? String(goWeb.workspaceId || '') : '';
+  const zenWorkspaceId = zen?.status === 'ok' ? String(zen.workspaceId || '') : '';
+  const workspaceConflict = Boolean(
+    goWorkspaceId && zenWorkspaceId && goWorkspaceId !== zenWorkspaceId
+  );
+  const includeZen = zen?.status === 'ok' && !workspaceConflict;
+  const hasSuccessfulWebProbe = goWeb?.status === 'ok' || includeZen;
+  // Go is the quota authority when two successful probes unexpectedly resolve
+  // different workspaces. Exclude the Zen observation instead of attaching its
+  // balance/windows to the wrong account identity.
+  const workspaceId = goWorkspaceId || (includeZen ? zenWorkspaceId : '');
+  if (hasSuccessfulWebProbe && workspaceId) {
+    return {
+      accountKey: hashKey('opencode', `workspace:${workspaceId}`),
+      aliases: [
+        hashKey('opencode', `go:${workspaceId}`),
+        hashKey('opencode', `zen:${workspaceId}`)
+      ],
+      includeZen
+    };
+  }
+  if (cookie && hasSuccessfulWebProbe) {
+    const cookieHash = crypto.createHash('sha256').update(cookie).digest('hex').slice(0, 12);
+    return { accountKey: hashKey('opencode', `cookie:${cookieHash}`), aliases: [], includeZen };
+  }
+  return { accountKey: '', aliases: [], includeZen };
+}
+
+const OPENCODE_COMPONENT_PROVENANCE_DETAIL = 'managed';
+
+function openCodeSupplementalZenWindows(goWeb, zen) {
+  const goWindowKeys = new Set(
+    (goWeb?.status === 'ok' ? goWeb.windows || [] : [])
+      .map(openCodeWindowKey)
+      .filter(Boolean)
+  );
+  return (zen?.windows || []).filter((window) => {
+    const key = openCodeWindowKey(window);
+    return !key || !goWindowKeys.has(key);
+  });
+}
+
 async function fetchOpenCodeLimits(options = {}, deps = {}) {
   const nowMs = (deps.now || Date.now)();
   const updatedAt = nowIso(nowMs);
@@ -2219,7 +3175,11 @@ async function fetchOpenCodeLimits(options = {}, deps = {}) {
 
   // ── Single account (0 or 1 cookie): existing merged behavior ─────────────
   if (!multiAccountMode) {
-    const goLocal = collectGo({ env: deps.env || process.env, now: () => nowMs });
+    // The database is device-wide and has no stable account identity, so every
+    // caller must opt in explicitly before this process reads it.
+    const goLocal = options.opencodeLocalLimitsEnabled === true
+      ? collectGo({ env: deps.env || process.env, now: () => nowMs })
+      : { status: 'notConfigured', windows: [] };
     const cookie = cookies[0]?.cookie;
     const [goWeb, zen] = cookie
       ? await Promise.all([
@@ -2227,6 +3187,8 @@ async function fetchOpenCodeLimits(options = {}, deps = {}) {
           fetchZen(cookie, { now: () => nowMs, workspaceId: '' })
         ])
       : [null, null];
+    const webIdentity = openCodeWebIdentity(goWeb, zen, cookie);
+    const webAccountKey = webIdentity.accountKey;
 
     const windows = [];
     let status = 'notConfigured';
@@ -2236,20 +3198,26 @@ async function fetchOpenCodeLimits(options = {}, deps = {}) {
     let balanceUsd = null;
 
     if (goWeb && goWeb.status === 'ok' && goWeb.windows.length > 0) {
-      windows.push(...goWeb.windows);
+      windows.push(...goWeb.windows.map((window) => ({ ...window, source: 'web' })));
       status = 'ok'; source = 'web'; accountLabel = 'Go';
       accountKey = hashKey('opencode', `go:${goWeb.workspaceId || ''}`);
     } else if (goLocal.status === 'ok') {
-      windows.push(...goLocal.windows);
+      windows.push(...goLocal.windows.map((window) => ({ ...window, source: 'local' })));
       status = 'ok'; accountLabel = 'Go';
       accountKey = hashKey('opencode', goLocal.identity || 'go');
     } else if (goLocal.status === 'unavailable') {
       status = 'unavailable';
     }
 
-    if (zen && zen.status === 'ok') {
-      windows.push(...zen.windows);
-      status = 'ok'; source = 'web';
+    if (zen && webIdentity.includeZen) {
+      windows.push(...openCodeSupplementalZenWindows(goWeb, zen)
+        .map((window) => ({ ...window, source: 'web' })));
+      status = 'ok';
+      // The provider-level source is the compatibility envelope used by Hubs
+      // that predate windows[].source. It may claim Web only when every quota
+      // window is Web; otherwise an old Hub could turn a local estimate into a
+      // Web observation when it strips component provenance.
+      if (!windows.some((window) => window.source === 'local')) source = 'web';
       if (typeof zen.balanceUsd === 'number' && Number.isFinite(zen.balanceUsd)) balanceUsd = zen.balanceUsd;
       if (!accountLabel) accountLabel = 'Zen';
       if (!accountKey) accountKey = hashKey('opencode', `zen:${zen.workspaceId || ''}`);
@@ -2260,7 +3228,20 @@ async function fetchOpenCodeLimits(options = {}, deps = {}) {
       if (surfaced) { status = surfaced; source = 'web'; }
     }
 
-    return normalizeLimitProvider({ provider: 'opencode', accountKey, accountLabel, source, status, updatedAt, windows, balanceUsd });
+    if (webAccountKey) accountKey = webAccountKey;
+    return normalizeLimitProvider({
+      provider: 'opencode',
+      accountKey,
+      webAccountKey,
+      accountKeyAliases: webIdentity.aliases,
+      accountLabel,
+      source,
+      sourceDetail: OPENCODE_COMPONENT_PROVENANCE_DETAIL,
+      status,
+      updatedAt,
+      windows,
+      balanceUsd
+    });
   }
 
   // ── Multi-account (2+ cookies): separate per-profile providers ────────────
@@ -2312,13 +3293,15 @@ async function fetchSingleOpenCodeProfile(name, cookie, fetchGoWeb, fetchZen, no
     let balanceUsd = null;
 
     if (goWeb && goWeb.status === 'ok' && goWeb.windows.length > 0) {
-      windows.push(...goWeb.windows);
+      windows.push(...goWeb.windows.map((window) => ({ ...window, source: 'web' })));
       status = 'ok';
       planLabel = 'Go';
     }
 
-    if (zen && zen.status === 'ok') {
-      windows.push(...zen.windows);
+    const webIdentity = openCodeWebIdentity(goWeb, zen, cookie);
+    if (zen && webIdentity.includeZen) {
+      windows.push(...openCodeSupplementalZenWindows(goWeb, zen)
+        .map((window) => ({ ...window, source: 'web' })));
       status = 'ok';
       if (!planLabel) planLabel = 'Zen';
       if (typeof zen.balanceUsd === 'number' && Number.isFinite(zen.balanceUsd)) balanceUsd = zen.balanceUsd;
@@ -2332,14 +3315,8 @@ async function fetchSingleOpenCodeProfile(name, cookie, fetchGoWeb, fetchZen, no
     // Stable accountKey derived from workspaceId (preferred) or cookie hash,
     // not from the user-editable profile name — so the same account is
     // consistently identified across machines and renames.
-    const goWid = goWeb?.workspaceId || '';
-    const zenWid = zen?.workspaceId || '';
-    let accountKey;
-    if (goWeb && goWeb.status === 'ok' && goWid) {
-      accountKey = hashKey('opencode', `go:${goWid}`);
-    } else if (zen && zen.status === 'ok' && zenWid) {
-      accountKey = hashKey('opencode', `zen:${zenWid}`);
-    } else {
+    let accountKey = webIdentity.accountKey;
+    if (!accountKey) {
       const cookieHash = crypto.createHash('sha256').update(cookie).digest('hex').slice(0, 12);
       accountKey = hashKey('opencode', `cookie:${cookieHash}`);
     }
@@ -2347,12 +3324,15 @@ async function fetchSingleOpenCodeProfile(name, cookie, fetchGoWeb, fetchZen, no
     return normalizeLimitProvider({
       provider: 'opencode',
       accountKey,
+      webAccountKey: accountKey,
+      accountKeyAliases: webIdentity.aliases,
       accountName: name,
       // Keep accountLabel as the profile name for pre-accountName renderers.
       // New renderers use planLabel for Go/Zen and accountName for identity.
       accountLabel: name,
       planLabel,
       source: 'web',
+      sourceDetail: OPENCODE_COMPONENT_PROVENANCE_DETAIL,
       status,
       updatedAt,
       windows,
@@ -2363,7 +3343,9 @@ async function fetchSingleOpenCodeProfile(name, cookie, fetchGoWeb, fetchZen, no
     const cookieHash = crypto.createHash('sha256').update(cookie).digest('hex').slice(0, 12);
     return normalizeLimitProvider({
       provider: 'opencode', accountKey: hashKey('opencode', `cookie:${cookieHash}`),
-      accountName: name, accountLabel: name, planLabel: '', source: 'web', status: 'unavailable',
+      webAccountKey: hashKey('opencode', `cookie:${cookieHash}`),
+      accountName: name, accountLabel: name, planLabel: '', source: 'web',
+      sourceDetail: OPENCODE_COMPONENT_PROVENANCE_DETAIL, status: 'unavailable',
       updatedAt, windows: [], balanceUsd: null
     });
   }
@@ -2433,9 +3415,12 @@ async function fetchDeepSeekLimits(options = {}, deps = {}) {
     }
     const row = selectFundedRow(data.balance_infos);
     const accountKey = hashKey('deepseek', key);
-    const storePath = deps.deepseekStorePath || path.join(sharedDataDir({ env }), 'deepseek-balance.json');
+    const dataDir = sharedDataDir({ env });
+    const storePath = deps.deepseekStorePath || path.join(dataDir, 'deepseek-balance-v2.json');
+    const legacyStorePath = deps.deepseekLegacyStorePath
+      || (deps.deepseekStorePath ? null : path.join(dataDir, 'deepseek-balance.json'));
     const spend = recordConsumption(
-      { accountKey, currency: row.currency, paid: row.paid, now, storePath },
+      { accountKey, currency: row.currency, paid: row.paid, now, storePath, legacyStorePath },
       deps
     );
     return normalizeLimitProvider({
@@ -2445,12 +3430,23 @@ async function fetchDeepSeekLimits(options = {}, deps = {}) {
       source: 'api',
       status: 'ok',
       updatedAt: nowIso(now),
-      windows: [],
+      // DeepSeek has no rate-limit windows. The balance is the only quota it
+      // exposes, so it ships as a credits window: money, no wire percentage.
+      windows: [{
+        kind: 'billing',
+        metric: 'credits',
+        label: 'Balance',
+        remaining: row.amount,
+        currency: row.currency
+      }],
       balance: {
         amount: row.amount,
         currency: row.currency,
         todaySpend: spend.todaySpend,
+        weekSpend: spend.weekSpend,
         monthSpend: spend.monthSpend,
+        allTimeSpend: spend.allTimeSpend,
+        trackingSince: spend.trackingSince,
         monthSinceTracking: spend.monthSinceTracking
       }
     });
@@ -2465,145 +3461,148 @@ async function fetchDeepSeekLimits(options = {}, deps = {}) {
   }
 }
 
+function providerFetchers(deps = {}) {
+  return {
+    claude: (providerOptions, probeDeps) => fetchClaudeLimits(providerOptions, probeDeps),
+    codex: (providerOptions, probeDeps) => fetchCodexLimits(providerOptions, probeDeps),
+    cursor: (providerOptions, probeDeps) => fetchCursorLimits(providerOptions, probeDeps),
+    antigravity: (providerOptions, probeDeps) => fetchAntigravityLimits(providerOptions, probeDeps),
+    opencode: (providerOptions, probeDeps) => fetchOpenCodeLimits(providerOptions, probeDeps),
+    openrouter: (providerOptions, probeDeps) => openrouterLimits.fetchOpenRouterLimits(providerOptions, probeDeps),
+    deepseek: (providerOptions, probeDeps) => fetchDeepSeekLimits(providerOptions, probeDeps),
+    minimax: (providerOptions, probeDeps) => minimaxLimits.fetchMinimaxLimits(providerOptions, probeDeps),
+    mimo: (providerOptions, probeDeps) => fetchMimoLimits(providerOptions, probeDeps),
+    grok: (providerOptions, probeDeps) => grokLimits.fetchGrokLimits(providerOptions, probeDeps),
+    copilot: (providerOptions, probeDeps) => copilotLimits.fetchCopilotLimits(providerOptions, probeDeps),
+    kiro: (providerOptions, probeDeps) => kiroLimits.fetchKiroLimits(providerOptions, probeDeps),
+    zai: (providerOptions, probeDeps) => zaiLimits.fetchZaiLimits(providerOptions, probeDeps),
+    zaiteam: (providerOptions, probeDeps) => zaiTeamLimits.fetchZaiTeamLimits(providerOptions, probeDeps),
+    volcengine: (providerOptions, probeDeps) => volcengineLimits.fetchVolcengineLimits(providerOptions, probeDeps),
+    qoder: (providerOptions, probeDeps) => qoderLimits.fetchQoderLimits(providerOptions, probeDeps),
+    ollama: (providerOptions, probeDeps) => ollamaLimits.fetchOllamaLimits(providerOptions, probeDeps),
+    kimi: (providerOptions, probeDeps) => kimiLimits.fetchKimiLimits(providerOptions, probeDeps),
+    thirdparty: (providerOptions, probeDeps) => thirdPartyLimits.fetchThirdPartyLimits(providerOptions, probeDeps),
+    ...(deps.providerFetchers || {})
+  };
+}
+
+function providerPhysicalBoundMs(provider, options = {}, deps = {}) {
+  const configured = Number(deps.providerPhysicalBounds?.[provider]);
+  const base = Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_PROVIDER_PHYSICAL_BOUND_MS;
+  let jobs = 1;
+  if (provider === 'codex') {
+    const managed = normalizeCodexManagedAccounts(options.codexManagedAccounts || deps.codexManagedAccounts);
+    jobs = options.limitRefreshScope?.provider === 'codex' && [
+      'accountKey',
+      'accountId',
+      'managedAccountId',
+      'id',
+      'accountEmail',
+      'email',
+      'accountName',
+      'name',
+      'accountLabel'
+    ].some((key) => String(options.limitRefreshScope[key] || '').trim())
+      ? 1
+      : Math.max(1, managed.length + 1);
+  } else if (provider === 'mimo') {
+    const managed = Array.isArray(options.mimoManagedAccounts || deps.mimoManagedAccounts)
+      ? (options.mimoManagedAccounts || deps.mimoManagedAccounts)
+      : [];
+    jobs = options.limitRefreshScope?.provider === 'mimo' ? 1 : Math.max(1, managed.length);
+  }
+  return base * jobs;
+}
+
+function createProbeFetch(fetchFn, context = {}, deps = {}) {
+  return async (url, init = {}) => {
+    const signals = [context.signal, init.signal].filter(Boolean);
+    const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    const response = await fetchFn(url, {
+      ...init,
+      ...(signal ? { signal } : {})
+    });
+    if (Number(response?.status) >= 400) {
+      const retryAfterMs = parseRetryAfterHeader(
+        response?.headers?.get?.('retry-after'),
+        (deps.now || Date.now)()
+      );
+      if (retryAfterMs !== null) context.onRetryAfter?.(retryAfterMs);
+    }
+    return response;
+  };
+}
+
+function resolveProviderFetch(provider, deps = {}) {
+  if (typeof deps.fetch === 'function') return deps.fetch;
+  if (provider === 'grok') return grokLimits.resolveGrokFetch(deps);
+  return fetch;
+}
+
+async function probeLimitProvider(provider, options = {}, context = {}, deps = {}) {
+  const nowMs = (deps.now || Date.now)();
+  const fetcher = providerFetchers(deps)[provider];
+  if (!fetcher) return [statusProvider(provider, 'notConfigured', nowIso(nowMs))];
+  try {
+    const signal = context.signal ?? deps.signal;
+    const result = await fetcher(options, {
+      ...deps,
+      fetch: createProbeFetch(resolveProviderFetch(provider, deps), { ...context, signal }, deps),
+      signal
+    });
+    return (Array.isArray(result) ? result : [result]).filter(Boolean);
+  } catch (error) {
+    return [statusProvider(provider, providerStatusFromError(error), nowIso(nowMs))];
+  }
+}
+
 async function collectLimitsOnce(options = {}, deps = {}) {
   const enabled = parseBoolean(options.limitsEnabled ?? options.enabled, true);
   const refreshMs = normalizeLimitsRefreshMs(options.limitsRefreshMs ?? options.refreshMs);
   const nowMs = (deps.now || Date.now)();
   if (!enabled) return normalizeLimitsSummary({ updatedAt: nowIso(nowMs), refreshMs, providers: [] });
 
-  const fetchers = {
-    claude: (providerOptions) => fetchClaudeLimits(providerOptions, deps),
-    codex: (providerOptions) => fetchCodexLimits(providerOptions, deps),
-    cursor: (providerOptions) => fetchCursorLimits(providerOptions, deps),
-    antigravity: (providerOptions) => fetchAntigravityLimits(providerOptions, deps),
-    opencode: (providerOptions) => fetchOpenCodeLimits(providerOptions, deps),
-    deepseek: (providerOptions) => fetchDeepSeekLimits(providerOptions, deps),
-    minimax: (providerOptions) => minimaxLimits.fetchMinimaxLimits(providerOptions, deps),
-    mimo: (providerOptions) => fetchMimoLimits(providerOptions, deps),
-    grok: (providerOptions) => grokLimits.fetchGrokLimits(providerOptions, deps),
-    copilot: (providerOptions) => copilotLimits.fetchCopilotLimits(providerOptions, deps),
-    kiro: (providerOptions) => kiroLimits.fetchKiroLimits(providerOptions, deps),
-    zai: (providerOptions) => zaiLimits.fetchZaiLimits(providerOptions, deps),
-    zaiteam: (providerOptions) => zaiTeamLimits.fetchZaiTeamLimits(providerOptions, deps),
-    volcengine: (providerOptions) => volcengineLimits.fetchVolcengineLimits(providerOptions, deps),
-    qoder: (providerOptions) => qoderLimits.fetchQoderLimits(providerOptions, deps),
-    ollama: (providerOptions) => ollamaLimits.fetchOllamaLimits(providerOptions, deps),
-    kimi: (providerOptions) => kimiLimits.fetchKimiLimits(providerOptions, deps),
-    ...(deps.providerFetchers || {})
-  };
   const providers = [];
   const scope = options.limitRefreshScope;
   const selectedProviders = parseLimitProviders(options.limitProviders ?? options.providers)
     .filter((provider) => !scope?.provider || provider === scope.provider);
   for (const provider of selectedProviders) {
-    try {
-      const result = await fetchers[provider](options);
-      if (Array.isArray(result)) providers.push(...result);
-      else providers.push(result);
-    } catch (error) {
-      providers.push(statusProvider(provider, providerStatusFromError(error), nowIso(nowMs)));
-    }
+    providers.push(...await probeLimitProvider(provider, options, {}, deps));
   }
   return normalizeLimitsSummary({ updatedAt: nowIso(nowMs), refreshMs, providers });
 }
 
-function limitProviderMatchesScope(provider, scope) {
-  if (!provider || provider.provider !== scope?.provider) return false;
-  if (scope.accountKey) return provider.accountKey === scope.accountKey;
-  if (scope.accountEmail) return provider.accountEmail === scope.accountEmail;
-  if (scope.accountName) return provider.accountName === scope.accountName;
-  if (scope.accountLabel) return provider.accountLabel === scope.accountLabel;
-  if (scope.sourceDetail) return provider.sourceDetail === scope.sourceDetail;
-  return true;
-}
-
-function mergeScopedLimits(cachedInput, partialInput, scope, nowMs) {
-  const partial = normalizeLimitsSummary(partialInput);
-  if (!cachedInput) return partial;
-  const cached = normalizeLimitsSummary(cachedInput);
-  const existingTarget = cached.providers.filter((provider) => limitProviderMatchesScope(provider, scope));
-  const refreshedTarget = mergeCodexTransientWindows({
-    updatedAt: cached.updatedAt,
-    refreshMs: cached.refreshMs,
-    providers: existingTarget
-  }, partial, nowMs).providers;
-  const providers = [];
-  let inserted = false;
-  for (const provider of cached.providers) {
-    if (!limitProviderMatchesScope(provider, scope)) {
-      providers.push(provider);
-      continue;
-    }
-    if (!inserted) {
-      providers.push(...refreshedTarget);
-      inserted = true;
-    }
-  }
-  if (!inserted) providers.push(...refreshedTarget);
-  return normalizeLimitsSummary({
-    updatedAt: partial.updatedAt,
-    refreshMs: cached.refreshMs,
-    providers
-  });
-}
-
+// Compatibility facade for internal callers that still use the former
+// snapshot/refreshScope API. All ordering, identity, retention, and deadline
+// semantics are owned by LimitsRuntime; this facade only retains the former
+// full-snapshot TTL and has no in-flight coordination of its own.
 function createLimitsCollector(options = {}, deps = {}) {
+  const { createLimitsRuntime } = require('./limitsRuntime');
+  const runtime = createLimitsRuntime(options, { ...deps, autoStart: false, autoRetry: false });
   const refreshMs = normalizeLimitsRefreshMs(options.limitsRefreshMs ?? options.refreshMs);
-  // Seed the Codex transient-window retention from the last published limits.
-  // The collector is recreated on any settings change that reloads it (notably
-  // switching the active Codex account), and without a seed that restart wipes
-  // the 10-minute window that keeps an account's bars visible through a
-  // transient probe failure — which is exactly the cold RPC/token-refresh that
-  // tends to fail on the first tick after a switch. cachedAt stays 0 so the seed
-  // is never served as fresh: the first snapshot still refetches and only uses
-  // the seed as the retention baseline.
-  let cached = options.previousLimits ? normalizeLimitsSummary(options.previousLimits) : null;
-  let cachedAt = 0;
-  let inFlight = null;
-  const scopedInFlight = new Map();
-
-  async function refreshScope(scope) {
-    const current = (deps.now || Date.now)();
-    if (!scope?.provider) throw new TypeError('limit refresh scope requires a provider');
-    if (scope.provider === 'mimo') {
-      // Validate before collectLimitsOnce converts provider errors into a
-      // status row. An ambiguous multi-account scope must leave the cache
-      // untouched instead of replacing every MiMo account or probing them all.
-      mimoLimits.scopedMimoManagedAccounts(
-        options.mimoManagedAccounts || deps.mimoManagedAccounts,
-        scope
-      );
-    }
-    if (inFlight) return inFlight;
-    const scopeKey = JSON.stringify(scope);
-    if (scopedInFlight.has(scopeKey)) return scopedInFlight.get(scopeKey);
-    const task = collectLimitsOnce({
-      ...options,
-      limitsRefreshMs: refreshMs,
-      limitRefreshScope: scope
-    }, deps).then((summary) => {
-      cached = mergeScopedLimits(cached, summary, scope, current);
-      return cached;
-    }).finally(() => { scopedInFlight.delete(scopeKey); });
-    scopedInFlight.set(scopeKey, task);
-    return task;
-  }
-
-  async function snapshot(force = false) {
-    const current = (deps.now || Date.now)();
-    if (!force && cached && current - cachedAt < refreshMs) return cached;
-    if (inFlight) return inFlight;
-    inFlight = collectLimitsOnce({ ...options, limitsRefreshMs: refreshMs }, deps)
-      .then((summary) => {
-        cached = mergeCodexTransientWindows(cached, summary, current);
-        cachedAt = current;
-        return cached;
-      })
-      .finally(() => { inFlight = null; });
-    return inFlight;
-  }
-
-  return { refreshScope, snapshot };
+  const now = deps.now || Date.now;
+  let lastFullRefreshAt = null;
+  const refreshedSnapshot = async (scope, reason) => {
+    const result = await runtime.refresh(scope, reason);
+    return result?.snapshot || (result?.providers ? result : runtime.getSnapshot());
+  };
+  const refreshedFullSnapshot = async (reason) => {
+    const result = await refreshedSnapshot({}, reason);
+    lastFullRefreshAt = now();
+    return result;
+  };
+  return {
+    refreshScope: (scope) => refreshedSnapshot(scope, 'compat-scoped'),
+    snapshot: (force = false) => {
+      const stale = lastFullRefreshAt === null || now() - lastFullRefreshAt >= refreshMs;
+      return force || stale
+        ? refreshedFullSnapshot(force ? 'compat-full' : 'compat-stale')
+        : Promise.resolve(runtime.getSnapshot());
+    },
+    stop: () => runtime.stop()
+  };
 }
 
 function hashCursorAccountKey(account) {
@@ -2663,7 +3662,7 @@ async function fetchCursorLimits(_options = {}, deps = {}) {
     };
   }
 
-  const result = await probe(account.sessionToken);
+  const result = await probe(account.sessionToken, deps);
   if (!result.ok) {
     const kind = result.error?.kind === 'unauthorized' ? 'unauthorized' : 'unavailable';
     return {
@@ -2777,20 +3776,33 @@ async function fetchCursorLimits(_options = {}, deps = {}) {
 }
 
 module.exports = {
+  LIMIT_PROVIDER_IDS,
+  DEFAULT_PROVIDER_PHYSICAL_BOUND_MS,
+  PROVIDER_CLEANUP_GRACE_MS,
   collectLimitsOnce,
   claudeCommandCandidates,
   codexCommandCandidates,
   codexCommandSourceDetail,
+  createProbeFetch,
+  resolveProviderFetch,
   createLimitsCollector,
+  probeLimitProvider,
+  providerPhysicalBoundMs,
   fetchAntigravityLimits,
   fetchOpenCodeLimits,
+  fetchOpenRouterLimits: openrouterLimits.fetchOpenRouterLimits,
+  fetchThirdPartyLimits: thirdPartyLimits.fetchThirdPartyLimits,
   fetchSingleOpenCodeProfile,
+  claudeWebCookie,
+  normalizeClaudeWebCookieInput,
   fetchClaudeLimits,
   fetchCodexLimits,
   fetchCursorLimits,
   fetchDeepSeekLimits,
   fetchMimoLimits,
+  readCodexRpcWithCommand,
   runCodexLogin,
+  runProcessText,
   deepseekToken,
   selectFundedRow,
   minimaxToken,
@@ -2820,6 +3832,7 @@ module.exports = {
   ollamaSessionCookie,
   fetchOllamaLimits,
   kimiToken,
+  kimiWebToken,
   fetchKimiLimits,
   mapClaudeCliUsageToProvider,
   mapClaudeUsageToProvider,

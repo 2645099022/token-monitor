@@ -28,8 +28,20 @@ test('stores credential settings in a versioned provider document', (t) => {
   store.replaceSettingsCredentials({
     hubHostSecret: 'host-secret',
     secret: 'client-secret',
+    claudeWebCookie: 'sessionKey=claude-secret',
     deepseekApiKey: 'deepseek-key',
+    kimiWebAccessToken: 'kimi-web-token',
     opencodeProfiles: { work: { cookie: 'auth=secret', enabled: true } },
+    openrouterProfiles: { personal: { apiKey: 'sk-or-secret', enabled: true } },
+    thirdPartyProfiles: {
+      relay: {
+        adapter: 'newapi-account',
+        baseUrl: 'https://api.example.com',
+        accessToken: 'system-access',
+        userId: '42',
+        enabled: true
+      }
+    },
     zaiTeamOrganizationId: 'organization-id',
     qoderCookie: ''
   });
@@ -38,8 +50,14 @@ test('stores credential settings in a versioned provider document', (t) => {
   assert.equal(document.version, 1);
   assert.equal(document.credentials.hub.hostSecret, 'host-secret');
   assert.equal(document.credentials.hub.clientSecret, 'client-secret');
+  assert.equal(document.credentials.providers.claude.webCookie, 'sessionKey=claude-secret');
   assert.equal(document.credentials.providers.deepseek.apiKey, 'deepseek-key');
+  assert.equal(document.credentials.providers.kimi.webAccessToken, 'kimi-web-token');
   assert.equal(document.credentials.providers.opencode.profiles.work.cookie, 'auth=secret');
+  assert.equal(document.credentials.providers.openrouter.profiles.personal.apiKey, 'sk-or-secret');
+  assert.equal(document.credentials.providers.thirdparty.profiles.relay.accessToken, 'system-access');
+  assert.equal(document.credentials.providers.thirdparty.profiles.relay.userId, '42');
+  assert.equal(document.credentials.providers.thirdparty.profiles.relay.baseUrl, 'https://api.example.com');
   assert.equal(document.credentials.providers.zaiTeam.organizationId, 'organization-id');
   assert.equal(document.credentials.providers.qoder, undefined);
   assert.equal(document.migrations.settings, 1);
@@ -47,18 +65,40 @@ test('stores credential settings in a versioned provider document', (t) => {
   assert.deepEqual(store.settingsCredentials(), {
     hubHostSecret: 'host-secret',
     secret: 'client-secret',
+    claudeWebCookie: 'sessionKey=claude-secret',
     opencodeProfiles: { work: { cookie: 'auth=secret', enabled: true } },
+    openrouterProfiles: { personal: { apiKey: 'sk-or-secret', enabled: true } },
+    thirdPartyProfiles: {
+      relay: {
+        adapter: 'newapi-account',
+        baseUrl: 'https://api.example.com',
+        accessToken: 'system-access',
+        userId: '42',
+        enabled: true
+      }
+    },
     deepseekApiKey: 'deepseek-key',
+    kimiWebAccessToken: 'kimi-web-token',
     zaiTeamOrganizationId: 'organization-id'
   });
 });
 
 test('removes credential fields from settings without mutating runtime state', () => {
-  const settings = { language: 'auto', deepseekApiKey: 'secret', opencodeProfiles: { a: { cookie: 'secret' } } };
+  const settings = {
+    language: 'auto',
+    deepseekApiKey: 'secret',
+    opencodeProfiles: { a: { cookie: 'secret' } },
+    openrouterProfiles: { b: { apiKey: 'secret' } },
+    thirdPartyProfiles: {
+      c: { adapter: 'newapi-token', baseUrl: 'https://api.example.com', apiKey: 'secret' }
+    }
+  };
   const clean = stripCredentialSettings(settings);
   assert.deepEqual(clean, { language: 'auto' });
   assert.equal(settings.deepseekApiKey, 'secret');
   assert.equal(settings.opencodeProfiles.a.cookie, 'secret');
+  assert.equal(settings.openrouterProfiles.b.apiKey, 'secret');
+  assert.equal(settings.thirdPartyProfiles.c.apiKey, 'secret');
   assert.equal(hasCredentialSettings(settings), true);
   assert.equal(hasCredentialSettings(clean), false);
 });
@@ -67,15 +107,24 @@ test('renderer redaction defaults new credential fields to hidden with explicit 
   const settings = {
     hubHostSecret: 'host-secret',
     secret: 'client-secret',
+    claudeWebCookie: 'sessionKey=claude-secret',
     deepseekApiKey: 'provider-secret',
-    opencodeProfiles: { work: { cookie: 'auth=secret' } }
+    opencodeProfiles: { work: { cookie: 'auth=secret' } },
+    openrouterProfiles: { personal: { apiKey: 'sk-or-secret' } },
+    thirdPartyProfiles: {
+      relay: { adapter: 'newapi-token', baseUrl: 'https://api.example.com', apiKey: 'sk-newapi-secret' }
+    }
   };
   const redacted = credentialSettingsForRenderer(settings, { expose: ['hubHostSecret', 'secret'] });
   assert.equal(redacted.hubHostSecret, 'host-secret');
   assert.equal(redacted.secret, 'client-secret');
+  assert.equal(redacted.claudeWebCookie, '');
   assert.equal(redacted.deepseekApiKey, '');
   assert.equal(redacted.opencodeProfiles, '');
+  assert.equal(redacted.openrouterProfiles, '');
+  assert.equal(redacted.thirdPartyProfiles, '');
   assert.equal(redacted.kimiApiKey, '');
+  assert.equal(redacted.kimiWebAccessToken, '');
 });
 
 test('migrates legacy settings once and keeps an existing credential authoritative', (t) => {
@@ -136,6 +185,59 @@ test('reads private files through a validated descriptor', (t) => {
   };
   assert.match(readRegularFileNoFollow(filePath, { fs: fsApi, description: 'Credential store' }), /"version":1/);
   assert.equal(typeof readTarget, 'number');
+});
+
+test('rejects private files larger than the configured read limit', (t) => {
+  const dataDir = tempDataDir(t);
+  const filePath = path.join(dataDir, 'oversized.json');
+  fs.writeFileSync(filePath, 'x'.repeat(33), 'utf8');
+  const fsApi = Object.create(fs);
+  let readCalls = 0;
+  fsApi.readFileSync = (...args) => {
+    readCalls += 1;
+    return fs.readFileSync(...args);
+  };
+
+  assert.throws(() => readRegularFileNoFollow(filePath, {
+    fs: fsApi,
+    description: 'Private file',
+    maxBytes: 32
+  }), /exceeds 32 bytes/);
+  assert.equal(readCalls, 0);
+});
+
+test('keeps bounded private reads bounded when the file grows after fstat', (t) => {
+  const dataDir = tempDataDir(t);
+  const filePath = path.join(dataDir, 'growing.json');
+  fs.writeFileSync(filePath, 'small', 'utf8');
+  const fsApi = Object.create(fs);
+  fsApi.fstatSync = (descriptor) => {
+    const stat = fs.fstatSync(descriptor);
+    fs.appendFileSync(filePath, 'x'.repeat(64), 'utf8');
+    return stat;
+  };
+
+  assert.throws(() => readRegularFileNoFollow(filePath, {
+    fs: fsApi,
+    description: 'Private file',
+    maxBytes: 16
+  }), /exceeds 16 bytes/);
+});
+
+test('bounded private reads continue after a short descriptor read', (t) => {
+  const dataDir = tempDataDir(t);
+  const filePath = path.join(dataDir, 'short-read.json');
+  fs.writeFileSync(filePath, 'complete', 'utf8');
+  const fsApi = Object.create(fs);
+  fsApi.readSync = (descriptor, buffer, offset, length, position) => (
+    fs.readSync(descriptor, buffer, offset, Math.min(length, 2), position)
+  );
+
+  assert.equal(readRegularFileNoFollow(filePath, {
+    fs: fsApi,
+    description: 'Private file',
+    maxBytes: 16
+  }), 'complete');
 });
 
 test('does not overwrite a corrupt credential store', (t) => {

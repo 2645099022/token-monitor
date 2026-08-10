@@ -4,9 +4,9 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
-const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, Notification, screen, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, net, Notification, screen, session, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
-const { defaultDeviceId, generateHubSecret, lanIpv4Addresses, loadDotEnv, pidFilePath, sharedDataDir } = require('../shared/config');
+const { defaultDeviceId, generateHubSecret, lanIpv4Addresses, loadDotEnv, pidFilePath, readJson, sharedDataDir } = require('../shared/config');
 const {
   CredentialStore,
   credentialSettingsForRenderer,
@@ -19,23 +19,55 @@ const {
 const { installSafeStdout } = require('../shared/safeStdio');
 const { appVersion } = require('../shared/appVersion');
 const { exportFileSet, exportSignature, EXPORT_FILENAMES } = require('../shared/exporter');
+const { createDefaultTrayLayout, normalizeTrayLayout } = require('../shared/trayLayout');
 const motionPreferenceApi = require('./motionPreference');
+const { createClaudeWebFetch } = require('./claudeWebFetch');
+const {
+  expandedBoundsForCollapse,
+  normalWindowBounds,
+  persistWindowState,
+  rebuildWindowBounds,
+  restoreWindowMaximized,
+  restoreWindowMaximizedForReveal,
+  setWindowMaximizable,
+  shouldPersistWindowBounds,
+  shouldTrackWindowMaximized,
+  suspendWindowMaximized
+} = require('./windowState');
 
 // Install EPIPE suppression before anything that might log. Without this,
 // a closed parent pipe turns the next log call into an unhandled 'error'
 // event and Electron pops a "JavaScript error in the main process" dialog.
 installSafeStdout();
+const electronClaudeWebFetch = createClaudeWebFetch(net);
 const { DEFAULT_CLIENTS, KNOWN_CLIENTS, clientsCsvForSetting } = require('../shared/clientTracking');
-const { startCollector, lookupModelPricing, normalizeHistoryIntervalMs } = require('../shared/collector');
+const { clientDiagnosticRoots, lookupModelPricing, normalizeHistoryIntervalMs, visibleDiagnosticRoots } = require('../shared/collector');
+const { deviceRecordFromAnchor } = require('../shared/anchorSeed');
+const { sendWhenRendererReady } = require('./deferredWindowSend');
+const { createDeviceRuntime } = require('../shared/deviceRuntime');
+const { createDiagnosticJournal } = require('../shared/diagnosticJournal');
+const { createDiagnosticReportGenerator } = require('./diagnostics');
+const { createDiagnosticSnapshotBuilder, diagnosticStreamDetailCode, selectLocalDeviceRecord } = require('./diagnosticSnapshot');
 const { customPricingPath } = require('../shared/tokscaleConfig');
 const { applyCustomPricing, normalizeCustomPricingSetting } = require('../shared/tokscaleCustomPricing');
 const { createHub } = require('../hub/server');
-const { collectLimitsOnce, deepseekToken, normalizeLimitsRefreshMs, parseBoolean, parseLimitProviders, runCodexLogin, minimaxToken, copilotToken, zaiToken, zaiRegion, zaiTeamToken, volcengineCredentials, qoderCookie, kimiToken, ollamaSessionCookie } = require('../shared/limitCollector');
-const { mergeCodexTransientWindows } = require('../shared/limits');
+const { claudeWebCookie, deepseekToken, fetchClaudeLimits, normalizeClaudeWebCookieInput, normalizeLimitsRefreshMs, parseBoolean, parseLimitProviders, runCodexLogin, minimaxToken, copilotToken, zaiToken, zaiRegion, zaiTeamToken, volcengineCredentials, qoderCookie, kimiToken, kimiWebToken, ollamaSessionCookie } = require('../shared/limitCollector');
 const { fetchOllamaLimits, rememberOllamaValidation } = require('../shared/ollamaLimits');
 const { copilotLoginErrorMessage, isAllowedVerificationUrl, runCopilotDeviceFlowLogin } = require('../shared/copilotDeviceFlow');
-const { codexAuthIdentity, hashAccountKey } = require('../shared/codexAuth');
+const {
+  codexAuthIdentity,
+  codexManagedAccountIdentityKey,
+  codexManagedAccountMatchesIdentity,
+  hashAccountKey,
+  preserveCodexManagedHydrationCollisions,
+  upgradeCodexManagedAccountIdentity
+} = require('../shared/codexAuth');
 const { codexLoginUrlFromOutput, isAllowedCodexLoginUrl } = require('../shared/codexLogin');
+const {
+  authWithSelectedCodexWorkspace,
+  listCodexWorkspaces,
+  normalizeWorkspaceId
+} = require('../shared/codexWorkspaces');
 const {
   codexAccountMatchesIdentity,
   liveCodexAuthPath,
@@ -67,18 +99,27 @@ const {
 } = require('../shared/tokscaleUpdater');
 const {
   appUpdateInstallSupport,
+  classifyAppUpdateError,
   checkLatestRelease,
   deriveAppUpdateAvailability,
   downloadedAppUpdateMatchesLatest,
-  GITHUB_REPO,
+  installFailureErrorKind,
+  latestFromUpdaterInfo,
   mergeLatestReleaseMetadata,
-  shouldSkipAppUpdateCheck
+  providerUpdateCheckAvailability,
+  resolveAppUpdateCheckError,
+  shouldDownloadAutomaticAppUpdate,
+  shouldSkipAppUpdateCheck,
+  updateInstallQuitPolicy
 } = require('../shared/appUpdater');
 const cursorAuth = require('../shared/cursorAuth');
 const cursorProbe = require('../shared/cursorProbe');
 const opencodeWeb = require('../shared/opencodeWeb');
-const semver = require('semver');
+const openrouterLimits = require('../shared/openrouterLimits');
+const thirdPartyLimits = require('../shared/thirdPartyLimits');
+const subscriptionDisplay = require('../shared/subscriptionDisplay');
 const { normalizeCurrency, resolveEffectiveRates, configureRates } = require('../shared/currency');
+const { normalizeCompactTokenUnits } = require('../shared/compactTokens');
 const { fetchRates, isCacheStale } = require('../shared/exchangeRates');
 const {
   applyArchivedClientUsage,
@@ -92,6 +133,7 @@ const {
   clearSessionUsageArchive,
   normalizeSessionUsageArchive,
   readSessionUsageArchive,
+  sessionUsageArchivePath,
   sessionUsageArchiveDate,
   writeSessionUsageArchive
 } = require('../shared/sessionUsageArchive');
@@ -114,8 +156,23 @@ const {
   normalizeMimoCookieHeader
 } = require('../shared/mimoLimits');
 const { historyPreview, historyRevision } = require('../shared/history');
-const { readSessionDetail } = require('../shared/sessionDetail');
+const { completeHistorySource, resolveCompleteHistory } = require('./historySource');
+const { readSessionDetailForPlatform } = require('../shared/sessionDetailResolver');
 const { startDiscordRpc, stopDiscordRpc, updateDiscordRpc } = require('./discordRpc');
+const {
+  commitMacWidgetSnapshot,
+  discardMacWidgetSnapshot,
+  prepareMacWidgetSnapshotUpdate,
+  resolveMacWidgetSnapshotPath,
+  syncMacWidgetSnapshotDirectory
+} = require('./macWidgetBridge');
+const { createMacWidgetSnapshotController } = require('./macWidgetSnapshotController');
+const { macWidgetHistorySourceKey, resolveMacWidgetHistory } = require('./macWidgetHistory');
+const { parseMacWidgetDeepLink } = require('./macWidgetDeepLink');
+const { createMacWidgetLaunchServicesRecovery } = require('./macWidgetLaunchServicesRecovery');
+const { projectLimitStatsForDisplay } = require('./limitStatsPresentation');
+const { normalizeWidgetURLScheme } = require('../shared/macWidgetConfig');
+const { DEFAULT_WIDGET_KIND, requestMacWidgetReload, resetMacWidgetReloadThrottle } = require('./macWidgetReloader');
 const linuxAutostart = require('./linuxAutostart');
 const { codexAccountIdForProvider, localLiveCodexProvider } = require('./renderer/accountIdentity');
 const {
@@ -127,7 +184,8 @@ const {
   popoverBounds,
   reconcileCodexAccountSelection,
   sortCodexAccountsForDisplay,
-  shouldUseTemplateTrayIcon
+  shouldUseTemplateTrayIcon,
+  trayShowsTitle
 } = require('./tray');
 const {
   macActivationPolicyMode,
@@ -137,9 +195,24 @@ const {
   trayToggleAction
 } = require('./trayModeSettings');
 const { SERVICE_STATUS_PROVIDERS, createServiceStatusClient } = require('./serviceStatus');
+const { createUpdateInstallQuitGuard, observeUpdateInstallHandoff } = require('./updateInstallQuit');
 const { classifyStreamFailure } = require('./syncConnection');
 const { composeLocalSyncStats } = require('./syncDisplayStats');
 const { createSyncUploadScheduler, normalizeSyncUploadIntervalMs } = require('./syncUploadScheduler');
+const {
+  classifySettingsChange,
+  diagnosticConfigurationFromSettings,
+  envelopeFromSettings,
+  limitsConfigFromSettings,
+  usageConfigFromSettings
+} = require('./runtimeConfig');
+const {
+  canRefreshUsageRuntime,
+  drainPendingUsageClientRefreshes: drainPendingUsageClientRefreshQueue,
+  runLimitInvalidation,
+  runManualDeviceRefresh,
+  settingsLimitInvalidationPlan
+} = require('./deviceRuntimeCoordinator');
 const { describeWindowBehavior, normalizeWindowBehaviorSettings } = require('./windowBehavior');
 const {
   normalizeWindowToggleShortcut,
@@ -164,6 +237,12 @@ const {
   moveFloatingBubbleBounds
 } = require('./floatingBubble');
 const { applyWindowsChrome } = require('./windowsChrome');
+const { setMoveToActiveSpace } = require('./macosSpaceBehavior');
+const {
+  WINDOWS_BACKDROP_ACCENT,
+  normalizeWindowsBackdropMode
+} = require('./windowsBackdropMode');
+const { applyWindowsAccentBlur } = require('./windowsBackdrop');
 
 if (!app.isPackaged) loadDotEnv();
 
@@ -185,11 +264,17 @@ const CSP_HEADER = [
   "form-action 'none'",
   "frame-ancestors 'none'"
 ].join('; ');
-const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon']);
+const TRAY_CONTENT_VALUES = new Set(['tokens', 'cost', 'both', 'tokensAll', 'costAll', 'bothAll', 'limitsAllSessions', 'bars', 'barsSession', 'barsWeekly', 'barsAllSessions', 'icon', 'custom']);
 const HUB_MODE_VALUES = new Set(['local', 'client', 'host']);
 const LANGUAGE_VALUES = new Set(LANGUAGE_OPTIONS.map((option) => option.value));
-const COLLECTION_MODE_VALUES = new Set(['live', 'interval']);
+const COLLECTION_MODE_VALUES = new Set(['live', 'smart', 'interval']);
 const COLLECTION_INTERVAL_OPTIONS = [5 * 60 * 1000, 15 * 60 * 1000, 30 * 60 * 1000];
+// Smart mode's cadence is fixed and resolved directly in collectorIntervalMs(),
+// so it stays out of COLLECTION_INTERVAL_OPTIONS: that list validates the
+// persisted collectionIntervalMs, and admitting 10m there would let a
+// smart-mode value survive a switch back to live/interval and silently
+// change that mode's backstop interval.
+const SMART_COLLECTION_INTERVAL_MS = 10 * 60 * 1000;
 const DEFAULT_COLLECTION_INTERVAL_MS = 5 * 60 * 1000;
 const HUB_DEFAULT_PORT = 17321;
 const KNOWN_CLIENT_LIST = KNOWN_CLIENTS.split(',').map((id) => ({ id }));
@@ -206,9 +291,16 @@ let persistedSettingsSnapshot = null;
 let credentialStore = null;
 let credentialStorageErrorShown = false;
 let sessionUsageArchive = null;
+let lastSessionUsageArchiveUpdate = {
+  at: null,
+  durationMs: null,
+  failureCode: null
+};
 let rendererViewState = normalizeInitialRendererViewState();
 const serviceStatusClient = createServiceStatusClient();
 const STATUS_PAGE_HOSTS = new Set(SERVICE_STATUS_PROVIDERS.map((provider) => new URL(provider.pageUrl).hostname));
+const diagnosticJournal = createDiagnosticJournal();
+const recoverMacWidgetLaunchServicesRegistration = createMacWidgetLaunchServicesRecovery();
 
 app.setName(APP_NAME);
 if (process.platform === 'win32') app.setAppUserModelId('com.javis.tokenmonitor');
@@ -224,6 +316,16 @@ function normalizeHomeLimitAccountCount(value) {
   if (!Number.isFinite(count)) return HOME_LIMIT_ACCOUNT_COUNT_DEFAULT;
   return Math.max(1, Math.min(HOME_LIMIT_ACCOUNT_COUNT_MAX, count));
 }
+
+let pendingMacWidgetOpen = null;
+app.on('open-url', (event, url) => {
+  const urlScheme = macWidgetConfiguration()?.urlScheme || 'token-monitor';
+  const destination = parseMacWidgetDeepLink(url, urlScheme);
+  if (!destination) return;
+  event.preventDefault();
+  pendingMacWidgetOpen = destination;
+  if (app.isReady()) setImmediate(openMainWindowFromWidget);
+});
 
 function defaultSettings() {
   const envHubUrl = process.env.TOKEN_MONITOR_HUB_URL || '';
@@ -244,17 +346,22 @@ function defaultSettings() {
     glassOpacity: 68,
     glassBlur: 32,
     systemGlass: true,
+    windowsBackdrop: 'acrylic',
     reduceMotion: 'system',
     showLiveDot: true,
     showToolIcons: true,
     titleIconOnly: true,
     showCompactTotalTokens: false,
+    compactTokenUnits: 'western',
+    tokenRateMode: 'speed',
     heatmapMetric: 'cost',
+    homeActiveDaysWindow: 'all',
     themeColors: {},
     vendorColors: {},
     floatingBubbleEnabled: false,
     floatingBubbleTrigger: 'click',
     floatingBubbleContent: 'icon',
+    floatingBubbleCustomLayout: createDefaultTrayLayout(),
     floatingBubbleBounds: null,
     lastViewState: { period: 'today', breakdown: 'tool' },
     discordRpcEnabled: false,
@@ -296,20 +403,38 @@ function defaultSettings() {
     limitsRefreshMs: normalizeLimitsRefreshMs(process.env.TOKEN_MONITOR_LIMITS_REFRESH_MS),
     showLimitSource: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_SOURCE, false),
     maskLimitAccountEmails: false,
+    claudePrepaidBalanceEnabled: parseBoolean(process.env.TOKEN_MONITOR_CLAUDE_PREPAID_BALANCE, true),
+    opencodeLocalLimitsEnabled: false,
     showLimitUsed: parseBoolean(process.env.TOKEN_MONITOR_SHOW_LIMIT_USED, false),
+    // Manual subscription metadata. Plain preferences, not credentials, so they
+    // live in settings.json and cross to the renderer unredacted.
+    subscriptions: [],
+    // Local records left behind when this device joined a hub that already had a
+    // list, with the hub they were held back from. Kept until the user says
+    // whether to add or drop them.
+    subscriptionsOrphaned: { hubUrl: '', records: [] },
+    // Which hub `subscriptions` is currently a cache of, or '' when this device
+    // owns the list outright.
+    subscriptionsCacheHub: '',
     windowBounds: null,
+    windowMaximized: false,
     zoomFactor: 1,
     showTrayIcon: true,
     trayMode: false,
     trayContent: 'tokens',
+    trayCustomLayout: createDefaultTrayLayout(),
     showTrayProviderBadge: false,
     windowToggleShortcut: '',
     currency: normalizeCurrency(process.env.TOKEN_MONITOR_CURRENCY || 'USD'),
     currencyRates: {},
     startAtLogin: false,
+    automaticAppUpdates: false,
     language: 'auto',
+    claudeWebCookie: '',
     opencodeCookie: '',
     opencodeProfiles: {},
+    openrouterProfiles: {},
+    thirdPartyProfiles: {},
     deepseekApiKey: '',
     minimaxApiKey: '',
     copilotApiToken: '',
@@ -325,6 +450,7 @@ function defaultSettings() {
     qoderCookie: '',
     qoderSite: 'global',
     kimiApiKey: '',
+    kimiWebAccessToken: '',
     ollamaCookie: '',
     codexManagedAccounts: [],
     mimoManagedAccounts: [],
@@ -342,10 +468,25 @@ function normalizeCollectionMode(value, fallback = 'live') {
   return COLLECTION_MODE_VALUES.has(fallback) ? fallback : 'live';
 }
 
+// Which throughput reading the title-mark reveal shows. 'speed' is estimated output tokens
+// per second of model-busy time; 'burn' is every token per minute of the same window. Both
+// derive from the timed totals the collector already puts on the period — this only picks
+// the framing, and neither costs an extra scan.
+function normalizeTokenRateMode(value) {
+  return value === 'burn' ? 'burn' : 'speed';
+}
+
 function normalizeHeatmapMetric(value, fallback = 'cost') {
   const next = String(value || '').trim();
   if (next === 'tokens' || next === 'cost') return next;
   return fallback === 'tokens' ? 'tokens' : 'cost';
+}
+
+function normalizeHomeActiveDaysWindow(value, fallback = 'all') {
+  const next = String(value || '').trim();
+  if (next === 'year') return 'year';
+  if (next === 'all') return 'all';
+  return fallback === 'year' ? 'year' : 'all';
 }
 
 function normalizeCollectionIntervalMs(value, fallback = DEFAULT_COLLECTION_INTERVAL_MS) {
@@ -356,15 +497,69 @@ function normalizeCollectionIntervalMs(value, fallback = DEFAULT_COLLECTION_INTE
 }
 
 function collectorIntervalMs() {
-  return normalizeCollectionIntervalMs(settings?.collectionIntervalMs);
+  return normalizeCollectionMode(settings?.collectionMode) === 'smart'
+    ? SMART_COLLECTION_INTERVAL_MS
+    : normalizeCollectionIntervalMs(settings?.collectionIntervalMs);
 }
 
 function collectorWatchEnabled() {
+  return normalizeCollectionMode(settings?.collectionMode) !== 'interval';
+}
+
+function collectorWatchTriggersCollection() {
   return normalizeCollectionMode(settings?.collectionMode) === 'live';
+}
+
+function collectorIntervalRequiresActivity() {
+  return normalizeCollectionMode(settings?.collectionMode) === 'smart';
 }
 
 function syncUploadIntervalMs() {
   return normalizeSyncUploadIntervalMs(settings?.syncUploadIntervalMs);
+}
+
+function electronUsageConfig(errorPrefix) {
+  return usageConfigFromSettings(settings, {
+    agentVersion: appVersion(),
+    agentRuntime: 'electron-widget',
+    commandTimeoutMs: 120 * 1000,
+    defaultDeviceId: defaultDeviceId(),
+    intervalMs: collectorIntervalMs(),
+    historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
+    watchEnabled: collectorWatchEnabled(),
+    // No watchUsePolling on purpose. The widget states no preference so the
+    // shared default in resolveWatchUsePolling() governs and the widget cannot
+    // drift from the headless agent, which has never passed one. That default
+    // is native events on every platform: chokidar 4 dropped the bundled
+    // fsevents backend, so every platform now watches through the same
+    // per-directory fs.watch path, and the earlier attempt that observed missed
+    // events ran on the chokidar 3 backend that no longer exists. Where the
+    // kernel cannot supply watch descriptors the collector degrades to polling
+    // by itself; TOKEN_MONITOR_WATCH_POLLING overrides in both directions.
+    watchTriggersCollection: collectorWatchTriggersCollection(),
+    intervalRequiresActivity: collectorIntervalRequiresActivity(),
+    watchDebounceMs: 1500,
+    dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
+    onError: (error, reason) => console.log(`[${errorPrefix}] ${reason}: ${error.message}`),
+    logger: (message) => console.log(`[${errorPrefix}] ${message}`)
+  });
+}
+
+function electronLimitsConfig() {
+  return limitsConfigFromSettings(settings, {
+    env: process.env,
+    defaultLimitProviders: defaultLimitProviders(),
+    codexManagedAccounts: codexManagedAccountsForCollector(),
+    mimoManagedAccounts: mimoManagedAccountsForCollector()
+  });
+}
+
+function electronDeviceEnvelope() {
+  return envelopeFromSettings(settings, {
+    agentVersion: appVersion(),
+    agentRuntime: 'electron-widget',
+    defaultDeviceId: defaultDeviceId()
+  });
 }
 
 function defaultLimitProviders() {
@@ -373,6 +568,39 @@ function defaultLimitProviders() {
 
 function defaultLimitProviderOrder() {
   return parseLimitProviders().join(',');
+}
+
+function normalizeClaudeWebCookie(value) {
+  return normalizeClaudeWebCookieInput(value);
+}
+
+function currentClaudeWebCookie() {
+  return settings?.claudeWebCookie || claudeWebCookie(process.env);
+}
+
+function persistClaudeWebCookieRenewal({ previousCookie, cookie } = {}) {
+  if (!settings?.claudeWebCookie) return false;
+  let expected;
+  let renewed;
+  try {
+    expected = normalizeClaudeWebCookie(previousCookie);
+    renewed = normalizeClaudeWebCookie(cookie);
+  } catch (_) {
+    return false;
+  }
+  if (!renewed || normalizeClaudeWebCookie(settings.claudeWebCookie) !== expected) return false;
+  if (settings.claudeWebCookie === renewed) return true;
+  settings.claudeWebCookie = renewed;
+  saveSettings({ throwOnError: true });
+  return true;
+}
+
+function electronLimitsDeps() {
+  return {
+    claudeWebFetch: electronClaudeWebFetch,
+    resolveConfigSnapshot: () => electronLimitsConfig(),
+    onClaudeWebCookieRenewed: persistClaudeWebCookieRenewal
+  };
 }
 
 function normalizeDeepSeekApiKey(value) {
@@ -470,6 +698,14 @@ function currentKimiApiKey() {
   return settings?.kimiApiKey || kimiToken(process.env);
 }
 
+function normalizeKimiWebAccessToken(value) {
+  return kimiWebToken({}, String(value || ''));
+}
+
+function currentKimiWebAccessToken() {
+  return settings?.kimiWebAccessToken || kimiWebToken(process.env);
+}
+
 function normalizeCopilotEnterpriseHost(value) {
   return String(value || '').trim().replace(/^https?:\/\//i, '').split('/')[0].toLowerCase();
 }
@@ -477,8 +713,28 @@ function normalizeCopilotEnterpriseHost(value) {
 let codexLoginController = null;
 let codexLoginFlowId = '';
 let codexLoginCanCancel = false;
+let codexWorkspaceSelection = null;
+let codexWorkspaceLabelHydrationPromise = null;
 let copilotLoginController = null;
 let copilotLoginFlowId = '';
+const CODEX_WORKSPACE_LABEL_HYDRATION_CONCURRENCY = 3;
+
+// Startup label hydration is a small one-shot map. LimitsRuntime's bounded
+// executor owns lane-aware provider refresh state, so it is not reusable here.
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  const workerCount = Math.min(items.length, Math.max(1, Math.trunc(concurrency) || 1));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
 
 function normalizeCodexManagedAccounts(value) {
   if (!Array.isArray(value)) return [];
@@ -489,15 +745,30 @@ function normalizeCodexManagedAccounts(value) {
     const id = String(account.id || '').trim();
     const homePath = String(account.homePath || '').trim();
     if (!id || !homePath) continue;
+    const email = String(account.email || '').trim().toLowerCase();
+    const workspaceAccountId = normalizeWorkspaceId(
+      account.workspaceAccountId
+      || account.providerAccountId
+    );
+    const rawWorkspaceLabel = String(account.workspaceLabel || '').trim();
+    const workspaceKind = account.workspaceKind === 'personal' ? 'personal' : '';
     const accountKey = String(account.accountKey || '').trim();
-    const dedupe = accountKey || String(account.email || '').trim().toLowerCase() || id;
+    const dedupe = codexManagedAccountIdentityKey({
+      id,
+      accountKey,
+      email,
+      workspaceAccountId
+    });
     if (seen.has(dedupe)) continue;
     seen.add(dedupe);
     accounts.push({
       id,
-      email: String(account.email || '').trim().toLowerCase(),
+      email,
       accountKey,
       accountLabel: String(account.accountLabel || '').trim(),
+      workspaceAccountId,
+      workspaceLabel: workspaceKind ? '' : rawWorkspaceLabel,
+      workspaceKind,
       homePath,
       authPath: String(account.authPath || path.join(homePath, 'auth.json')).trim(),
       addedAt: account.addedAt || new Date().toISOString(),
@@ -508,10 +779,118 @@ function normalizeCodexManagedAccounts(value) {
   return accounts;
 }
 
+function hydrateCodexManagedAccounts(value) {
+  const storedAccounts = normalizeCodexManagedAccounts(value);
+  const hydratedAccounts = storedAccounts.map((account) => {
+    try {
+      const auth = JSON.parse(readRegularFileNoFollow(account.authPath, {
+        fs,
+        description: 'Managed Codex auth',
+        encoding: 'utf8'
+      }));
+      return upgradeCodexManagedAccountIdentity(account, codexAuthIdentity(auth));
+    } catch (_) {
+      return account;
+    }
+  });
+  const resolvedAccounts = preserveCodexManagedHydrationCollisions(storedAccounts, hydratedAccounts);
+  if (resolvedAccounts.some((account, index) => account !== hydratedAccounts[index])) {
+    console.warn('[codex] Managed account identity hydration found a collision; preserved stored identities.');
+  }
+  return resolvedAccounts;
+}
+
+function hydrateCodexManagedWorkspaceLabels() {
+  if (codexWorkspaceLabelHydrationPromise) return codexWorkspaceLabelHydrationPromise;
+  if (
+    settings?.limitsEnabled === false
+    || !parseLimitProviders(settings?.limitProviders).includes('codex')
+  ) return Promise.resolve(false);
+  const candidates = normalizeCodexManagedAccounts(settings?.codexManagedAccounts)
+    .filter((account) => (
+      account.enabled !== false
+      && account.workspaceAccountId
+      && !account.workspaceLabel
+      && !account.workspaceKind
+    ));
+  if (candidates.length === 0) return Promise.resolve(false);
+
+  const task = mapWithConcurrency(
+    candidates,
+    CODEX_WORKSPACE_LABEL_HYDRATION_CONCURRENCY,
+    async (account) => {
+      try {
+        const auth = JSON.parse(readRegularFileNoFollow(account.authPath, {
+          fs,
+          description: 'Managed Codex auth',
+          encoding: 'utf8'
+        }));
+        const workspaces = await listCodexWorkspaces(auth, { env: process.env });
+        const workspace = workspaces.find((entry) => entry.id === account.workspaceAccountId);
+        return workspace
+          ? {
+              id: account.id,
+              workspaceAccountId: account.workspaceAccountId,
+              label: workspace.label,
+              workspaceKind: workspace.workspaceKind
+            }
+          : null;
+      } catch (_) {
+        return null;
+      }
+    }
+  ).then((results) => {
+    const labels = new Map(
+      results.filter(Boolean).map((result) => [result.id, result])
+    );
+    if (labels.size === 0) return false;
+    let changed = false;
+    const accounts = normalizeCodexManagedAccounts(settings?.codexManagedAccounts).map((account) => {
+      const resolved = labels.get(account.id);
+      if (
+        !resolved
+        || account.workspaceLabel
+        || account.workspaceKind
+        || account.enabled === false
+        || account.workspaceAccountId !== resolved.workspaceAccountId
+      ) return account;
+      changed = true;
+      return {
+        ...account,
+        workspaceLabel: resolved.label,
+        workspaceKind: resolved.workspaceKind,
+        updatedAt: new Date().toISOString()
+      };
+    });
+    if (!changed) return false;
+    settings.codexManagedAccounts = accounts;
+    saveSettings();
+    pushSettingsToRenderer();
+    void queueLimitInvalidation({ provider: 'codex' }, 'workspace-label-hydrated');
+    return true;
+  });
+
+  codexWorkspaceLabelHydrationPromise = task.finally(() => {
+    codexWorkspaceLabelHydrationPromise = null;
+  });
+  return codexWorkspaceLabelHydrationPromise;
+}
+
 function codexAccountsForRenderer() {
   return normalizeCodexManagedAccounts(settings?.codexManagedAccounts).map(({
-    id, email, accountKey, accountLabel, addedAt, updatedAt, enabled
-  }) => ({ id, email, accountKey, accountLabel, addedAt, updatedAt, enabled }));
+    id, email, accountKey, accountLabel, workspaceAccountId, workspaceLabel, workspaceKind, addedAt, updatedAt, enabled
+  }) => ({
+    id,
+    email,
+    accountKey,
+    accountLabel,
+    workspaceAccountId,
+    workspaceLabel,
+    workspaceKind,
+    addedAt,
+    updatedAt,
+    enabled
+  }));
 }
 
 function codexManagedAccountsForCollector() {
@@ -615,7 +994,11 @@ async function addMimoManagedAccount(cookieValue) {
   }
   pushSettingsToRenderer();
   sendMimoAccountsPush();
-  startMode();
+  void queueLimitInvalidation({
+    provider: 'mimo',
+    accountId: result.account.id,
+    accountKey: result.account.accountKey
+  }, 'account-added');
   return { ok: true, accounts: mimoAccountsForRenderer() };
 }
 
@@ -635,7 +1018,10 @@ async function removeMimoManagedAccount(id) {
   }
   pushSettingsToRenderer();
   sendMimoAccountsPush();
-  startMode();
+  void queueLimitInvalidation({ provider: 'mimo', accountId, accountKey: account.accountKey }, 'account-removed', {
+    clear: true,
+    refresh: false
+  });
   return { ok: true, accounts: mimoAccountsForRenderer() };
 }
 
@@ -654,7 +1040,10 @@ function setMimoManagedAccountEnabled(id, enabled) {
   }
   pushSettingsToRenderer();
   sendMimoAccountsPush();
-  startMode();
+  void queueLimitInvalidation({ provider: 'mimo', accountId, accountKey: account.accountKey }, 'account-state', {
+    clear: !account.enabled,
+    refresh: account.enabled
+  });
   return { ok: true, accounts: mimoAccountsForRenderer() };
 }
 
@@ -670,18 +1059,8 @@ function codexManagedHomePath(accountId) {
   return resolvedHome;
 }
 
-function codexEmailDerivedAccountKey(account, identity) {
-  const email = String(identity.email || account.email || '').trim().toLowerCase();
-  return Boolean(email && String(account.accountKey || '').trim() === hashAccountKey(email));
-}
-
 function findExistingCodexAccount(accounts, identity) {
-  return accounts.find((account) => {
-    if (identity.accountKey && account.accountKey && !codexEmailDerivedAccountKey(account, identity)) {
-      return account.accountKey === identity.accountKey;
-    }
-    return Boolean(identity.email && account.email === identity.email);
-  });
+  return accounts.find((account) => codexManagedAccountMatchesIdentity(account, identity));
 }
 
 function codexAccountId(identity, existing) {
@@ -711,6 +1090,9 @@ function commitCodexManagedAccount(identity, homePath, existing, options = {}) {
     email: identity.email,
     accountKey: identity.accountKey || hashAccountKey(identity.email || id),
     accountLabel: identity.accountLabel,
+    workspaceAccountId: identity.workspaceAccountId || identity.providerAccountId || '',
+    workspaceLabel: String(identity.workspaceLabel || '').trim(),
+    workspaceKind: identity.workspaceKind === 'personal' ? 'personal' : '',
     homePath,
     authPath: path.join(homePath, 'auth.json'),
     addedAt: existing?.addedAt || now,
@@ -722,7 +1104,6 @@ function commitCodexManagedAccount(identity, homePath, existing, options = {}) {
     record
   ]);
   if (options.persist !== false) saveSettings({ throwOnError: true });
-  if (options.restart !== false) startMode();
   return codexAccountsForRenderer().find((account) => account.id === id);
 }
 
@@ -816,6 +1197,55 @@ async function rollbackCodexManagedHome(homePath, backupHomePath, movedToFinal) 
   if (backupHomePath) await fs.promises.rename(backupHomePath, homePath);
 }
 
+async function resolveCodexWorkspaceAfterLogin(auth, homePath, options = {}) {
+  const initialIdentity = codexAuthIdentity(auth);
+  let workspaces;
+  try {
+    workspaces = await listCodexWorkspaces(auth, {
+      env: process.env,
+      signal: options.signal
+    });
+  } catch (error) {
+    if (options.signal?.aborted) return { cancelled: true };
+    console.warn('Could not list Codex workspaces after sign-in:', error?.message || error);
+    return { auth, identity: initialIdentity };
+  }
+  if (options.signal?.aborted) return { cancelled: true };
+  if (workspaces.length === 0) return { auth, identity: initialIdentity };
+
+  const currentWorkspaceId = normalizeWorkspaceId(initialIdentity.workspaceAccountId);
+  let selected;
+  if (workspaces.length === 1) {
+    selected = workspaces[0];
+  } else if (typeof options.selectWorkspace === 'function') {
+    const selectedId = normalizeWorkspaceId(await options.selectWorkspace({
+      email: initialIdentity.email,
+      currentWorkspaceId,
+      workspaces
+    }));
+    if (!selectedId || options.signal?.aborted) return { cancelled: true };
+    selected = workspaces.find((workspace) => workspace.id === selectedId) || null;
+    if (!selected) throw new Error('The selected Codex workspace is no longer available.');
+  } else {
+    selected = workspaces.find((workspace) => workspace.id === currentWorkspaceId) || null;
+  }
+  if (!selected) return { auth, identity: initialIdentity };
+
+  const selectedAuth = authWithSelectedCodexWorkspace(auth, selected.id);
+  await writeCodexAuthFile(
+    path.join(homePath, 'auth.json'),
+    `${JSON.stringify(selectedAuth, null, 2)}\n`
+  );
+  return {
+    auth: selectedAuth,
+    identity: {
+      ...codexAuthIdentity(selectedAuth),
+      workspaceLabel: selected.label,
+      workspaceKind: selected.workspaceKind
+    }
+  };
+}
+
 // Best practice: each account gets its own OAuth grant via an isolated
 // `codex login` (CodexBar/tokscale model), so it never shares a refresh-token
 // lineage with the user's live Codex CLI login.
@@ -838,7 +1268,10 @@ async function addCodexManagedAccount(onOutput, options = {}) {
     } catch (_) {
       return { ok: false, error: 'Sign-in finished but no Codex credentials were written.' };
     }
-    const identity = codexAuthIdentity(auth);
+    const workspaceResult = await resolveCodexWorkspaceAfterLogin(auth, tempHome, options);
+    if (workspaceResult.cancelled) return cancelledCodexLoginResult();
+    auth = workspaceResult.auth;
+    const identity = workspaceResult.identity;
     if (!identity.accountKey && !identity.email) {
       return { ok: false, error: 'Could not identify the Codex account after sign-in.' };
     }
@@ -903,7 +1336,11 @@ async function addCodexManagedAccount(onOutput, options = {}) {
       movedToFinal = false;
       throw error;
     }
-    startMode();
+    void queueLimitInvalidation({
+      provider: 'codex',
+      accountId: account.id,
+      accountKey: account.accountKey || ''
+    }, 'account-added');
     return { ok: true, account };
   } finally {
     if (!accountCommitted) await removeManagedHomeIfSafe(tempHome).catch(() => {});
@@ -922,7 +1359,10 @@ async function removeCodexManagedAccount(id) {
     return { ok: false, error: error?.message || 'Could not persist account removal' };
   }
   await removeManagedHomeIfSafe(account.homePath);
-  startMode();
+  void queueLimitInvalidation({ provider: 'codex', accountId, accountKey: account.accountKey || '' }, 'account-removed', {
+    clear: true,
+    refresh: false
+  });
   return { ok: true, accounts: codexAccountsForRenderer() };
 }
 
@@ -938,7 +1378,10 @@ function setCodexManagedAccountEnabled(id, enabled) {
   } catch (error) {
     return { ok: false, error: error?.message || 'Could not persist account state' };
   }
-  startMode();
+  void queueLimitInvalidation({ provider: 'codex', accountId, accountKey: account.accountKey || '' }, 'account-state', {
+    clear: !account.enabled,
+    refresh: account.enabled
+  });
   return { ok: true, accounts: codexAccountsForRenderer() };
 }
 
@@ -977,7 +1420,7 @@ async function switchCodexSystemAccount(id) {
       enabled: refreshed.enabled !== false,
       restart: false
     });
-    try { startMode(); } catch (error) { console.warn('Could not restart after switching Codex account:', error?.message || error); }
+    void queueLimitInvalidation({ provider: 'codex' }, 'system-account-switch');
     const activeAccountId = codexAccountId(targetMaterial.identity, refreshed);
     const accountsForRenderer = codexAccountsForRenderer();
     return {
@@ -1004,18 +1447,23 @@ async function refreshCodexManagedAccountLimits(id) {
   const account = accounts.find((entry) => entry.id === accountId);
   if (!account) return { ok: false, error: 'Account not found' };
   if (account.enabled === false) return { ok: false, error: 'Account is disabled' };
+  if (!deviceRuntimeHandle) return { ok: false, error: 'Limits runtime is not ready' };
   try {
-    const summary = await collectLimitsOnce({
-      ...settings,
-      limitsEnabled: true,
-      limitProviders: 'codex',
-      includeLiveCodexAccount: false,
-      codexManagedAccounts: [account]
-    }, { env: process.env });
-    const stableSummary = mergeCodexTransientWindows(latestStats?.limits, summary);
+    const result = await deviceRuntimeHandle.refreshLimits({
+      provider: 'codex',
+      accountId: account.id,
+      accountKey: account.accountKey || ''
+    }, 'account-refresh');
+    const summary = result?.snapshot || deviceRuntimeHandle.getSnapshot()?.limits;
+    const providers = (summary?.providers || []).filter((provider) => {
+      if (provider?.provider !== 'codex') return false;
+      if (account.accountKey) return provider.accountKey === account.accountKey;
+      if (account.email) return String(provider.accountEmail || '').toLowerCase() === account.email;
+      return provider.sourceDetail === 'managed';
+    });
     return {
       ok: true,
-      providers: (stableSummary.providers || []).filter((provider) => provider?.provider === 'codex')
+      providers
     };
   } catch (error) {
     return { ok: false, error: `Could not refresh Codex account limits: ${error?.message || error}` };
@@ -1153,7 +1601,17 @@ function floatingBubblePayload() {
 function ensureSettingsLoaded() {
   if (settings) return settings;
   settings = readSettings();
+  const persistedCodexAccounts = settings.codexManagedAccounts;
+  const hydratedCodexAccounts = hydrateCodexManagedAccounts(persistedCodexAccounts);
   persistedSettingsSnapshot = cloneSettingsSnapshot(settings);
+  if (JSON.stringify(hydratedCodexAccounts) !== JSON.stringify(persistedCodexAccounts)) {
+    settings.codexManagedAccounts = hydratedCodexAccounts;
+    if (!saveSettings()) {
+      // Keep the runtime identity coherent even if the migration cannot be
+      // persisted yet; the next ordinary settings save will retry it.
+      settings.codexManagedAccounts = hydratedCodexAccounts;
+    }
+  }
   rendererViewState = normalizeInitialRendererViewState(settings.lastViewState, rendererViewState);
   return settings;
 }
@@ -1274,10 +1732,13 @@ function collapseFloatingBubble(plan) {
 }
 
 function maybeCollapseFloatingBubble(bounds) {
+  // The display comes from where the window actually sits, but the bounds the
+  // plan remembers as "expanded" must be the normal ones: collapsing a
+  // maximized window would otherwise persist the whole screen as its size.
   const display = displayForBounds(bounds);
   if (!display) return false;
   const collapsedArea = collapsedAreaForDisplay(display);
-  const plan = floatingBubbleCollapsePlan(bounds, display.workArea, settings, {
+  const plan = floatingBubbleCollapsePlan(expandedBoundsForCollapse(mainWindow, bounds), display.workArea, settings, {
     collapsed: floatingBubbleState.collapsed,
     suppressNextCollapse: floatingBubbleState.suppressNextCollapse,
     collapsedArea,
@@ -1328,7 +1789,7 @@ function expandFloatingBubble(options = {}) {
   sendFloatingBubbleState();
   if (options.focus !== false) {
     mainWindow.show();
-    mainWindow.focus();
+    restoreWindowMaximized(mainWindow, settings);
   }
   return true;
 }
@@ -1362,11 +1823,15 @@ function syncFloatingBubbleAvailability() {
 
 function persistBoundsSoon() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.isMinimized() || mainWindow.isFullScreen()) return;
+  if (!shouldPersistWindowBounds(mainWindow)) {
+    stopPersistBoundsTimer();
+    return;
+  }
   stopPersistBoundsTimer();
   persistBoundsTimer = setTimeout(() => {
     persistBoundsTimer = null;
     if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!shouldPersistWindowBounds(mainWindow)) return;
     const next = mainWindow.getBounds();
     const prev = settings.windowBounds || {};
     if (settings?.trayMode) {
@@ -1544,6 +2009,9 @@ function readSettings() {
     }
     merged.showHomeLimitBars = parseBoolean(merged.showHomeLimitBars, false);
     merged.showHomeLimitProviderNames = parseBoolean(merged.showHomeLimitProviderNames, false);
+    merged.opencodeLocalLimitsEnabled = parseBoolean(merged.opencodeLocalLimitsEnabled, false);
+    merged.windowMaximized = parseBoolean(merged.windowMaximized, false);
+    merged.automaticAppUpdates = parseBoolean(merged.automaticAppUpdates, false);
     if (saved.homeLimitProviderOrder !== undefined) {
       merged.homeLimitProviderOrder = migrateHomeLimitProviderOrder(saved.homeLimitProviderOrder);
     }
@@ -1567,7 +2035,10 @@ function readSettings() {
     merged.collectionIntervalMs = normalizeCollectionIntervalMs(merged.collectionIntervalMs);
     merged.syncUploadIntervalMs = normalizeSyncUploadIntervalMs(merged.syncUploadIntervalMs);
     merged.heatmapMetric = normalizeHeatmapMetric(merged.heatmapMetric);
+    merged.homeActiveDaysWindow = normalizeHomeActiveDaysWindow(merged.homeActiveDaysWindow);
     merged.reduceMotion = motionPreferenceApi.normalize(merged.reduceMotion);
+    merged.compactTokenUnits = normalizeCompactTokenUnits(merged.compactTokenUnits);
+    merged.tokenRateMode = normalizeTokenRateMode(merged.tokenRateMode);
     if (saved.serviceProviderDisplayOrder !== undefined) {
       merged.serviceProviderDisplayOrder = String(saved.serviceProviderDisplayOrder || '');
     }
@@ -1596,6 +2067,8 @@ function readSettings() {
     delete merged.edgeDrawerEnabled;
     merged.floatingBubbleTrigger = merged.floatingBubbleTrigger === 'hover' ? 'hover' : 'click';
     merged.floatingBubbleContent = normalizeTrayContent(merged.floatingBubbleContent, 'icon');
+    merged.floatingBubbleCustomLayout = normalizeTrayLayout(merged.floatingBubbleCustomLayout);
+    merged.trayCustomLayout = normalizeTrayLayout(merged.trayCustomLayout);
     merged.showTrayProviderBadge = parseBoolean(merged.showTrayProviderBadge, false);
     merged.windowToggleShortcut = normalizeWindowToggleShortcut(merged.windowToggleShortcut);
     // 如果设置了 opencodeCookie 但没有 profiles，自动迁移
@@ -1677,10 +2150,14 @@ function removedTrackedClients(previousClients, nextClients) {
 }
 
 function localArchiveSourceDevice() {
-  const deviceId = settings?.deviceId || defaultDeviceId();
-  if (lastCollectedDevice?.deviceId === deviceId) return lastCollectedDevice;
-  if (localDevice?.deviceId === deviceId) return localDevice;
-  return (latestStats?.devices || []).find((device) => device?.deviceId === deviceId) || null;
+  return selectLocalDeviceRecord({
+    deviceId: settings?.deviceId || defaultDeviceId(),
+    externalAgentActive: isExternalAgentActive(),
+    lastCollectedDevice,
+    localDevice,
+    latestHubStats: currentHubStatsCache(),
+    latestStats
+  });
 }
 
 function updateArchivedClientUsage(previousClients, nextClients) {
@@ -1704,36 +2181,56 @@ function ensureSessionUsageArchiveLoaded() {
 }
 
 function updateSessionUsageArchive(summary, now) {
+  const startedAt = Date.now();
+  const finish = (failureCode = null) => {
+    lastSessionUsageArchiveUpdate = {
+      at: new Date().toISOString(),
+      durationMs: Math.max(0, Date.now() - startedAt),
+      failureCode
+    };
+  };
   const previous = ensureSessionUsageArchiveLoaded();
   const next = captureSessionUsageArchive(previous, summary, now);
-  if (JSON.stringify(next) === JSON.stringify(previous)) return previous;
+  if (JSON.stringify(next) === JSON.stringify(previous)) {
+    finish();
+    return previous;
+  }
   try {
     writeSessionUsageArchive(next);
     sessionUsageArchive = next;
   } catch (error) {
+    finish('archive-write-failed');
+    diagnosticJournal.record({ subsystem: 'storage', code: 'storage-archive-update-failed' });
     console.log(`[session-archive] write failed: ${error.message}`);
+    return next;
   }
+  finish();
   return next;
 }
 
-function summaryWithArchivedClientUsage(summary) {
-  const now = sessionUsageArchiveDate(summary);
+// Read-only projection of both archives onto a summary. Un-tracked clients and
+// retained sessions add to the period totals, not just to the breakdowns, so
+// anything rendered without this reads low. Takes the session archive as an
+// argument because capturing into it is a separate decision, see below.
+function summaryWithArchivesApplied(summary, sessionArchive, now) {
   const withArchivedClients = applyArchivedClientUsage(summary, settings?.archivedClientUsage, {
     activeClients: settings?.clients,
     now
   });
-  let visibleSummary = withArchivedClients;
-  if (settings?.sessionUsageArchiveEnabled === false) {
-    return settings?.projectsEnabled === false ? visibleSummary : applyProjectRollups(visibleSummary);
-  }
+  const visibleSummary = settings?.sessionUsageArchiveEnabled === false
+    ? withArchivedClients
+    : applySessionUsageArchive(withArchivedClients, sessionArchive, { now });
+  return settings?.projectsEnabled === false ? visibleSummary : applyProjectRollups(visibleSummary);
+}
+
+function summaryWithArchivedClientUsage(summary) {
+  const now = sessionUsageArchiveDate(summary);
+  if (settings?.sessionUsageArchiveEnabled === false) return summaryWithArchivesApplied(summary, null, now);
   if (isExternalAgentActive()) {
     sessionUsageArchive = null;
-    visibleSummary = applySessionUsageArchive(withArchivedClients, ensureSessionUsageArchiveLoaded(), { now });
-  } else {
-    const sessionArchive = updateSessionUsageArchive(summary, now);
-    visibleSummary = applySessionUsageArchive(withArchivedClients, sessionArchive, { now });
+    return summaryWithArchivesApplied(summary, ensureSessionUsageArchiveLoaded(), now);
   }
-  return settings?.projectsEnabled === false ? visibleSummary : applyProjectRollups(visibleSummary);
+  return summaryWithArchivesApplied(summary, updateSessionUsageArchive(summary, now), now);
 }
 
 function applyMacActivationPolicy(state = {}) {
@@ -1750,6 +2247,32 @@ function applyMacActivationPolicy(state = {}) {
   if (!app.dock) return;
   if (mode === 'accessory') app.dock.hide();
   else app.dock.show();
+}
+
+function applyMacSpaceBehavior(trayMode = Boolean(settings?.trayMode)) {
+  if (process.platform !== 'darwin' || !mainWindow || mainWindow.isDestroyed()) return;
+  if (trayMode) {
+    setMoveToActiveSpace(mainWindow, false);
+    if (typeof mainWindow.setVisibleOnAllWorkspaces === 'function') {
+      mainWindow.setVisibleOnAllWorkspaces(true, {
+        visibleOnFullScreen: true,
+        skipTransformProcessType: true
+      });
+    }
+    if (typeof mainWindow.setHiddenInMissionControl === 'function') {
+      mainWindow.setHiddenInMissionControl(true);
+    }
+  } else {
+    if (typeof mainWindow.setVisibleOnAllWorkspaces === 'function') {
+      mainWindow.setVisibleOnAllWorkspaces(false);
+    }
+    if (typeof mainWindow.setHiddenInMissionControl === 'function') {
+      mainWindow.setHiddenInMissionControl(false);
+    }
+    // Apply this last because Electron's workspace/Mission Control setters also
+    // update NSWindow.collectionBehavior.
+    setMoveToActiveSpace(mainWindow, true);
+  }
 }
 
 function applyWindowSettings() {
@@ -1804,21 +2327,36 @@ function withHistoryPreview(stats, devices) {
 }
 
 let mode = 'idle';
-let localCollectorHandle = null;
+let deviceRuntimeHandle = null;
 let localDevice = null;
 let localStats = null;
 let sseAbortController = null;
 let sseRetryTimer = null;
 let streamConnected = false;
 let streamFailure = null;
-let syncCollectorHandle = null;
 let lastCollectedDevice = null;
 let latestHubStats = null;
+let latestHubStatsReceivedAt = null;
+let latestHubStatsSource = 'none';
+let latestHubStatsGeneration = null;
+let latestHubStatsIdentity = null;
+let hubModeGeneration = 0;
 let tray = null;
 let latestStats = null;
+let macWidgetSnapshotController = null;
+let macWidgetPublicationReady = false;
+let cachedMacWidgetConfiguration;
 let trayRefreshInFlight = false;
 let trayCodexActiveAccountId = '';
 let trayCodexPendingAccountId = '';
+
+function electronPresentationStats(stats) {
+  return projectLimitStatsForDisplay(stats, {
+    localDeviceId: settings?.deviceId,
+    syncActive: mode === 'sync' || Boolean(String(settings?.hubUrl || '').trim()),
+    opencodeLocalLimitsEnabled: settings?.opencodeLocalLimitsEnabled === true
+  });
+}
 let trayCodexPendingSince = 0;
 let trayCodexSwitchInFlight = false;
 const DEFAULT_EXPORT_INTERVAL_MS = 60 * 1000;
@@ -1846,6 +2384,215 @@ let embeddedHub = null;
 let embeddedHubError = null;
 let embeddedHubUnsub = null;
 let modeQueue = Promise.resolve();
+const pendingLimitInvalidations = new Map();
+const pendingUsageClientRefreshes = new Map();
+
+function hubModeRequestIsCurrent(generation, expectedMode, expectedIdentity = null) {
+  return generation === hubModeGeneration
+    && settings?.hubMode === expectedMode
+    && (expectedIdentity === null || currentHubStatsIdentity(expectedMode) === expectedIdentity);
+}
+
+function currentHubStatsIdentity(expectedMode = settings?.hubMode) {
+  const { url } = effectiveHubConfig();
+  return `${String(expectedMode || 'none')}|${String(url || 'none').replace(/\/$/, '')}`;
+}
+
+function currentHubStatsCache() {
+  const hubMode = settings?.hubMode || 'local';
+  const expectedSource = hubMode === 'host'
+    ? 'host'
+    : hubMode === 'client'
+      ? 'client'
+      : 'none';
+  if (!latestHubStats
+    || latestHubStatsSource !== expectedSource
+    || latestHubStatsGeneration !== hubModeGeneration
+    || latestHubStatsIdentity !== currentHubStatsIdentity(hubMode)) {
+    return null;
+  }
+  return latestHubStats;
+}
+
+function clearLatestHubStatsCache() {
+  latestHubStats = null;
+  latestHubStatsReceivedAt = null;
+  latestHubStatsSource = 'none';
+  latestHubStatsGeneration = null;
+  latestHubStatsIdentity = null;
+}
+
+function setLatestHubStatsCache(stats, source, generation, identity) {
+  latestHubStats = stats;
+  latestHubStatsReceivedAt = new Date().toISOString();
+  latestHubStatsSource = source;
+  latestHubStatsGeneration = generation;
+  latestHubStatsIdentity = identity;
+}
+
+const diagnosticSnapshotBuilder = createDiagnosticSnapshotBuilder({
+  getSettings: () => settings,
+  getMode: () => mode,
+  getEffectiveHubConfig: effectiveHubConfig,
+  getExternalAgentActive: isExternalAgentActive,
+  getDeviceRuntime: () => deviceRuntimeHandle,
+  getEmbeddedHub: () => embeddedHub,
+  getStreamState: () => ({ connected: streamConnected, failure: streamFailure }),
+  getLatestHubStats: () => latestHubStats,
+  getLatestHubStatsReceivedAt: () => latestHubStatsReceivedAt,
+  getLatestHubStatsSource: () => latestHubStatsSource,
+  getLatestHubStatsGeneration: () => latestHubStatsGeneration,
+  getLatestHubStatsIdentity: () => latestHubStatsIdentity,
+  getHubModeGeneration: () => hubModeGeneration,
+  getCurrentHubStatsIdentity: (hubMode) => currentHubStatsIdentity(hubMode),
+  getLocalRecord: localArchiveSourceDevice,
+  getTokscaleStatus,
+  getConfiguration: () => diagnosticConfigurationFromSettings(settings || {}, {
+    usage: {
+      agentVersion: appVersion(),
+      agentRuntime: 'electron-widget',
+      commandTimeoutMs: 120 * 1000,
+      defaultDeviceId: defaultDeviceId(),
+      intervalMs: collectorIntervalMs(),
+      historyIntervalMs: normalizeHistoryIntervalMs(settings?.historyIntervalMs)
+    },
+    limits: {
+      env: process.env,
+      defaultLimitProviders: defaultLimitProviders()
+    },
+    syncUploadIntervalMs: syncUploadIntervalMs()
+  }),
+  getJournalSnapshot: () => diagnosticJournal.getSnapshot(),
+  getArchiveState: () => {
+    const enabled = settings?.sessionUsageArchiveEnabled !== false;
+    const loaded = sessionUsageArchive !== null;
+    return {
+      enabled,
+      loaded,
+      sessionCount: loaded ? Object.keys(sessionUsageArchive?.sessions || {}).length : null,
+      countSource: loaded ? 'loaded-memory' : enabled ? 'not-loaded' : 'not-enabled',
+      lastUpdate: lastSessionUsageArchiveUpdate
+    };
+  },
+  getAppVersion: appVersion,
+  getDefaultDeviceId: defaultDeviceId,
+  canRefreshUsageRuntime,
+  getAppState: () => ({
+    packaged: app.isPackaged,
+    preferredLanguages: typeof app.getPreferredSystemLanguages === 'function'
+      ? app.getPreferredSystemLanguages()
+      : [app.getLocale?.() || 'en'],
+    locale: app.getLocale?.() || 'en'
+  })
+});
+
+const diagnosticReportGenerator = createDiagnosticReportGenerator({
+  getAppMetrics: () => app.getAppMetrics(),
+  getSystemMemory: () => ({ total: os.totalmem(), free: os.freemem() }),
+  privateMemorySupported: process.platform === 'win32',
+  getSnapshot: ({ generatedAt }) => diagnosticSnapshotBuilder.build(generatedAt),
+  getArchiveFileStat: async () => {
+    if (settings?.sessionUsageArchiveEnabled === false) return { ok: false, code: 'archive-not-enabled' };
+    try {
+      const stat = await fs.promises.stat(sessionUsageArchivePath());
+      return { ok: true, stat };
+    } catch (error) {
+      return { ok: false, code: error?.code === 'ENOENT' ? 'archive-not-present' : 'archive-stat-failed' };
+    }
+  }
+});
+
+function limitInvalidationKey(scope) {
+  const provider = String(scope?.provider || '').trim().toLowerCase();
+  const account = String(
+    scope?.accountKey
+    || scope?.accountId
+    || scope?.id
+    || scope?.accountName
+    || scope?.accountEmail
+    || scope?.accountLabel
+    || ''
+  ).trim();
+  return account ? `${provider}:${account}` : `${provider}:*`;
+}
+
+function rememberPendingLimitInvalidation(scope, reason, options = {}) {
+  const clear = options.clear === true;
+  const refresh = options.refresh !== false;
+  const normalized = { ...scope, provider: String(scope?.provider || '').trim().toLowerCase() };
+  const key = limitInvalidationKey(normalized);
+  if (key.endsWith(':*')) {
+    for (const pendingKey of pendingLimitInvalidations.keys()) {
+      if (pendingKey.startsWith(`${normalized.provider}:`)) pendingLimitInvalidations.delete(pendingKey);
+    }
+  }
+  pendingLimitInvalidations.set(key, { scope: normalized, reason, clear, refresh });
+}
+
+function queueLimitInvalidation(scope, reason = 'credential-change', options = {}) {
+  const clear = options.clear === true;
+  const refresh = options.refresh !== false;
+  if (!deviceRuntimeHandle) {
+    rememberPendingLimitInvalidation(scope, reason, { clear, refresh });
+    return Promise.resolve({ queued: true });
+  }
+  return runLimitInvalidation(deviceRuntimeHandle, scope, reason, { clear, refresh });
+}
+
+function drainPendingLimitInvalidations(runtime) {
+  const pending = [...pendingLimitInvalidations.values()];
+  pendingLimitInvalidations.clear();
+  for (const entry of pending) {
+    void runLimitInvalidation(runtime, entry.scope, entry.reason, entry).catch((error) => {
+      console.log(`[limits-runtime] pending refresh failed: ${error.message}`);
+    });
+  }
+}
+
+function refreshUsageClient(clientId, options = {}) {
+  const client = String(clientId || '').trim().toLowerCase();
+  const tracked = trackedClientSet(clientsCsvForSetting(settings?.clients));
+  if (!client || !KNOWN_CLIENTS.split(',').includes(client) || !tracked.has(client)) {
+    throw new TypeError(`Unsupported targeted usage client: ${client || '(empty)'}`);
+  }
+  if (!deviceRuntimeHandle) {
+    pendingUsageClientRefreshes.set(client, { clientId: client, options: { ...options } });
+    return Promise.resolve({ queued: true });
+  }
+  return Promise.resolve(deviceRuntimeHandle.refreshClient(client, options));
+}
+
+function bestEffortTrackedUsageRefresh(clientId, options = {}) {
+  const client = String(clientId || '').trim().toLowerCase();
+  const tracked = trackedClientSet(clientsCsvForSetting(settings?.clients));
+  if (
+    !tracked.has(client)
+    || !canRefreshUsageRuntime(mode, isExternalAgentActive)
+  ) return;
+  try {
+    void refreshUsageClient(client, options).catch((error) => {
+      console.log(`[usage-runtime] credential refresh failed: ${error.message}`);
+    });
+  } catch (error) {
+    console.log(`[usage-runtime] credential refresh failed: ${error.message}`);
+  }
+}
+
+function drainPendingUsageClientRefreshes(runtime) {
+  drainPendingUsageClientRefreshQueue(
+    pendingUsageClientRefreshes,
+    runtime,
+    (error) => {
+      console.log(`[usage-runtime] pending client refresh failed: ${error.message}`);
+    },
+    { enabled: canRefreshUsageRuntime(mode, isExternalAgentActive) }
+  );
+}
+
+function drainPendingRuntimeActions(runtime) {
+  drainPendingLimitInvalidations(runtime);
+  drainPendingUsageClientRefreshes(runtime);
+}
 
 function effectiveHubConfig() {
   if (settings?.hubMode === 'host') {
@@ -1931,6 +2678,13 @@ function isExternalAgentActive() {
   } catch (_) { return false; }
 }
 
+function ownsUsageRuntime() {
+  return Boolean(
+    deviceRuntimeHandle
+    && canRefreshUsageRuntime(mode, isExternalAgentActive)
+  );
+}
+
 async function deleteDeviceFromHub(deviceId) {
   const { url: hubUrl, secret } = effectiveHubConfig();
   if (!hubUrl) return;
@@ -1964,87 +2718,559 @@ async function postToHub(summary) {
   return response.json();
 }
 
-function stopSyncCollector() {
-  if (syncCollectorHandle) { try { syncCollectorHandle.stop(); } catch (_) {} }
-  syncCollectorHandle = null;
+// ---------------------------------------------------------------------------
+// Shared subscriptions
+//
+// A subscription describes an account, not a machine, so devices that share a hub
+// share ONE list rather than each carrying a copy. settings.subscriptions stays
+// the local store in local mode, and doubles as the last-known cache in sync mode
+// so a hub that is unreachable at startup shows the records instead of an empty
+// list. The hub is the authority whenever it answers; writes made while it does
+// not answer are refused rather than written locally, because a local write would
+// fork the shared list with no way to tell later which side was right.
+// ---------------------------------------------------------------------------
+
+let hubSubscriptions = null;
+// Which hub the document in hand came from. Without it, switching to a hub that
+// cannot be reached kept showing the previous hub's records as though they were
+// this one's.
+let hubSubscriptionsHub = '';
+// One lane per hub for its reads and writes, the same way startMode() serializes
+// hub-side work. Discarding whichever answer came back last is not enough: a read
+// that STARTS after a write can still observe the state before it, come back
+// first, and leave the write invisible on screen and in settings.json. Only
+// ordering the operations themselves removes that.
+//
+// Ordering is not re-basing, though. A write queued behind another does NOT adopt
+// whatever version that one left: its list was built from a particular version,
+// and if what ran ahead of it pulled in another device's records, writing over
+// them under their own token is the silent erase this design exists to prevent.
+// Each write carries the version it was built from and is refused if that has
+// moved on.
+//
+// Per hub rather than one lane for all of them, because ordering is only worth
+// anything against a single shared document: two hubs hold two documents with no
+// ordering between them, and a hub that accepts the connection but answers
+// slowly would otherwise hold up the hub the user is actually looking at.
+const subscriptionQueues = new Map();
+// The last version this device tried to catch up to, and when. Only a failed
+// attempt is ever seen twice — a successful one leaves the document in hand
+// matching the stamp, which settles it before this is consulted.
+let lastSubscriptionCatchUp = { hub: '', version: '', at: 0 };
+const SUBSCRIPTION_RETRY_MS = 60000;
+
+function subscriptionsAreShared() {
+  return settings?.hubMode === 'client' || settings?.hubMode === 'host';
+}
+
+// The document in hand, but only when it is the one this hub answered with.
+// Everything that reads it has to ask, because the two are not kept in step: a
+// switch to another hub and back leaves that hub's document installed while the
+// first is in front of the user again, until its own refresh replaces it.
+// Neither the records in it nor the updatedAt on it describe the hub being asked
+// about, and both are load-bearing — one is what gets written, the other is what
+// the hub checks it against.
+function subscriptionsDocumentFor(hub) {
+  return hubSubscriptionsHub === hub ? hubSubscriptions : null;
+}
+
+function effectiveSubscriptions() {
+  if (!subscriptionsAreShared()) return settings.subscriptions || [];
+  const hub = currentHubIdentity();
+  const doc = subscriptionsDocumentFor(hub);
+  if (doc) return doc.subscriptions;
+  // The on-disk copy only answers for this hub, or for no hub at all — in which
+  // case it is this device's own list, waiting to be seeded. Another hub's
+  // records are not an answer to "what is on this one", so nothing is shown
+  // rather than something wrong.
+  const cacheHub = String(settings.subscriptionsCacheHub || '');
+  return cacheHub === hub || cacheHub === '' ? (settings.subscriptions || []) : [];
+}
+
+// Returns whether anything actually changed. Callers use that to decide whether
+// to push settings at the renderer: a push re-renders the whole settings form,
+// which would fight whatever the user is typing in it.
+function cacheSharedSubscriptions(doc, hub) {
+  // Identity counts as a change on its own: two hubs can hold the same
+  // updatedAt — an empty one, most obviously, when neither has been written to —
+  // and comparing timestamps alone left the marker pointing at the previous hub,
+  // so an offline restart came back showing its records.
+  const changed = (hubSubscriptions?.updatedAt || '') !== (doc.updatedAt || '')
+    || String(settings.subscriptionsCacheHub || '') !== hub;
+  hubSubscriptions = doc;
+  hubSubscriptionsHub = hub;
+  if (changed) {
+    settings.subscriptions = doc.subscriptions;
+    settings.subscriptionsCacheHub = hub;
+    persistSubscriptionState();
+  }
+  return changed;
+}
+
+// saveSettings() rolls the WHOLE settings object back to its last persisted
+// snapshot when the file cannot be written, so a failed write here would discard
+// the set-aside records this refresh just computed along with the cache — and
+// their notice would vanish until the next restart, with nothing on screen
+// saying anything went wrong. Re-apply both: disk is behind, but what the user
+// still has to decide about stays in front of them.
+function persistSubscriptionState() {
+  const subscriptions = settings.subscriptions;
+  const orphaned = settings.subscriptionsOrphaned;
+  const cacheHub = settings.subscriptionsCacheHub;
+  if (saveSettings()) return true;
+  settings.subscriptions = subscriptions;
+  settings.subscriptionsOrphaned = orphaned;
+  settings.subscriptionsCacheHub = cacheHub;
+  console.log('[sync] subscription state could not be written to disk');
+  return false;
+}
+
+function queueSubscriptionOp(run) {
+  // Captured on the way in, not when the operation runs: it was decided against
+  // the hub in front of the user now, and a switch before it starts turns it
+  // into work about a hub they have left. Each operation is handed the identity
+  // it was queued for so it can say what to do about that.
+  const hub = currentHubIdentity();
+  const previous = subscriptionQueues.get(hub) || Promise.resolve();
+  const result = previous.then(() => run(hub), () => run(hub));
+  // The lane has to survive a failed operation; the caller still sees the error.
+  const lane = result.then(() => {}, () => {});
+  subscriptionQueues.set(hub, lane);
+  // Dropped once idle, so the map holds the hub in use and, briefly, whichever
+  // one is still draining — not an entry per hub the user has ever typed.
+  lane.then(() => { if (subscriptionQueues.get(hub) === lane) subscriptionQueues.delete(hub); });
+  return result;
+}
+
+// The user can switch hubs while an operation is queued or in flight, and an
+// answer about the hub they left is not an answer about the one they are on.
+function subscriptionOpIsCurrent(hub) {
+  return hub === currentHubIdentity();
+}
+
+// Reported rather than dropped: whatever the user was acting on is still on
+// screen, and silence would read as done.
+function hubChangedError() {
+  return Object.assign(new Error('hub changed'), { code: 'hub_changed' });
+}
+
+function subscriptionsEndpoint() {
+  const { url: hubUrl, secret } = effectiveHubConfig();
+  if (!hubUrl) return null;
+  return {
+    url: `${hubUrl.replace(/\/$/, '')}/api/subscriptions`,
+    headers: secret ? { authorization: `Bearer ${secret}` } : {}
+  };
+}
+
+async function fetchSharedSubscriptions() {
+  // A host-mode widget is the hub, so it reads its own store rather than looping
+  // back over HTTP to itself — the same shortcut fetchHubStats() takes.
+  if (settings.hubMode === 'host' && embeddedHub) return embeddedHub.hub.getSubscriptions();
+  const endpoint = subscriptionsEndpoint();
+  if (!endpoint) return null;
+  // A hub that accepts the connection and then never answers would hold this
+  // lane open for the rest of the session, and every later read and save for that
+  // hub behind it. fetch() has no deadline of its own, so it gets the same 15s
+  // the other hub requests use.
+  const response = await fetch(endpoint.url, { headers: endpoint.headers, signal: AbortSignal.timeout(15_000) });
+  if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  return response.json();
+}
+
+// The 409 body is the hub's current list, worth caching — but only while this is
+// still the newest operation. A late rejection carrying an older document would
+// otherwise overwrite a write that has already landed.
+function staleSubscriptionWriteError(current, hub) {
+  const error = new Error('stale_write');
+  error.code = 'stale_write';
+  if (current && subscriptionOpIsCurrent(hub)) cacheSharedSubscriptions(current, hub);
+  return error;
+}
+
+function writeSharedSubscriptions(list, baseUpdatedAt) {
+  return queueSubscriptionOp((hub) => {
+    // Queued against one hub, reached the front of the lane after the user moved
+    // to another. The list in hand is the one they were editing on the hub they
+    // left, and hubSubscriptions now holds the new hub's updatedAt to base on, so
+    // sending it would write one hub's records into another against a base that
+    // was never read from it.
+    if (!subscriptionOpIsCurrent(hub)) throw hubChangedError();
+    return writeSharedSubscriptionsNow(list, hub, baseUpdatedAt);
+  });
+}
+
+// Takes the hub and the base rather than reading either. The identity is the one
+// this write was queued against; the base is the version the list was built from,
+// which is the whole meaning of the token. Reading it here instead would answer
+// "the newest version this process knows of", and pairing that with a list made
+// from an older one is a write the hub has no way to refuse: the token is
+// current, so it accepts, and whatever arrived in between is gone.
+async function writeSharedSubscriptionsNow(list, hub, baseUpdatedAt) {
+  // Which makes the base worth checking, not just carrying. A list built on a
+  // version this process has already moved past is stale for exactly the reason
+  // another device's write is, and the answer is the same one the hub would give:
+  // re-read and redo. Held nothing for this hub and the caller claims a version,
+  // and they read it somewhere else — another hub, before a switch back to this
+  // one — which is not a version of this list at all.
+  if (baseUpdatedAt !== (subscriptionsDocumentFor(hub)?.updatedAt || '')) {
+    throw Object.assign(new Error('stale_write'), { code: 'stale_write' });
+  }
+  if (settings.hubMode === 'host' && embeddedHub) {
+    try {
+      const stored = embeddedHub.hub.setSubscriptions(list, baseUpdatedAt);
+      if (subscriptionOpIsCurrent(hub)) cacheSharedSubscriptions(stored, hub);
+      return;
+    } catch (error) {
+      if (error.code === 'stale_write') throw staleSubscriptionWriteError(error.current, hub);
+      throw error;
+    }
+  }
+  const endpoint = subscriptionsEndpoint();
+  if (!endpoint) throw new Error('hub not configured');
+  const response = await fetch(endpoint.url, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', ...endpoint.headers },
+    body: JSON.stringify({ subscriptions: list, baseUpdatedAt }),
+    signal: AbortSignal.timeout(15_000)
+  });
+  // Someone else wrote the list since this device last read it. Overwriting would
+  // erase their records silently, and they exist nowhere else.
+  if (response.status === 409) throw staleSubscriptionWriteError(await response.json().catch(() => null), hub);
+  if (!response.ok) {
+    // The hub answered, so it is reachable — a 401 is the wrong secret and a 400
+    // is a bad payload. Reporting either as "could not reach the hub" sends the
+    // user looking at their network instead of their settings.
+    const rejected = new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
+    rejected.code = 'rejected';
+    rejected.status = response.status;
+    throw rejected;
+  }
+  const stored = await response.json();
+  // The write succeeded, but if the user moved to another hub while it was in
+  // flight this answer no longer describes what is in front of them.
+  if (!subscriptionOpIsCurrent(hub)) return;
+  cacheSharedSubscriptions(stored, hub);
+}
+
+// Records this device holds that the shared list does not have, or has
+// differently. Comparing ids alone is not enough: a record edited here while the
+// device was in local mode keeps its id, so the shared copy would silently win
+// and the edit would be gone. Neither is folding them in automatically — the
+// same plan entered separately on two machines has two ids, and merging those
+// would double the monthly total. So both cases are set aside for the one person
+// who can tell them apart.
+function rememberOrphanedSubscriptions(local, doc) {
+  const shared = new Map((doc.subscriptions || []).map((entry) => [entry.id, entry]));
+  const orphans = (local || []).filter((entry) => {
+    if (!entry?.id) return false;
+    const match = shared.get(entry.id);
+    return !match || JSON.stringify(match) !== JSON.stringify(entry);
+  });
+  const next = orphans.length > 0
+    ? { hubUrl: currentHubIdentity(), records: orphans }
+    : { hubUrl: '', records: [] };
+  if (JSON.stringify(next) === JSON.stringify(orphanedSubscriptions())) return false;
+  settings.subscriptionsOrphaned = next;
+  return true;
+}
+
+// Which hub the set-aside records were held back from. Offering them to a
+// different hub would file this device's records somewhere they never belonged.
+// Trimmed the same way subscriptionsEndpoint() trims it, so a trailing slash the
+// user typed does not read as a different hub and strand them.
+function currentHubIdentity() {
+  return String(effectiveHubConfig().url || '').replace(/\/$/, '');
+}
+
+function orphanedSubscriptions() {
+  const stored = settings.subscriptionsOrphaned;
+  // Tolerates the bare array this field held before it carried a hub.
+  if (Array.isArray(stored)) return { hubUrl: '', records: stored };
+  return { hubUrl: String(stored?.hubUrl || ''), records: Array.isArray(stored?.records) ? stored.records : [] };
+}
+
+// Empty unless they belong to the hub in front of the user right now: a set held
+// back from another hub, or from before a switch to local mode, has nowhere to
+// go, and offering to adopt it promises something that cannot happen.
+function pendingOrphanedSubscriptions() {
+  const { hubUrl, records } = orphanedSubscriptions();
+  if (!subscriptionsAreShared() || hubUrl !== currentHubIdentity()) return [];
+  return records;
+}
+
+async function adoptOrphanedSubscriptions() {
+  // Nothing to decide about; the answer that counts is taken inside the lane.
+  if (pendingOrphanedSubscriptions().length === 0) return settingsForRenderer();
+  // Reading, merging and writing is one operation, so all three happen in one
+  // turn of the lane. Merging outside it took the document as it stood before
+  // whatever was already queued, and the write that followed then carried the
+  // base that operation left behind — a pairing the hub has no way to refuse,
+  // because the token is current. It accepts the write, and the records the other
+  // operation added in between are gone with nothing to say they were dropped.
+  await queueSubscriptionOp(async (hub) => {
+    if (!subscriptionOpIsCurrent(hub)) throw hubChangedError();
+    const orphans = pendingOrphanedSubscriptions();
+    if (orphans.length === 0) return;
+    // Same-id records replace rather than append: two entries sharing an id would
+    // collapse on normalization anyway, and the local edit is the one being
+    // adopted. Merging into another hub's document would carry its records into
+    // this one as though they had been entered here; with none in hand the write
+    // goes out claiming no base, which the hub answers with 409 rather than an
+    // overwrite.
+    const held = subscriptionsDocumentFor(hub);
+    const merged = new Map((held?.subscriptions || []).map((entry) => [entry.id, entry]));
+    for (const orphan of orphans) merged.set(orphan.id, orphan);
+    await writeSharedSubscriptionsNow([...merged.values()], hub, held?.updatedAt || '');
+    // Cleared in the same turn: between the write landing and this, the records
+    // are on the hub and still marked as waiting for a decision here.
+    settings.subscriptionsOrphaned = { hubUrl: '', records: [] };
+    if (!saveSettings()) throw Object.assign(new Error('settings write failed'), { code: 'write_failed' });
+  });
+  return settingsForRenderer();
+}
+
+// Only the message survives the IPC boundary, so the outcome goes in it. The
+// renderer needs these apart: another device winning means re-read and redo, a
+// rejected write means fix the secret, and an unreachable hub means try later.
+function subscriptionWriteFailureCode(error) {
+  if (error?.code === 'stale_write') return 'stale_write';
+  if (error?.code === 'rejected') return 'hub_rejected';
+  if (error?.code === 'write_failed') return 'write_failed';
+  if (error?.code === 'hub_changed') return 'hub_changed';
+  return 'hub_unreachable';
+}
+
+function discardOrphanedSubscriptions() {
+  settings.subscriptionsOrphaned = { hubUrl: '', records: [] };
+  if (!saveSettings()) throw Object.assign(new Error('settings write failed'), { code: 'write_failed' });
+  return settingsForRenderer();
+}
+
+function refreshSharedSubscriptions(options = {}) {
+  // Nothing left to answer for a hub the user has moved off: the switch enqueues
+  // its own refresh for the hub they moved to, and this one would only spend a
+  // request to be discarded on arrival.
+  return queueSubscriptionOp((hub) => (subscriptionOpIsCurrent(hub) ? refreshSharedSubscriptionsNow(options) : false));
+}
+
+async function refreshSharedSubscriptionsNow({ seedFromLocal = false } = {}) {
+  if (!subscriptionsAreShared()) {
+    const had = Boolean(hubSubscriptions);
+    hubSubscriptions = null;
+    hubSubscriptionsHub = '';
+    return had;
+  }
+  // A document fetched from another hub is not an answer about this one, and
+  // holding on to it is what made an unreachable new hub show the old one's list.
+  const hub = currentHubIdentity();
+  if (hubSubscriptions && hubSubscriptionsHub !== hub) {
+    hubSubscriptions = null;
+    hubSubscriptionsHub = '';
+  }
+
+  try {
+    // Only records this device actually owns may be seeded or set aside. Once
+    // settings.subscriptions is a cache of some hub it is that hub's data, and
+    // carrying it into the next hub would file one hub's records on another —
+    // duplicating accounts that were never entered here. Switching to local mode
+    // and editing hands ownership back, which is what clears the marker.
+    // A marked cache is some hub's data, never this device's — including the hub
+    // in front of us, whose own list is exactly what the cache holds. Only an
+    // unmarked list is owned here and eligible to be seeded or set aside.
+    const local = settings.subscriptionsCacheHub ? [] : (settings.subscriptions || []);
+    const doc = await fetchSharedSubscriptions();
+    if (!doc) return false;
+    // Nothing else can have run against the hub in the meantime — the lane saw to
+    // that — but the user may have switched hubs while this request was waiting,
+    // and applying it would show one hub's records under another's name.
+    if (!subscriptionOpIsCurrent(hub)) return false;
+    // A hub nobody has ever written to: adopt this device's records rather than
+    // replacing them with nothing. Keyed on updatedAt rather than on the list
+    // being empty — an empty list WITH a timestamp is somebody's delete, and
+    // re-uploading a stale cache over it resurrects what they removed.
+    if (seedFromLocal && !doc.updatedAt && local.length > 0) {
+      const previous = hubSubscriptions;
+      const previousHub = hubSubscriptionsHub;
+      hubSubscriptions = doc;
+      hubSubscriptionsHub = hub;
+      try {
+        // The document just fetched is the base by definition: it is what this
+        // hub answered a moment ago, and an unwritten hub answers with no token.
+        await writeSharedSubscriptionsNow(local, hub, doc.updatedAt || '');
+        return true;
+      } catch (error) {
+        // The seed failed, so the empty document must not stay installed: in
+        // shared mode it is what the UI reads, and the user would watch every
+        // record they entered vanish with only a console line to explain it.
+        hubSubscriptions = previous;
+        hubSubscriptionsHub = previousHub;
+        throw error;
+      }
+    }
+    // Joining a hub that already holds records. Until this moment the local list
+    // was this device's own data, not a cache of the hub's, so anything missing
+    // from the shared list is set aside for the user rather than overwritten.
+    // Only recompute while there is something owned here to compare. Running it
+    // against an empty list would answer "no differences" and quietly clear a set
+    // of records the user has not decided about yet — which is what a second
+    // reconcile against the same hub used to do.
+    const orphansChanged = seedFromLocal && local.length > 0
+      ? rememberOrphanedSubscriptions(local, doc)
+      : false;
+    const changed = cacheSharedSubscriptions(doc, hub);
+    if (orphansChanged && !changed) persistSubscriptionState();
+    return changed || orphansChanged;
+  } catch (error) {
+    console.log(`[sync] subscriptions unavailable: ${error.message}`);
+    return false;
+  }
+}
+
+// Every hub stamps its stats with the version of the list it holds, so an edit
+// made on another device announces itself on the frames this one already
+// receives instead of being polled for. Both paths carry it — the stream while
+// it is up, and the widget's own stats read when it is not — and nothing is
+// fetched unless the versions disagree, so the steady state costs no requests at
+// all. This is the whole mechanism; there is no periodic subscription read
+// behind it.
+//
+// A missing stamp means no news rather than an empty list: it is also what a
+// local collector's own stats look like. Reading it as "the hub has nothing"
+// would throw away the records on screen.
+//
+// The stamp is not compared against an operation already in flight for this hub,
+// because what that operation will leave behind is not known yet. It is carried
+// into the lane and compared there instead — see runSubscriptionCatchUp().
+function maybeAdoptSharedSubscriptionRevision(stats) {
+  if (!subscriptionsAreShared()) return;
+  const revision = stats?.subscriptionsUpdatedAt;
+  if (typeof revision !== 'string') return;
+  const hub = currentHubIdentity();
+  if (revision === (subscriptionsDocumentFor(hub)?.updatedAt || '')) return;
+  // Getting this far twice for the same version means the last attempt did not
+  // land it. Frames arrive on every ingest from every device, so retrying on each
+  // one would turn a hub that serves /api/stats but not /api/subscriptions into a
+  // request loop. A version that moves is news again and is tried at once — the
+  // wait is a floor on retries, not a polling interval. Paired with its hub for
+  // the reason every version here is: on its own it cannot say which list it
+  // describes.
+  const now = Date.now();
+  if (hub === lastSubscriptionCatchUp.hub
+    && revision === lastSubscriptionCatchUp.version
+    && now - lastSubscriptionCatchUp.at < SUBSCRIPTION_RETRY_MS) return;
+  lastSubscriptionCatchUp = { hub, version: revision, at: now };
+  runSubscriptionCatchUp(revision);
+}
+
+// Queued rather than run, and the version is compared again once it is this
+// operation's turn. By then whatever was in flight has finished and cached its
+// result, which is the only thing that can tell the two cases apart: this
+// device's own write leaves the document at exactly the version the hub
+// broadcast, so there is nothing left to fetch, while a read that was already in
+// flight when the broadcast landed leaves an older one and the fetch happens.
+// Comparing before queueing cannot distinguish them — it would either re-fetch
+// every write this device makes, or discard the only notice of another device's.
+//
+// refreshSharedSubscriptionsNow() rather than refreshSharedSubscriptions(): the
+// lane is held by this operation, so the queueing wrapper would wait on itself.
+//
+// Deliberately not seeded from local: seeding and setting records aside belong
+// to joining a hub, and doing either here would re-answer a question the user
+// has already been asked.
+function runSubscriptionCatchUp(revision) {
+  return queueSubscriptionOp((hub) => {
+    if (!subscriptionOpIsCurrent(hub)) return false;
+    if (revision === (subscriptionsDocumentFor(hub)?.updatedAt || '')) return false;
+    return refreshSharedSubscriptionsNow();
+  })
+    .then((changed) => { if (changed) pushSettingsToRenderer(); })
+    .catch(() => {});
+}
+
+// base is the version the renderer's list was built from AND the hub that issued
+// it, sent back together. The alternative is to read the current version here,
+// which would let an edit made against the list on screen go out claiming a
+// version that arrived after it — the hub accepts that, and whatever the newer
+// version added is lost.
+async function saveSubscriptions(list, base) {
+  // Before the modes divide, because the answer applies to both. Local mode has
+  // no hub, so its identity is the empty one — which makes it a context of its
+  // own rather than a continuation of whichever hub was last configured, and an
+  // edit composed against a hub's list is not an edit to this device's own. The
+  // check below could not do this on its own: it only runs once a hub is
+  // configured, and the write it guards is the one that never reaches a hub.
+  if (String(base?.hub || '') !== currentHubIdentity()) throw hubChangedError();
+  if (!subscriptionsAreShared()) {
+    settings.subscriptions = subscriptionDisplay.normalizeSubscriptions(list, { currencyApi: { normalizeCurrency } });
+    // Editing here makes the list this device's own again, so a later hub join
+    // offers these records instead of treating them as some other hub's cache.
+    settings.subscriptionsCacheHub = '';
+    // saveSettings() rolls the whole object back when the file cannot be
+    // written, so reporting success here would tell the user their record was
+    // stored while it was being discarded.
+    if (!saveSettings()) {
+      const error = new Error('settings write failed');
+      error.code = 'write_failed';
+      throw error;
+    }
+    return settingsForRenderer();
+  }
+  // The hub is checked at all — rather than left to the version — because a
+  // version cannot answer for it: two hubs that have never been written to both
+  // report no version, so an edit made against one would pass a version check
+  // against the other and be written into a list it was never meant for.
+  await writeSharedSubscriptions(list, String(base?.updatedAt || ''));
+  return settingsForRenderer();
+}
+
+// `options` is forwarded verbatim to the runtime; the quit path passes
+// `skipCloseWatchers` (see stopAll).
+function stopSyncCollector(options = {}) {
+  if (deviceRuntimeHandle) { try { deviceRuntimeHandle.stop(options); } catch (_) {} }
+  deviceRuntimeHandle = null;
 }
 
 function startSyncCollector() {
   stopSyncCollector();
   if (!effectiveHubConfig().url) return;
+  const widgetProducerOwner = captureMacWidgetProducerOwner();
   const syncUploadScheduler = createSyncUploadScheduler({
     intervalMs: syncUploadIntervalMs(),
     upload: postToHub,
     onError: (error) => console.log(`[sync-collector] post failed: ${error.message}`)
   });
-  const collectorHandle = startCollector({
-    clients: clientsCsvForSetting(settings.clients),
-    allTimeSince: settings.allTimeSince || '2024-01-01',
-    commandTimeoutMs: 120 * 1000,
-    deviceId: settings.deviceId || defaultDeviceId(),
-    agentVersion: appVersion(),
-    agentRuntime: 'electron-widget',
-    intervalMs: collectorIntervalMs(),
-    historyEnabled: settings.historyEnabled !== false,
-    dailyHistoryArchiveEnabled: settings.sessionUsageArchiveEnabled !== false,
-    dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
-    projectsEnabled: settings.projectsEnabled !== false,
-    historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
-    watchEnabled: collectorWatchEnabled(),
-    watchDebounceMs: 1500,
-    limitsEnabled: settings.limitsEnabled !== false,
-    wslScanEnabled: settings.wslScanEnabled !== false,
-    limitProviders: settings.limitProviders ?? defaultLimitProviders(),
-    limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
-    previousLimits: lastCollectedDevice?.limits,
-    opencodeCookie: settings.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
-    opencodeProfiles: settings.opencodeProfiles || {},
-    deepseekApiKey: settings.deepseekApiKey || '',
-    minimaxApiKey: settings.minimaxApiKey || '',
-    copilotApiToken: settings.copilotApiToken || '',
-    copilotEnterpriseHost: settings.copilotEnterpriseHost || '',
-    zaiApiKey: settings.zaiApiKey || '',
-    zaiApiRegion: settings.zaiApiRegion || 'global',
-    zaiTeamApiKey: settings.zaiTeamApiKey || '',
-    zaiTeamOrganizationId: settings.zaiTeamOrganizationId || '',
-    zaiTeamProjectId: settings.zaiTeamProjectId || '',
-    volcengineAccessKeyId: settings.volcengineAccessKeyId || '',
-    volcengineSecretAccessKey: settings.volcengineSecretAccessKey || '',
-    volcengineRegion: settings.volcengineRegion || '',
-    qoderCookie: settings.qoderCookie || '',
-    qoderSite: settings.qoderSite || 'global',
-    kimiApiKey: settings.kimiApiKey || '',
-    ollamaCookie: settings.ollamaCookie || '',
-    codexManagedAccounts: codexManagedAccountsForCollector(),
-    mimoManagedAccounts: mimoManagedAccountsForCollector(),
-    onUpdate: async (summary) => {
+  const sink = {
+    async enqueue(summary, revision) {
       if (isExternalAgentActive()) { sessionUsageArchive = null; return; }
       const visibleSummary = {
-        ...summaryWithArchivedClientUsage(summary),
+        ...summary,
         syncUploadIntervalMs: syncUploadIntervalMs()
       };
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
       const displayStats = composeLocalSyncStats(latestHubStats, lastCollectedDevice);
       if (displayStats) {
-        updateDiscordRpc(displayStats, settings.currency);
-        sendPush({ event: 'stats', data: { type: 'stats', reason: 'local', stats: displayStats, at: new Date().toISOString() } });
+        updateDiscordRpcDisplay(displayStats);
+        sendPush({ event: 'stats', data: { type: 'stats', reason: 'local', stats: displayStats, at: new Date().toISOString() } }, { widgetProducerOwner });
       }
-      try {
-        await syncUploadScheduler.enqueue(visibleSummary);
-      } catch (error) {
-        console.log(`[sync-collector] post failed: ${error.message}`);
-      }
+      await syncUploadScheduler.enqueue(visibleSummary, revision);
     },
-    onError: (error, reason) => console.log(`[sync-collector] ${reason}: ${error.message}`),
-    logger: (msg) => console.log(`[sync-collector] ${msg}`)
-  });
-  syncCollectorHandle = {
-    stop() {
-      syncUploadScheduler.stop();
-      collectorHandle.stop();
-    },
-    tick: collectorHandle.tick
+    flush: () => syncUploadScheduler.flush(),
+    stop: () => syncUploadScheduler.stop()
   };
+  deviceRuntimeHandle = createDeviceRuntime({
+    envelope: electronDeviceEnvelope(),
+    initialLimits: lastCollectedDevice?.limits,
+    limitsOptions: electronLimitsConfig(),
+    transformUsage: summaryWithArchivedClientUsage,
+    usageOptions: electronUsageConfig('sync-collector'),
+    sink,
+    onDiagnosticEvent: recordDiagnosticEvent,
+    onError: (error, reason) => console.log(`[sync-collector] ${reason}: ${error.message}`)
+  }, {
+    limitsDeps: electronLimitsDeps()
+  });
+  drainPendingRuntimeActions(deviceRuntimeHandle);
 }
 
 // Host mode: this device's own usage goes straight into the embedded hub's store
@@ -2052,49 +3278,10 @@ function startSyncCollector() {
 // Monitor's own outbound connections can't zero out the widget's own usage (#17).
 function startHostCollector() {
   stopSyncCollector();
-  syncCollectorHandle = startCollector({
-    clients: clientsCsvForSetting(settings.clients),
-    allTimeSince: settings.allTimeSince || '2024-01-01',
-    commandTimeoutMs: 120 * 1000,
-    deviceId: settings.deviceId || defaultDeviceId(),
-    agentVersion: appVersion(),
-    agentRuntime: 'electron-widget',
-    intervalMs: collectorIntervalMs(),
-    historyEnabled: settings.historyEnabled !== false,
-    dailyHistoryArchiveEnabled: settings.sessionUsageArchiveEnabled !== false,
-    dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
-    projectsEnabled: settings.projectsEnabled !== false,
-    historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
-    watchEnabled: collectorWatchEnabled(),
-    watchDebounceMs: 1500,
-    limitsEnabled: settings.limitsEnabled !== false,
-    wslScanEnabled: settings.wslScanEnabled !== false,
-    limitProviders: settings.limitProviders ?? defaultLimitProviders(),
-    limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
-    previousLimits: lastCollectedDevice?.limits,
-    opencodeCookie: settings.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
-    opencodeProfiles: settings.opencodeProfiles || {},
-    deepseekApiKey: settings.deepseekApiKey || '',
-    minimaxApiKey: settings.minimaxApiKey || '',
-    copilotApiToken: settings.copilotApiToken || '',
-    copilotEnterpriseHost: settings.copilotEnterpriseHost || '',
-    zaiApiKey: settings.zaiApiKey || '',
-    zaiApiRegion: settings.zaiApiRegion || 'global',
-    zaiTeamApiKey: settings.zaiTeamApiKey || '',
-    zaiTeamOrganizationId: settings.zaiTeamOrganizationId || '',
-    zaiTeamProjectId: settings.zaiTeamProjectId || '',
-    volcengineAccessKeyId: settings.volcengineAccessKeyId || '',
-    volcengineSecretAccessKey: settings.volcengineSecretAccessKey || '',
-    volcengineRegion: settings.volcengineRegion || '',
-    qoderCookie: settings.qoderCookie || '',
-    qoderSite: settings.qoderSite || 'global',
-    kimiApiKey: settings.kimiApiKey || '',
-    ollamaCookie: settings.ollamaCookie || '',
-    codexManagedAccounts: codexManagedAccountsForCollector(),
-    mimoManagedAccounts: mimoManagedAccountsForCollector(),
-    onUpdate: (summary) => {
+  const sink = {
+    enqueue(summary) {
       if (isExternalAgentActive()) { sessionUsageArchive = null; return; }
-      const visibleSummary = summaryWithArchivedClientUsage(summary);
+      const visibleSummary = summary;
       lastCollectedDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
       if (!embeddedHub) return;
       try {
@@ -2114,10 +3301,21 @@ function startHostCollector() {
       } catch (error) {
         console.log(`[host-ingest] failed: ${error.message}`);
       }
-    },
-    onError: (error, reason) => console.log(`[host-collector] ${reason}: ${error.message}`),
-    logger: (msg) => console.log(`[host-collector] ${msg}`)
+    }
+  };
+  deviceRuntimeHandle = createDeviceRuntime({
+    envelope: electronDeviceEnvelope(),
+    initialLimits: lastCollectedDevice?.limits,
+    limitsOptions: electronLimitsConfig(),
+    transformUsage: summaryWithArchivedClientUsage,
+    usageOptions: electronUsageConfig('host-collector'),
+    sink,
+    onDiagnosticEvent: recordDiagnosticEvent,
+    onError: (error, reason) => console.log(`[host-collector] ${reason}: ${error.message}`)
+  }, {
+    limitsDeps: electronLimitsDeps()
   });
+  drainPendingRuntimeActions(deviceRuntimeHandle);
 }
 
 function stopHostStats() {
@@ -2128,14 +3326,19 @@ function stopHostStats() {
 function startHostStats() {
   stopHostStats();
   if (!embeddedHub) return;
+  const generation = hubModeGeneration;
+  const widgetProducerOwner = captureMacWidgetProducerOwner();
+  const cacheIdentity = currentHubStatsIdentity('host');
   // Host mode presents the same multi-device hub aggregate as connecting to a
   // remote hub, so it reuses the renderer's 'sync' status path (Live / synced
   // data). The in-process vs loopback distinction is internal to fetchStats.
   mode = 'sync';
   sendStatus(true);
   const emit = (stats, reason = 'hub') => {
-    updateDiscordRpc(stats, settings.currency);
-    sendPush({ event: 'stats', data: { type: 'stats', reason, stats, at: new Date().toISOString() } });
+    if (!hubModeRequestIsCurrent(generation, 'host', cacheIdentity)) return;
+    setLatestHubStatsCache(stats, 'host', generation, cacheIdentity);
+    updateDiscordRpcDisplay(stats);
+    sendPush({ event: 'stats', data: { type: 'stats', reason, stats, at: new Date().toISOString() } }, { widgetProducerOwner });
   };
   embeddedHubUnsub = embeddedHub.hub.onStats((stats, reason) => emit(stats, reason || 'hub'));
   // Prime the renderer with the current snapshot so it isn't blank until the
@@ -2144,16 +3347,17 @@ function startHostStats() {
 }
 
 // Detection status is about this machine's local files, so stamp the freshly
-// collected local clientStatus AND wslStatus onto the local device in whatever
-// stats we hand the renderer. This keeps the 采集 tags + WSL panel correct in
-// sync/host mode without depending on the hub (or a remote Worker) being
-// redeployed to preserve these fields.
+// collected local clientStatus, clientHealth AND wslStatus onto the local device
+// in whatever stats we hand the renderer. This keeps the 采集 tags + WSL panel
+// correct in sync/host mode without depending on the hub (or a remote Worker)
+// being redeployed to preserve these fields.
 function injectLocalDeviceStatus(stats) {
   if (!stats || !Array.isArray(stats.devices)) return stats;
   if (lastCollectedDevice) {
     const device = stats.devices.find((entry) => entry.deviceId === lastCollectedDevice.deviceId);
     if (device) {
       if (lastCollectedDevice.clientStatus) device.clientStatus = lastCollectedDevice.clientStatus;
+      if (lastCollectedDevice.clientHealth) device.clientHealth = lastCollectedDevice.clientHealth;
       if (lastCollectedDevice.wslStatus) device.wslStatus = lastCollectedDevice.wslStatus;
     }
   }
@@ -2173,27 +3377,203 @@ function injectLocalDeviceStatus(stats) {
   return stats;
 }
 
-function sendPush(payload) {
+function macWidgetConfiguration() {
+  if (process.platform !== 'darwin') return null;
+  if (cachedMacWidgetConfiguration !== undefined) return cachedMacWidgetConfiguration;
+
+  let appGroup = String(process.env.TOKEN_MONITOR_APP_GROUP || '').trim();
+  let urlScheme = String(process.env.TOKEN_MONITOR_WIDGET_URL_SCHEME || 'token-monitor').trim();
+  let snapshotFileName = 'snapshot.json';
+  let widgetKind = DEFAULT_WIDGET_KIND;
+  const configCandidates = [
+    path.join(process.resourcesPath, 'token-monitor-widget.json'),
+    path.resolve(__dirname, '..', '..', 'build', 'macos-widget', 'widget-config.json')
+  ];
+  if (!appGroup) {
+    for (const configPath of configCandidates) {
+      try {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        appGroup = String(config.appGroup || '').trim();
+        urlScheme = String(config.urlScheme || urlScheme).trim();
+        widgetKind = String(config.widgetKind || widgetKind).trim();
+        snapshotFileName = String(config.snapshotFileName || snapshotFileName).trim();
+        if (appGroup) break;
+      } catch (_) {}
+    }
+  }
+  const snapshotPath = resolveMacWidgetSnapshotPath({
+    appGroup,
+    home: app.getPath('home'),
+    snapshotFileName
+  });
+  if (!snapshotPath) {
+    cachedMacWidgetConfiguration = null;
+    return cachedMacWidgetConfiguration;
+  }
+  cachedMacWidgetConfiguration = {
+    appGroup,
+    snapshotPath,
+    widgetKind,
+    urlScheme: (() => {
+      try { return normalizeWidgetURLScheme(urlScheme); } catch (_) { return 'token-monitor'; }
+    })()
+  };
+  return cachedMacWidgetConfiguration;
+}
+
+function historyResolverOptions() {
+  const { url: hubUrl, secret } = effectiveHubConfig();
+  return {
+    aggregateHistory,
+    embeddedHub,
+    historyEnabled: settings?.historyEnabled !== false,
+    hubMode: settings?.hubMode,
+    hubUrl,
+    localDevice,
+    mode,
+    secret
+  };
+}
+
+function getCompleteHistory() {
+  return resolveCompleteHistory(historyResolverOptions());
+}
+
+function macWidgetPresentation() {
+  return Object.freeze({
+    currencyCode: settings?.currency,
+    currencyRate: effectiveRates?.[normalizeCurrency(settings?.currency)] || 1,
+    compactNumbers: settings?.showCompactTotalTokens !== false,
+    compactTokenUnits: settings?.compactTokenUnits,
+    showCost: true,
+    locale: settings?.language,
+    theme: Object.keys(settings?.themeColors || {}).length ? 'custom' : 'system'
+  });
+}
+
+function captureMacWidgetWork({ stats, owner }) {
+  const widget = macWidgetConfiguration();
+  if (!widget) return null;
+  const resolverConfig = Object.freeze({ ...historyResolverOptions() });
+  return {
+    stats,
+    owner: Object.freeze({
+      epoch: owner.epoch,
+      sourceKey: macWidgetHistorySourceKey(resolverConfig)
+    }),
+    resolverConfig,
+    presentation: macWidgetPresentation(),
+    snapshotPath: widget.snapshotPath,
+    widgetKind: widget.widgetKind
+  };
+}
+
+function ensureMacWidgetSnapshotController() {
+  if (process.platform !== 'darwin') return null;
+  if (macWidgetSnapshotController) return macWidgetSnapshotController;
+  macWidgetSnapshotController = createMacWidgetSnapshotController({
+    startPaused: !macWidgetPublicationReady,
+    captureWork: captureMacWidgetWork,
+    resolveHistory: (work) => resolveMacWidgetHistory({
+      generation: work.owner.epoch,
+      sourceKey: work.owner.sourceKey,
+      revision: work.stats?.historyRevision,
+      fetchHistory: () => resolveCompleteHistory(work.resolverConfig),
+      minIntervalMs: completeHistorySource(work.resolverConfig) === 'remote' ? undefined : 0,
+      logger: (message) => console.warn(message)
+    }),
+    prepareSnapshot: (work, history) => prepareMacWidgetSnapshotUpdate(work.stats, {
+      snapshotPath: work.snapshotPath,
+      snapshotOptions: {
+        presentation: work.presentation,
+        history
+      },
+      logger: (message) => console.warn(message)
+    }),
+    commitSnapshot: (prepared, options) => commitMacWidgetSnapshot(prepared, {
+      isCurrent: options.isCurrent,
+      logger: (message) => console.warn(message)
+    }),
+    syncSnapshot: (_work, committed, prepared) => syncMacWidgetSnapshotDirectory({
+      ...committed,
+      fs: prepared?.fs
+    }),
+    discardSnapshot: discardMacWidgetSnapshot,
+    reloadSnapshot: (work, options) => requestMacWidgetReload({
+      widgetKind: work.widgetKind,
+      isCurrent: options.isCurrent,
+      logger: (message) => console.warn(message)
+    }),
+    logger: (message) => console.warn(message)
+  });
+  return macWidgetSnapshotController;
+}
+
+function captureMacWidgetProducerOwner() {
+  return ensureMacWidgetSnapshotController()?.captureProducerOwner() || null;
+}
+
+function advanceMacWidgetProducerAndSourceEpoch() {
+  ensureMacWidgetSnapshotController()?.advanceProducerAndSourceEpoch();
+}
+
+function advanceMacWidgetSourceEpoch() {
+  ensureMacWidgetSnapshotController()?.advanceSourceEpoch();
+}
+
+function refreshMacWidgetHistorySource() {
+  advanceMacWidgetSourceEpoch();
+  const visibleStats = electronPresentationStats(latestStats);
+  scheduleMacWidgetSnapshot(visibleStats, captureMacWidgetProducerOwner());
+}
+
+function scheduleMacWidgetSnapshot(stats, producerOwner) {
+  if (process.platform !== 'darwin' || !stats) return false;
+  return ensureMacWidgetSnapshotController()?.enqueue({ stats, producerOwner }) || false;
+}
+
+// Two options, both for the cold-start seed and neither for live stats.
+// `skipExport` keeps a republished snapshot from spending the auto-export
+// interval that this run's first real scan needs. `deferToRenderer` waits for
+// the renderer to finish loading, and is deliberately not the default: a live
+// push that lands mid-load is already covered by the refreshStats() the renderer
+// runs on init, so deferring every one of them would only queue a listener per
+// frame against a slow load and then replay a burst of superseded stats.
+function sendPush(payload, options = {}) {
   const previousHistoryRevision = statsHistoryRevision(latestStats);
+  let rendererPayload = payload;
   if (payload?.data?.stats) {
     injectLocalDeviceStatus(payload.data.stats);
     latestStats = payload.data.stats;
+    const visibleStats = electronPresentationStats(latestStats);
+    rendererPayload = {
+      ...payload,
+      data: { ...payload.data, stats: visibleStats }
+    };
+    scheduleMacWidgetSnapshot(visibleStats, options.widgetProducerOwner);
     syncTrayCodexActiveAccount();
     updateTrayDisplay();
-    if (settings.exportAutoEnabled && settings.exportDir && Date.now() - lastExportAt >= exportIntervalMs()) {
+    if (!options.skipExport && settings.exportAutoEnabled && settings.exportDir && Date.now() - lastExportAt >= exportIntervalMs()) {
       lastExportAt = Date.now();
       writeExportTo(settings.exportDir, payload.data.stats.periods, { skipUnchanged: true })
         .catch((err) => console.warn(`[export] auto-export failed: ${err.message}`));
     }
   }
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try { mainWindow.webContents.send('stats:push', payload); } catch (_) {}
+  if (options.deferToRenderer) {
+    // Only while it is still the newest thing published. A slow load can outlast
+    // the first real collection, and delivering the queued snapshot then would
+    // walk the numbers backwards until the next push.
+    const deferred = payload?.data?.stats;
+    sendMainWindowEvent('stats:push', rendererPayload, () => !deferred || latestStats === deferred);
+  } else if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('stats:push', rendererPayload); } catch (_) {}
   }
   if (payload?.data?.stats) {
     const nextHistoryRevision = statsHistoryRevision(payload.data.stats);
     if (nextHistoryRevision !== previousHistoryRevision && dashboardWindow && !dashboardWindow.isDestroyed()) {
       try { dashboardWindow.webContents.send('dashboard:historyChanged'); } catch (_) {}
     }
+    maybeAdoptSharedSubscriptionRevision(payload.data.stats);
   }
 }
 
@@ -2239,156 +3619,168 @@ async function refreshExchangeRates({ force = false } = {}) {
   }
   applyEffectiveRates();
   updateTrayDisplay();
-  if (settings?.discordRpcEnabled && latestStats) updateDiscordRpc(latestStats, settings.currency);
+  if (settings?.discordRpcEnabled && latestStats) updateDiscordRpcDisplay(latestStats);
   pushSettingsToRenderer();
+}
+
+function compactTokenDisplayOptions() {
+  return {
+    compactTokenUnits: settings?.compactTokenUnits,
+    locale: trayMenuLocale()
+  };
+}
+
+function updateDiscordRpcDisplay(stats) {
+  updateDiscordRpc(stats, settings?.currency, compactTokenDisplayOptions());
 }
 
 function updateTrayDisplay() {
   if (!tray || tray.isDestroyed()) return;
+  const visibleStats = electronPresentationStats(latestStats);
   const mode = settings?.trayContent || 'tokens';
   const currency = normalizeCurrency(settings?.currency);
-  const limitText = formatTrayText(latestStats, mode, currency, {
+  const compactOptions = compactTokenDisplayOptions();
+  const limitText = formatTrayText(visibleStats, mode, currency, {
     limitProviderOrder: settings?.limitProviderOrder,
     limitProviders: settings?.limitProviders,
-    showLimitUsed: settings?.showLimitUsed
+    showLimitUsed: settings?.showLimitUsed,
+    ...compactOptions
   });
   const barsImageMode = isBarsTrayIconMode(mode) && !limitText && providerTrayIcons[mode];
   // A renderer-generated icon is cached in the main process. Only reuse it
   // while the current stats still have quota text; otherwise it can outlive
   // the provider data that generated it.
   const trayImageMode = mode === 'limitsAllSessions' && Boolean(limitText) && providerTrayIcons[mode];
-  const text = trayImageMode ? '' : limitText;
-  if (process.platform === 'darwin') tray.setTitle(text);
+  const customImageMode = mode === 'custom' && providerTrayIcons.custom;
+  const text = trayImageMode || customImageMode ? '' : limitText;
+  if (trayShowsTitle(process.platform)) tray.setTitle(text);
   // Tooltip always shows a useful summary, even in icon-only mode where setTitle is blank.
-  const tip = formatTrayText(latestStats, 'both', currency);
+  const tip = formatTrayText(visibleStats, 'both', currency, compactOptions);
   tray.setToolTip(`Token Monitor - ${tip}`);
   // Icon: rendered bars image in bar modes, otherwise the app icon.
   let icon = null;
-  if (barsImageMode || trayImageMode) {
+  if (barsImageMode || trayImageMode || customImageMode) {
     icon = providerTrayIcons[mode];
   } else {
-    const usageIconId = pickUsageTrayIconId(latestStats, mode, Object.keys(providerTrayIcons));
+    const usageIconId = pickUsageTrayIconId(visibleStats, mode, Object.keys(providerTrayIcons));
     if (usageIconId) icon = providerTrayIcons[usageIconId];
   }
   tray.setImage(icon || getDefaultTrayIcon());
 }
 
+function recordDiagnosticEvent(event) {
+  diagnosticJournal.record({
+    ...event,
+    modeAtEvent: settings?.hubMode || 'local'
+  });
+}
+
 function sendStatus(connected, extra) {
+  const previous = streamConnected;
   streamConnected = Boolean(connected);
   streamFailure = streamConnected ? null : ((extra && extra.reason) ? { reason: extra.reason, detail: extra.detail ?? null } : streamFailure);
+  if (mode === 'sync') {
+    if (streamConnected && !previous) {
+      recordDiagnosticEvent({ subsystem: 'stream', code: 'stream-reconnected' });
+    } else if (!streamConnected && (previous || extra?.reason)) {
+      recordDiagnosticEvent({
+        subsystem: 'stream',
+        code: 'stream-disconnected',
+        detailCode: diagnosticStreamDetailCode(extra || streamFailure || {})
+      });
+    }
+  }
   sendPush({ event: 'status', data: { connected: streamConnected, mode, ...(extra || {}) } });
 }
 
-function stopLocalCollector() {
-  if (localCollectorHandle) { try { localCollectorHandle.stop(); } catch (_) {} }
-  localCollectorHandle = null;
+// `options` is forwarded verbatim to the runtime; the quit path passes
+// `skipCloseWatchers` (see stopAll).
+function stopLocalCollector(options = {}) {
+  if (deviceRuntimeHandle) { try { deviceRuntimeHandle.stop(options); } catch (_) {} }
+  deviceRuntimeHandle = null;
   localDevice = null;
   localStats = null;
 }
 
+// Show the last full scan's totals while the first one of this run is still
+// going, instead of zeros for the tens of seconds it takes. deviceRecordFromAnchor
+// owns the trust rules; anything it rejects leaves the renderer on its normal
+// wait-for-real-data path.
+function primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner) {
+  // Cold start only. startMode() re-enters here on structural settings changes
+  // as well, and there the numbers already collected are newer than any anchor.
+  if (lastCollectedDevice) return;
+  const deviceRecord = deviceRecordFromAnchor(
+    readJson(path.join(sharedDataDir(), 'collector-anchor.json'), null),
+    {
+      envelope: electronDeviceEnvelope(),
+      clients: usageOptions.clients,
+      allTimeSince: usageOptions.allTimeSince,
+      projectsEnabled: usageOptions.projectsEnabled,
+      wslScanEnabled: usageOptions.wslScanEnabled,
+      wslSupported: process.platform === 'win32',
+      hostname: os.hostname(),
+      platform: `${process.platform}-${process.arch}`
+    }
+  );
+  if (!deviceRecord) return;
+  // The anchor holds raw collector output, while everything the renderer is ever
+  // shown has been through the archives first. Project the same way or the seed
+  // reads low for anyone with an un-tracked client or retained sessions, and then
+  // jumps when the first scan lands. Read-only on purpose: the capture step
+  // records a fresh observation, and an anchor from hours ago is not one.
+  const visible = summaryWithArchivesApplied(
+    deviceRecord,
+    settings?.sessionUsageArchiveEnabled === false ? null : ensureSessionUsageArchiveLoaded(),
+    sessionUsageArchiveDate(deviceRecord)
+  );
+  localDevice = visible;
+  localStats = withHistoryPreview(aggregateDevices([visible], 0), [visible]);
+  // Through the normal publisher, not straight to the renderer: the tray reads
+  // what sendPush sets, and in tray mode the window is hidden, so a seed that
+  // only reached the renderer would leave the one visible surface on zero.
+  // This one waits for the renderer: it is the only stats push whose whole point
+  // is to be on screen before the first scan, so it cannot be left to the
+  // refreshStats() that covers the rest. It must also not spend the export
+  // interval this run's first live scan needs on a snapshot it is republishing.
+  sendPush({
+    event: 'stats',
+    data: { type: 'stats', reason: 'anchor', stats: localStats, at: deviceRecord.receivedAt }
+  }, { skipExport: true, deferToRenderer: true, widgetProducerOwner });
+}
+
 function startLocalCollector() {
   stopLocalCollector();
+  const widgetProducerOwner = captureMacWidgetProducerOwner();
   mode = 'local';
   sendStatus(false, { reason: 'collecting' });
-  localCollectorHandle = startCollector({
-    clients: clientsCsvForSetting(settings.clients),
-    allTimeSince: settings.allTimeSince || '2024-01-01',
-    commandTimeoutMs: 120 * 1000,
-    deviceId: settings.deviceId || defaultDeviceId(),
-    agentVersion: appVersion(),
-    agentRuntime: 'electron-widget',
-    intervalMs: collectorIntervalMs(),
-    historyEnabled: settings.historyEnabled !== false,
-    dailyHistoryArchiveEnabled: settings.sessionUsageArchiveEnabled !== false,
-    dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
-    projectsEnabled: settings.projectsEnabled !== false,
-    historyIntervalMs: normalizeHistoryIntervalMs(settings.historyIntervalMs),
-    watchEnabled: collectorWatchEnabled(),
-    watchDebounceMs: 1500,
-    limitsEnabled: settings.limitsEnabled !== false,
-    wslScanEnabled: settings.wslScanEnabled !== false,
-    limitProviders: settings.limitProviders ?? defaultLimitProviders(),
-    limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
-    previousLimits: lastCollectedDevice?.limits,
-    opencodeCookie: settings.opencodeCookie || process.env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
-    opencodeProfiles: settings.opencodeProfiles || {},
-    deepseekApiKey: settings.deepseekApiKey || '',
-    minimaxApiKey: settings.minimaxApiKey || '',
-    copilotApiToken: settings.copilotApiToken || '',
-    copilotEnterpriseHost: settings.copilotEnterpriseHost || '',
-    zaiApiKey: settings.zaiApiKey || '',
-    zaiApiRegion: settings.zaiApiRegion || 'global',
-    zaiTeamApiKey: settings.zaiTeamApiKey || '',
-    zaiTeamOrganizationId: settings.zaiTeamOrganizationId || '',
-    zaiTeamProjectId: settings.zaiTeamProjectId || '',
-    volcengineAccessKeyId: settings.volcengineAccessKeyId || '',
-    volcengineSecretAccessKey: settings.volcengineSecretAccessKey || '',
-    volcengineRegion: settings.volcengineRegion || '',
-    qoderCookie: settings.qoderCookie || '',
-    qoderSite: settings.qoderSite || 'global',
-    kimiApiKey: settings.kimiApiKey || '',
-    ollamaCookie: settings.ollamaCookie || '',
-    codexManagedAccounts: codexManagedAccountsForCollector(),
-    mimoManagedAccounts: mimoManagedAccountsForCollector(),
-    onUpdate: (summary, reason) => {
-      const visibleSummary = summaryWithArchivedClientUsage(summary);
-      // History only rides along on gated ticks; carry the last known history
-      // forward so the trends dashboard doesn't blank out between them.
-      localDevice = carryDeviceHistory(localDevice, { ...visibleSummary, receivedAt: new Date().toISOString() });
+  // One config object for both, so the fingerprint the seed validates against
+  // cannot drift from the one the collector will compute.
+  const usageOptions = electronUsageConfig('collector');
+  primeLocalStatsFromAnchor(usageOptions, widgetProducerOwner);
+  deviceRuntimeHandle = createDeviceRuntime({
+    envelope: electronDeviceEnvelope(),
+    initialLimits: lastCollectedDevice?.limits,
+    limitsOptions: electronLimitsConfig(),
+    transformUsage: summaryWithArchivedClientUsage,
+    usageOptions,
+    progressive: true,
+    onRecord: (summary, meta) => {
+      const reason = meta.reason;
+      const visibleSummary = summary;
+      localDevice = { ...visibleSummary, receivedAt: new Date().toISOString() };
       lastCollectedDevice = localDevice;
       localStats = withHistoryPreview(aggregateDevices([localDevice], 0), [localDevice]);
-      updateDiscordRpc(localStats, settings.currency);
-      sendPush({ event: 'stats', data: { type: 'stats', reason, stats: localStats, at: new Date().toISOString() } });
+      updateDiscordRpcDisplay(localStats);
+      sendPush({ event: 'stats', data: { type: 'stats', reason, stats: localStats, at: new Date().toISOString() } }, { widgetProducerOwner });
       sendStatus(true, { reason });
     },
-    // Progressive push: mid-tick partial results (today-only / today+month).
-    // Only wired for the local collector; sync/host modes never see these.
-    // History is carried forward by carryDeviceHistory; limits are carried
-    // forward manually so the limits panel doesn't flash empty between scans.
-    // Month/allTime/clientStatus are also carried forward when omitted so
-    // warm full scans stay stable across progressive updates.
-    onPreview: (summary) => {
-      const prevDevice = localDevice;
-      // Capture carry-forward needs before summaryWithArchivedClientUsage,
-      // which fills in empty periods for undefined fields (archived client path).
-      const needsMonth = !summary.month;
-      const needsAllTime = !summary.allTime;
-      const needsClientStatus = !summary.clientStatus;
-      const needsWslStatus = !summary.wslStatus;
-
-      const visible = summaryWithArchivedClientUsage(summary);
-      localDevice = carryDeviceHistory(localDevice, { ...visible, receivedAt: new Date().toISOString() });
-      // Carry forward usage periods omitted from the preview so warm full
-      // scans don't flash month/allTime to empty between tokscale scans.
-      if (needsMonth && prevDevice?.month) {
-        localDevice = { ...localDevice, month: prevDevice.month };
-      }
-      if (needsAllTime && prevDevice?.allTime) {
-        localDevice = { ...localDevice, allTime: prevDevice.allTime };
-      }
-      // Carry forward clientStatus when allTime is not yet available.
-      if (needsClientStatus && prevDevice?.clientStatus) {
-        localDevice = { ...localDevice, clientStatus: prevDevice.clientStatus };
-      }
-      // Carry forward wslStatus — previews never include it, so without this the
-      // WSL detection panel would blank during a warm scan if Settings is open.
-      if (needsWslStatus && prevDevice?.wslStatus) {
-        localDevice = { ...localDevice, wslStatus: prevDevice.wslStatus };
-      }
-      if (!visible.limits && prevDevice?.limits) {
-        localDevice = { ...localDevice, limits: prevDevice.limits };
-      }
-      lastCollectedDevice = localDevice;
-      localStats = withHistoryPreview(aggregateDevices([localDevice], 0), [localDevice]);
-      updateDiscordRpc(localStats, settings.currency);
-      sendPush({ event: 'stats', data: { type: 'stats', reason: 'progress', stats: localStats, at: new Date().toISOString() } });
-      sendStatus(true, { reason: 'progress' });
-    },
-    onError: (error, reason) => {
-      sendStatus(false, { reason: `${reason}:${error.message}` });
-    },
-    logger: (msg) => console.log(`[collector] ${msg}`)
+    onDiagnosticEvent: recordDiagnosticEvent,
+    onError: (error, reason) => sendStatus(false, { reason: `${reason}:${error.message}` })
+  }, {
+    limitsDeps: electronLimitsDeps()
   });
+  drainPendingRuntimeActions(deviceRuntimeHandle);
 }
 
 function scheduleStreamRetry(delayMs = 3000) {
@@ -2416,7 +3808,13 @@ function parseSseChunk(chunk) {
 
 async function startStatsStream(options = {}) {
   stopStatsStream();
-  if (options.resetSnapshot) latestHubStats = null;
+  const generation = hubModeGeneration;
+  const widgetProducerOwner = captureMacWidgetProducerOwner();
+  if (settings?.hubMode !== 'client') return;
+  const cacheIdentity = currentHubStatsIdentity('client');
+  if (options.resetSnapshot) {
+    clearLatestHubStatsCache();
+  }
   const { url: hubUrl, secret } = effectiveHubConfig();
   if (!hubUrl) return;
   mode = 'sync';
@@ -2428,6 +3826,7 @@ async function startStatsStream(options = {}) {
       headers: { accept: 'text/event-stream', ...(secret ? { authorization: `Bearer ${secret}` } : {}) },
       signal: controller.signal
     });
+    if (!hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
     if (!response.ok || !response.body) {
       sendStatus(false, classifyStreamFailure({ status: response.status }));
       scheduleStreamRetry();
@@ -2438,7 +3837,9 @@ async function startStatsStream(options = {}) {
     const decoder = new TextDecoder();
     let buffer = '';
     for (;;) {
+      if (!hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
       const { value, done } = await reader.read();
+      if (!hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let idx;
@@ -2448,19 +3849,20 @@ async function startStatsStream(options = {}) {
         let parsed = parseSseChunk(chunk);
         if (parsed) {
           if (parsed.event === 'stats' && parsed.data?.stats) {
-            latestHubStats = parsed.data.stats;
+            setLatestHubStatsCache(parsed.data.stats, 'client', generation, cacheIdentity);
             const displayStats = composeLocalSyncStats(latestHubStats, lastCollectedDevice);
             parsed = { ...parsed, data: { ...parsed.data, stats: displayStats } };
-            updateDiscordRpc(displayStats, settings.currency);
+            updateDiscordRpcDisplay(displayStats);
           }
-          sendPush(parsed);
+          sendPush(parsed, { widgetProducerOwner });
         }
       }
     }
+    if (!hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
     sendStatus(false, classifyStreamFailure({ eof: true }));
     scheduleStreamRetry();
   } catch (error) {
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted || !hubModeRequestIsCurrent(generation, 'client', cacheIdentity)) return;
     sendStatus(false, classifyStreamFailure({ errorCode: error?.cause?.code || error?.code, message: error?.message }));
     scheduleStreamRetry();
   }
@@ -2469,17 +3871,48 @@ async function startStatsStream(options = {}) {
 function showPopover() {
   if (!mainWindow || mainWindow.isDestroyed() || !tray) return;
   applyMacActivationPolicy();
+  applyMacSpaceBehavior(true);
   applyWindowSettings();
   const current = mainWindow.getBounds();
   const target = popoverBounds(tray, current.width, current.height);
   mainWindow.setBounds(target);
   suppressNextBlurHide = true;
   mainWindow.show();
-  mainWindow.focus();
   // The focus event itself may not fire a blur; the suppress flag covers the
   // case where macOS fires blur immediately after show because the click that
   // opened us still has the menu bar as the focused element.
   setTimeout(() => { suppressNextBlurHide = false; }, 250);
+}
+
+function openMainWindowFromWidget() {
+  if (!app.isReady()) return;
+  const destination = pendingMacWidgetOpen || { page: 'overview', view: 'home', settings: false };
+  pendingMacWidgetOpen = null;
+  updateRendererViewState({ breakdown: destination.view });
+  applyMacActivationPolicy({ mainWindowVisible: true });
+  // Closing the window with the tray icon off destroys it while macOS keeps the
+  // app alive, so a widget click has to be able to build one again — the same
+  // recovery focusExistingWindow() performs for the dock and the shortcut.
+  // Bailing out instead consumed the open-url event and left the widget dead
+  // for the rest of the session, since nothing else reads pendingMacWidgetOpen.
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const sendDestination = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (destination.settings) mainWindow.webContents.send('settings:open');
+    else mainWindow.webContents.send('view:open', destination.view);
+  };
+  if (mainWindow.webContents.isLoadingMainFrame()) mainWindow.webContents.once('did-finish-load', sendDestination);
+  else sendDestination();
+  if (settings?.trayMode && tray) {
+    showPopover();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  applyMacSpaceBehavior(false);
+  // A collapsed bubble would otherwise swallow the navigation we just sent.
+  if (floatingBubbleState.collapsed) expandFloatingBubble();
+  else mainWindow.show();
 }
 
 function hidePopover() {
@@ -2501,10 +3934,13 @@ function focusExistingWindow() {
   }
   if (mainWindow.isMinimized()) mainWindow.restore();
   if (settings?.trayMode) showPopover();
-  else if (floatingBubbleState.collapsed) expandFloatingBubble();
   else {
-    mainWindow.show();
-    mainWindow.focus();
+    applyMacSpaceBehavior(false);
+    if (floatingBubbleState.collapsed) expandFloatingBubble();
+    else {
+      mainWindow.show();
+      restoreWindowMaximized(mainWindow, settings);
+    }
   }
 }
 
@@ -2525,7 +3961,51 @@ function redactOpencodeProfilesForRenderer(profiles) {
   return out;
 }
 
+function redactOpenRouterProfilesForRenderer(profiles) {
+  if (!profiles || typeof profiles !== 'object') return profiles;
+  const out = Object.create(null);
+  for (const [name, profile] of Object.entries(profiles)) {
+    out[name] = { enabled: profile?.enabled !== false, apiKey: profile?.apiKey ? 'set' : '' };
+  }
+  return out;
+}
+
+function redactThirdPartyProfilesForRenderer(profiles) {
+  if (!profiles || typeof profiles !== 'object') return profiles;
+  const out = Object.create(null);
+  for (const [name, profile] of Object.entries(profiles)) {
+    const adapter = thirdPartyLimits.normalizeAdapterId(profile?.adapter);
+    out[name] = {
+      enabled: profile?.enabled !== false,
+      adapter,
+      baseUrl: thirdPartyLimits.normalizeThirdPartyBaseUrl(profile?.baseUrl, {
+        stripTerminalV1: adapter !== thirdPartyLimits.CUSTOM_BALANCE_ADAPTER
+      }),
+      userId: String(profile?.userId || '').trim(),
+      ...(adapter === thirdPartyLimits.CUSTOM_BALANCE_ADAPTER
+        ? {
+            endpointPath: thirdPartyLimits.normalizeCustomEndpointPath(profile?.endpointPath),
+            authMode: thirdPartyLimits.normalizeCustomAuthMode(profile?.authMode),
+            remainingPath: thirdPartyLimits.normalizeCustomJsonPath(profile?.remainingPath),
+            usedPath: thirdPartyLimits.normalizeCustomJsonPath(profile?.usedPath),
+            totalPath: thirdPartyLimits.normalizeCustomJsonPath(profile?.totalPath),
+            currency: thirdPartyLimits.normalizeCustomCurrency(profile?.currency),
+            divisor: thirdPartyLimits.normalizeCustomDivisor(profile?.divisor)
+          }
+        : {}),
+      accessToken: profile?.accessToken ? 'set' : '',
+      apiKey: profile?.apiKey ? 'set' : ''
+    };
+  }
+  return out;
+}
+
 function settingsForRenderer() {
+  const claudeWebCookieSource = settings?.claudeWebCookie
+    ? 'settings'
+    : claudeWebCookie(process.env)
+      ? 'env'
+      : '';
   const deepseekApiKeySource = settings?.deepseekApiKey
     ? 'settings'
     : deepseekToken(process.env)
@@ -2571,6 +4051,11 @@ function settingsForRenderer() {
     : kimiToken(process.env)
       ? 'env'
       : '';
+  const kimiWebAccessTokenSource = settings?.kimiWebAccessToken
+    ? 'settings'
+    : kimiWebToken(process.env)
+      ? 'env'
+      : '';
   // Default-deny every credential field added to the canonical store. The two
   // hub secrets remain explicit exceptions because the existing sync UI must
   // prefill/copy them; provider credentials only cross as blank/configured state.
@@ -2579,11 +4064,24 @@ function settingsForRenderer() {
   });
   return {
     ...settings,
+    locale: trayMenuLocale(),
     ...redactedCredentials,
+    // On a hub the shared list is the truth; settings.subscriptions is only the
+    // last-known cache behind it.
+    subscriptions: effectiveSubscriptions(),
+    subscriptionsShared: subscriptionsAreShared(),
+    // Which version of the shared list the one above was taken from, so an edit
+    // built on it can say what it was built on rather than inheriting whatever
+    // this process holds by the time the write goes out — and which hub issued
+    // that version, because it does not mean anything without one.
+    subscriptionsHub: currentHubIdentity(),
+    subscriptionsUpdatedAt: subscriptionsDocumentFor(currentHubIdentity())?.updatedAt || '',
+    subscriptionsOrphaned: pendingOrphanedSubscriptions(),
     zaiApiRegion: normalizeZaiApiRegion(settings?.zaiApiRegion || 'global'),
     zaiTeamOrganizationId: settings?.zaiTeamOrganizationId ? 'set' : '',
     zaiTeamProjectId: settings?.zaiTeamProjectId ? 'set' : '',
     volcengineAccessKeyId: settings?.volcengineAccessKeyId ? 'set' : '',
+    claudeWebCookie: settings?.claudeWebCookie ? 'set' : '',
     qoderCookie: settings?.qoderCookie ? 'set' : '',
     ollamaCookie: settings?.ollamaCookie ? 'set' : '',
     // Never ship OpenCode session cookies to the renderer; the UI only needs to
@@ -2592,8 +4090,18 @@ function settingsForRenderer() {
     ...(settings?.opencodeProfiles
       ? { opencodeProfiles: redactOpencodeProfilesForRenderer(settings.opencodeProfiles) }
       : {}),
+    ...(settings?.openrouterProfiles
+      ? { openrouterProfiles: redactOpenRouterProfilesForRenderer(settings.openrouterProfiles) }
+      : {}),
+    ...(settings?.thirdPartyProfiles
+      ? { thirdPartyProfiles: redactThirdPartyProfilesForRenderer(settings.thirdPartyProfiles) }
+      : {}),
+    openrouterEnvConfigured: Boolean(openrouterLimits.openrouterToken(process.env)),
+    thirdPartyEnvConfigured: thirdPartyLimits.configuredAccounts({}, { env: process.env }).length > 0,
     codexManagedAccounts: codexAccountsForRenderer(),
     mimoManagedAccounts: mimoAccountsForRenderer(),
+    claudeWebCookieConfigured: Boolean(currentClaudeWebCookie()),
+    claudeWebCookieSource,
     deepseekApiKeyConfigured: Boolean(currentDeepSeekApiKey()),
     deepseekApiKeySource,
     minimaxApiKeyConfigured: Boolean(currentMinimaxApiKey()),
@@ -2612,6 +4120,10 @@ function settingsForRenderer() {
     ollamaCookieSource,
     kimiApiKeyConfigured: Boolean(currentKimiApiKey()),
     kimiApiKeySource,
+    kimiWebAccessTokenConfigured: Boolean(currentKimiWebAccessToken()),
+    kimiWebAccessTokenSource,
+    kimiCredentialConfigured: Boolean(currentKimiWebAccessToken() || currentKimiApiKey()),
+    kimiCredentialSource: kimiWebAccessTokenSource || kimiApiKeySource,
     currencyRatesEffective: effectiveRates || resolveEffectiveRates(rateCache?.rates || {}, settings?.currencyRates || {}),
     currencyRateInfo: rateCache ? { source: rateCache.source, date: rateCache.date, fetchedAt: rateCache.fetchedAt } : null,
     windowToggleShortcutStatus: currentWindowToggleShortcutStatus()
@@ -2629,6 +4141,21 @@ function pushSettingsToRenderer() {
   // refresh or manual override until it is reopened.
   if (dashboardWindow && !dashboardWindow.isDestroyed()) {
     try { dashboardWindow.webContents.send('settings:push', payload); } catch (_) {}
+  }
+}
+
+function refreshLimitStatsPresentation() {
+  if (!latestStats) return;
+  const visibleStats = electronPresentationStats(latestStats);
+  scheduleMacWidgetSnapshot(visibleStats, captureMacWidgetProducerOwner());
+  updateTrayDisplay();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.send('stats:push', {
+        event: 'stats',
+        data: { type: 'stats', reason: 'presentation', mode, stats: visibleStats }
+      });
+    } catch (_) {}
   }
 }
 
@@ -2672,18 +4199,16 @@ function trayMenuLocale() {
   return resolveLocale(settings?.language || 'auto', preferredLanguages);
 }
 
-function sendMainWindowEvent(channel, payload) {
+// `isStillCurrent`, when given, is re-checked after the wait: see
+// deferredWindowSend.js.
+function sendMainWindowEvent(channel, payload, isStillCurrent) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const send = () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    try { mainWindow.webContents.send(channel, payload); } catch (_) {}
-  };
-  if (mainWindow.webContents.isLoading()) mainWindow.webContents.once('did-finish-load', send);
-  else send();
+  sendWhenRendererReady(mainWindow.webContents, channel, payload, isStillCurrent);
 }
 
 async function refreshFromTray() {
   if (trayRefreshInFlight) return;
+  const widgetProducerOwner = captureMacWidgetProducerOwner();
   trayRefreshInFlight = true;
   try {
     const stats = await fetchStats({ force: true });
@@ -2691,7 +4216,7 @@ async function refreshFromTray() {
     // result when fetchStats returned a different object (for example, a remote hub
     // fetch while an external headless agent owns collection).
     if (stats && stats !== latestStats) {
-      sendPush({ event: 'stats', data: { stats, mode, reason: 'manual' } });
+      sendPush({ event: 'stats', data: { stats, mode, reason: 'manual' } }, { widgetProducerOwner });
     }
   } catch (error) {
     console.warn(`[tray] refresh failed: ${error.message}`);
@@ -2894,11 +4419,12 @@ function enterTrayMode() {
   applyMacActivationPolicy();
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (typeof mainWindow.setSkipTaskbar === 'function') mainWindow.setSkipTaskbar(true);
-    // Without this, .show() yanks the user back to the Space the window was last
-    // shown on instead of popping over the current Space / fullscreen app.
-    if (typeof mainWindow.setVisibleOnAllWorkspaces === 'function') {
-      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    }
+    // settings.trayMode is already true here, so this unmaximize is ignored by
+    // the native handler and settings.windowMaximized keeps describing the
+    // window exitTrayMode() will hand back.
+    suspendWindowMaximized(mainWindow);
+    setWindowMaximizable(mainWindow, false);
+    applyMacSpaceBehavior(true);
     mainWindow.hide();
   }
 }
@@ -2907,9 +4433,8 @@ function exitTrayMode() {
   applyMacActivationPolicy({ mainWindowVisible: true });
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (typeof mainWindow.setSkipTaskbar === 'function') mainWindow.setSkipTaskbar(false);
-    if (typeof mainWindow.setVisibleOnAllWorkspaces === 'function') {
-      mainWindow.setVisibleOnAllWorkspaces(false);
-    }
+    setWindowMaximizable(mainWindow, true);
+    applyMacSpaceBehavior(false);
     const restore = restoredBounds() || DEFAULT_WINDOW;
     mainWindow.setBounds({
       width: restore.width,
@@ -2918,13 +4443,16 @@ function exitTrayMode() {
     });
     applyWindowSettings();
     mainWindow.show();
-    mainWindow.focus();
+    restoreWindowMaximized(mainWindow, settings);
   }
   if (!shouldCreateTray(settings)) destroyTray();
   else ensureTray();
 }
 
 function startMode() {
+  hubModeGeneration += 1;
+  advanceMacWidgetProducerAndSourceEpoch();
+  clearLatestHubStatsCache();
   // Tear down collectors synchronously so they can't double-run while the
   // async reconciliation below is queued.
   stopLocalCollector();
@@ -2952,26 +4480,77 @@ function startMode() {
       }
       startHostStats();
       startHostCollector();
+      reconcileSharedSubscriptions();
       return;
     }
     await stopEmbeddedHub();
     if (effectiveHubConfig().url) {
       startStatsStream({ resetSnapshot: true });
       startSyncCollector();
+      reconcileSharedSubscriptions();
     } else {
       startLocalCollector();
+      reconcileSharedSubscriptions();
     }
   }).catch((err) => {
     console.log(`[mode] reconciliation failed: ${err?.message || err}`);
   });
 }
 
+// Reconciled on every mode change, because switching into a hub adopts a
+// different list and switching out of one falls back to the local cache — the
+// renderer is showing whichever list the previous mode had.
+//
+// Started by the mode queue but not awaited by it. Subscriptions have a lane of
+// their own, per hub, so nothing here needs the queue to order it — while holding
+// the queue open for a hub request means the next hub the user picks waits out
+// this one's 15s deadline before its stream and collector start, with no data on
+// screen in the meantime. Its failures stay here for the same reason: nothing
+// downstream is waiting to hear about them.
+async function reconcileSharedSubscriptions() {
+  try {
+    await refreshSharedSubscriptions({ seedFromLocal: true });
+    // Unconditional, unlike the stamp comparison: a mode change swaps which list
+    // is showing, and the renderer is holding the previous mode's one.
+    pushSettingsToRenderer();
+  } catch (error) {
+    console.log(`[sync] subscription reconcile failed: ${error?.message || error}`);
+  }
+}
+
+function restartDeviceRuntimeForMode() {
+  if (mode === 'local') {
+    startLocalCollector();
+    return;
+  }
+  if (settings.hubMode === 'host' && embeddedHub) {
+    startHostCollector();
+    return;
+  }
+  if (effectiveHubConfig().url) startSyncCollector();
+  else startLocalCollector();
+}
+
+// Quit-path teardown. Every step here must be synchronous, because performQuit
+// exits on the next line and anything awaited in between is a chance to never
+// get there. `skipCloseWatchers` is what buys that: chokidar's close() returns a
+// promise, but not before an O(N) synchronous pass over every watched entry, and
+// on a tree the size of ~/.claude/projects that pass alone blocks the main
+// thread long enough to look like a hang. The descriptors go with the process.
+// Mode switches deliberately do NOT come through here: they keep the default
+// stopLocalCollector() / stopSyncCollector() behaviour so the old watcher is
+// really gone before a new one starts on the same paths.
 function stopAll() {
   stopPersistBoundsTimer();
-  stopLocalCollector();
+  stopLocalCollector({ skipCloseWatchers: true });
   stopStatsStream();
   stopHostStats();
-  stopSyncCollector();
+  stopSyncCollector({ skipCloseWatchers: true });
+  macWidgetSnapshotController?.stop();
+  // Fire-and-forget on purpose. server.close() does not complete until every
+  // in-flight request does, so awaiting it hands a remote device on the embedded
+  // hub the power to hold our own exit open. The listening socket closes with
+  // the process, and a graceful hub close buys nothing on the way out.
   void stopEmbeddedHub();
   stopDiscordRpc();
   if (tray && !tray.isDestroyed()) tray.destroy();
@@ -2979,12 +4558,64 @@ function stopAll() {
 }
 
 let quitRequested = false;
+let quitInProgress = false;
+// Owned by the update-install guard below and by nothing else: electron-updater
+// restarts the process itself, so the exit has to stand down or the install
+// never runs.
+let skipForcedQuit = false;
+
+// An install request stands the forced exit down, and quitAndInstall() never
+// reports back whether the installer actually took over. The guard owns that
+// unconfirmed window; these two flags are all it touches here. See
+// updateInstallQuit.js for why the claim expires and what promotes it.
+// Set once the hand-off listener is actually attached; see the guard's watchdog.
+let updateHandoffObserved = false;
+
+const updateInstallQuit = createUpdateInstallQuitGuard({
+  ...updateInstallQuitPolicy(),
+  watchdogEnabled: () => updateHandoffObserved,
+  claim: () => { quitRequested = true; skipForcedQuit = true; },
+  release: () => { quitRequested = false; skipForcedQuit = false; },
+  onStalled: () => {
+    // The bound is far enough out that reaching it means the install genuinely
+    // stalled, which is exactly what the user is looking at: they pressed Install
+    // and the app neither restarted nor complained. What to do about it depends on
+    // whether the attempt survived: where the guard handed it back the update is
+    // still one press away, and only where it did not is a restart the way out.
+    setNativeAppUpdateState({
+      phase: 'error',
+      progress: null,
+      error: 'Update installer did not start',
+      errorKind: installFailureErrorKind({ spent: updateInstallQuit.isSpent(), stalled: true })
+    });
+  },
+  onHandoff: (afterStalledReport) => {
+    // The bound is a decision to stop waiting, not proof the installer is dead, so
+    // a hand-off that turns up later withdraws the report rather than leaving the
+    // app advising a restart it is about to perform itself.
+    if (!afterStalledReport) return;
+    setNativeAppUpdateState({ phase: 'downloaded', progress: 100, error: null });
+  }
+});
+
+// The single quit path. Teardown above is what used to hang, so it runs
+// synchronously and cheaply, and then app.exit() ends the process without
+// another trip through Electron's shutdown events.
+function performQuit() {
+  if (quitInProgress) return;
+  quitInProgress = true;
+  try {
+    stopAll();
+  } catch (error) {
+    console.log(`[quit] stopAll failed: ${error?.message || error}`);
+  }
+  app.exit(0);
+}
+
 function requestAppQuit() {
   if (quitRequested) return;
   quitRequested = true;
-  stopAll();
-  if (app.isReady()) app.quit();
-  else app.exit(0);
+  performQuit();
 }
 
 // Write the export file set (JSON + CSVs) into `dir`, atomically (temp + rename)
@@ -3037,33 +4668,49 @@ async function writeExportTo(dir, periods, options = {}) {
 }
 
 async function fetchStats(options = {}) {
+  const requestGeneration = hubModeGeneration;
+  const requestHubIdentity = currentHubStatsIdentity('client');
   const force = Boolean(options?.force);
-  // forceHistory stays independent of `force` on purpose: tool settings, account
-  // sign-ins and limits actions all refresh with { force: true }, so folding the
-  // history rescan into it would spawn the expensive `tokscale graph` on each one.
-  // Only the manual refresh button opts in.
-  const tickOptions = force ? { forceLimits: true, forceHistory: Boolean(options?.forceHistory) } : {};
+  // forceHistory and forceSelfSync stay independent of `force` on purpose: tool
+  // settings, account sign-ins and limits actions all refresh with { force: true },
+  // so folding them in would spawn the expensive `tokscale graph` — and the Cursor
+  // and Antigravity sync subprocesses — on every one of them. Only the manual
+  // refresh button opts in.
+  if (force && ownsUsageRuntime()) {
+    await runManualDeviceRefresh(deviceRuntimeHandle, {
+      forceHistory: Boolean(options?.forceHistory),
+      forceSelfSync: Boolean(options?.forceSelfSync),
+      onLimitsError: (error) => console.log(`[limits-runtime] manual refresh failed: ${error.message}`)
+    });
+  }
   if (mode === 'local') {
-    if (force && localCollectorHandle) await localCollectorHandle.tick('manual', tickOptions);
     if (localStats) return localStats;
     return withHistoryPreview(aggregateDevices(localDevice ? [localDevice] : [], 0), localDevice ? [localDevice] : []);
   }
   if (settings.hubMode === 'host' && embeddedHub) {
-    if (force && syncCollectorHandle && !isExternalAgentActive()) {
-      await syncCollectorHandle.tick('manual', tickOptions);
-    }
     return injectLocalDeviceStatus(embeddedHub.hub.getStats());
-  }
-  if (force && syncCollectorHandle && !isExternalAgentActive()) {
-    await syncCollectorHandle.tick('manual', tickOptions);
   }
   const { url: hubUrl, secret } = effectiveHubConfig();
   if (!hubUrl) return withHistoryPreview(aggregateDevices([], 0), []);
   const url = `${hubUrl.replace(/\/$/, '')}/api/stats`;
   const response = await fetch(url, { headers: secret ? { authorization: `Bearer ${secret}` } : {} });
   if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
-  latestHubStats = await response.json();
-  return injectLocalDeviceStatus(composeLocalSyncStats(latestHubStats, lastCollectedDevice));
+  const stats = await response.json();
+  if (!hubModeRequestIsCurrent(requestGeneration, 'client', requestHubIdentity)) {
+    // The response belongs to a mode that is no longer active. Wait for the
+    // queued mode reconciliation before re-reading: Client -> Host may still
+    // be binding the embedded hub, and an immediate retry would hit its
+    // loopback URL before it is listening.
+    await modeQueue;
+    return fetchStats({
+      ...options,
+      force: false,
+      forceHistory: false,
+      forceSelfSync: false
+    });
+  }
+  setLatestHubStatsCache(stats, 'client', requestGeneration, requestHubIdentity);
+  return injectLocalDeviceStatus(composeLocalSyncStats(stats, lastCollectedDevice));
 }
 
 function managedPricingSidecarPath() {
@@ -3083,10 +4730,8 @@ function regenerateTokscalePricing() {
 
 async function refreshAfterPricingChange() {
   try {
-    if (mode === 'local') {
-      if (localCollectorHandle) await localCollectorHandle.tick('manual', {});
-    } else if (syncCollectorHandle && !isExternalAgentActive()) {
-      await syncCollectorHandle.tick('manual', {});
+    if (ownsUsageRuntime()) {
+      await deviceRuntimeHandle.tick('manual', {});
     }
   } catch (error) {
     console.warn(`[pricing] refresh after pricing change failed: ${error.message}`);
@@ -3143,6 +4788,7 @@ async function downloadTokscaleFromNpm() {
 let appUpdateCheckInFlight = false;
 let appUpdateCheckPromise = null;
 let appUpdateLastError = null;
+let appUpdateLastAttemptAt = null;
 let appUpdateBackgroundTimer = null;
 let appUpdateNativeBusy = false;
 let appUpdateNativeConfigured = false;
@@ -3150,36 +4796,33 @@ let appUpdateNativeState = {
   phase: 'idle',
   version: null,
   progress: null,
-  error: null
+  error: null,
+  errorKind: null
 };
 
-function latestFromUpdaterInfo(info) {
-  if (!info || typeof info !== 'object') return null;
-  const version = semver.valid(info.version);
-  if (!version) return null;
-  return {
-    version,
-    tag: `v${version}`,
-    name: (typeof info.releaseName === 'string' && info.releaseName.trim()) ? info.releaseName : `v${version}`,
-    htmlUrl: `https://github.com/${GITHUB_REPO}/releases/tag/v${version}`,
-    publishedAt: typeof info.releaseDate === 'string' ? info.releaseDate : ''
-  };
-}
-
-function rememberLatestAppUpdate(latest, checkedAt = new Date().toISOString()) {
-  if (!latest) return null;
-  const merged = mergeLatestReleaseMetadata(settings?.appUpdate?.lastKnownLatest, latest);
+function rememberSuccessfulAppUpdateCheck(latest, checkedAt = new Date().toISOString(), { clearLatest = false } = {}) {
+  if (!latest && !clearLatest) return null;
+  const remembered = latest
+    ? mergeLatestReleaseMetadata(settings?.appUpdate?.lastKnownLatest, latest)
+    : null;
   settings.appUpdate = {
     ...(settings.appUpdate || {}),
     lastCheckedAt: checkedAt,
-    lastKnownLatest: merged
+    lastKnownLatest: remembered
   };
   saveSettings();
-  return merged;
+  appUpdateLastAttemptAt = checkedAt;
+  appUpdateLastError = null;
+  return remembered;
 }
 
 function setNativeAppUpdateState(patch = {}) {
-  appUpdateNativeState = { ...appUpdateNativeState, ...patch };
+  const next = { ...appUpdateNativeState, ...patch };
+  // A kind belongs to the error it arrived with and must never outlive it, so any
+  // patch that touches `error` without naming one clears it. That keeps the
+  // ordinary updater failures generic without every call site restating it.
+  if ('error' in patch && !('errorKind' in patch)) next.errorKind = null;
+  appUpdateNativeState = next;
   sendAppUpdatePush();
 }
 
@@ -3189,18 +4832,6 @@ function configureNativeAppUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.logger = console;
-  autoUpdater.on('checking-for-update', () => {
-    setNativeAppUpdateState({ phase: 'checking', progress: null, error: null });
-  });
-  autoUpdater.on('update-available', (info) => {
-    const latest = rememberLatestAppUpdate(latestFromUpdaterInfo(info));
-    setNativeAppUpdateState({ phase: 'available', version: latest?.version || info?.version || null, progress: null, error: null });
-  });
-  autoUpdater.on('update-not-available', (info) => {
-    appUpdateNativeBusy = false;
-    const latest = rememberLatestAppUpdate(latestFromUpdaterInfo(info));
-    setNativeAppUpdateState({ phase: 'idle', version: latest?.version || null, progress: null, error: null });
-  });
   autoUpdater.on('download-progress', (progress) => {
     setNativeAppUpdateState({
       phase: 'downloading',
@@ -3213,10 +4844,74 @@ function configureNativeAppUpdater() {
     const latest = latestFromUpdaterInfo(info);
     setNativeAppUpdateState({ phase: 'downloaded', version: latest?.version || info?.version || appUpdateNativeState.version || null, progress: 100, error: null });
   });
+  // The hand-off is emitted on Electron's own autoUpdater, not electron-updater's:
+  // BaseUpdater re-emits it there to mimic what Squirrel does natively. Losing it
+  // is not merely losing a confirmation, so the flag records a verified
+  // registration and nothing weaker: without the listener nothing could re-claim
+  // the flags after the grace period, and the guard would expire into a state a
+  // late hand-off could not recover from. It stops arming the watchdog instead.
+  try {
+    updateHandoffObserved = observeUpdateInstallHandoff(
+      require('electron').autoUpdater,
+      () => updateInstallQuit.noteHandoff()
+    );
+  } catch (error) {
+    updateHandoffObserved = false;
+    console.log(`[update] cannot observe the install hand-off: ${error?.message || error}`);
+  }
+  if (!updateHandoffObserved) console.log('[update] no install hand-off signal; quit recovery disabled');
   autoUpdater.on('error', (error) => {
+    // Released before the busy guard below, deliberately: update-downloaded has
+    // already cleared appUpdateNativeBusy by the time an install can fail, so a
+    // rollback behind that guard would never run and the quit flags would stay
+    // stuck for the rest of the session.
+    const wasInstalling = updateInstallQuit.abort();
+    // Availability checks use the same provider but report through
+    // appUpdateLastError. Only a real download or install attempt owns installError.
+    if (!appUpdateNativeBusy && !wasInstalling) return;
     appUpdateNativeBusy = false;
-    setNativeAppUpdateState({ phase: 'error', progress: null, error: error?.message || String(error || 'Update failed') });
+    setNativeAppUpdateState({
+      phase: 'error',
+      progress: null,
+      error: error?.message || String(error || 'Update failed'),
+      // Where the attempt was single-use, a failed install also closed the in-app
+      // path: the controls below now offer the release page instead of a retry, and
+      // a generic "couldn't install" leaves that looking like the end of the road.
+      // A restart is what brings the retry back, so the message has to say so.
+      // `wasInstalling` is the part the helper cannot know: without it a check
+      // failure arriving after an earlier spent attempt borrows its explanation.
+      errorKind: wasInstalling
+        ? installFailureErrorKind({ spent: updateInstallQuit.isSpent() })
+        : null
+    });
   });
+}
+
+async function checkAppUpdateProvider() {
+  if (!app.isPackaged) return checkLatestRelease(app.getVersion());
+  const checkedAt = new Date().toISOString();
+  configureNativeAppUpdater();
+  const result = await autoUpdater.checkForUpdates();
+  const availability = providerUpdateCheckAvailability(result, app.getVersion());
+  if (!availability.valid) {
+    return {
+      ok: false,
+      newer: false,
+      latest: null,
+      error: 'Update metadata missing or invalid',
+      errorKind: 'metadata',
+      checkedAt
+    };
+  }
+  return {
+    ok: true,
+    newer: availability.newer,
+    latest: availability.latest,
+    clearLatest: availability.clearLatest,
+    error: null,
+    errorKind: null,
+    checkedAt
+  };
 }
 
 function deriveAppUpdateState() {
@@ -3239,16 +4934,32 @@ function deriveAppUpdateState() {
     showUpdateNotice: availability.showUpdateNotice,
     dismissedVersion,
     lastCheckedAt: block.lastCheckedAt || null,
+    lastAttemptAt: appUpdateLastAttemptAt,
     checking: appUpdateCheckInFlight,
-    lastError: appUpdateLastError,
+    lastError: appUpdateLastError?.message || null,
+    lastErrorKind: appUpdateLastError?.kind || null,
     installSupported: installSupport.supported,
     installSupportReason: installSupport.reason,
     installPhase: appUpdateNativeState.phase,
     installProgress: appUpdateNativeState.progress,
     installVersion: appUpdateNativeState.version,
     installError: appUpdateNativeState.error,
+    installErrorKind: appUpdateNativeState.errorKind || null,
     downloaded: availability.downloaded,
-    installBusy: appUpdateNativeBusy || appUpdateNativeState.phase === 'checking' || appUpdateNativeState.phase === 'downloading'
+    // The hand-off window, straight from the state machine rather than inferred
+    // from a pair of booleans downstream: between the press and the installer
+    // taking over there is nothing else to tell the user.
+    installStarting: updateInstallQuit.isInstalling(),
+    // No further attempt is possible until a restart, so the action policy and the
+    // automatic downloader both have to stop offering one.
+    installRetryBlocked: updateInstallQuit.isSpent(),
+    // An install the guard is still trying to complete counts as busy: on macOS
+    // Squirrel can take tens of seconds, and leaving the control live for that long
+    // invites a second press the guard can only refuse.
+    installBusy: appUpdateNativeBusy
+      || updateInstallQuit.isInstalling()
+      || appUpdateNativeState.phase === 'checking'
+      || appUpdateNativeState.phase === 'downloading'
   };
 }
 
@@ -3268,51 +4979,78 @@ function sendAppUpdatePush() {
   mainWindow.webContents.send('appUpdate:push', deriveAppUpdateState());
 }
 
-async function runAppUpdateCheck({ force = false } = {}) {
+async function runAppUpdateCheck({ force = false, bypassCooldown = false } = {}) {
+  // An outstanding install owns the updater until the guard is idle again.
+  // electron-updater reports a failed check by emitting on the same global 'error'
+  // event an install failure arrives on -- checkForUpdates() emits there and
+  // rethrows -- and the handler below has nothing to tell them apart. Treating a
+  // check's failure as the install's would tear down the install, which is what the
+  // hourly check made an ordinary overlap on macOS, where an install is outstanding
+  // for as long as minutes.
+  //
+  // `isOutstanding` rather than `isInstalling`, so this covers a spent attempt too.
+  // Spent is not terminal: the bound is only where we stopped waiting, and a late
+  // hand-off still promotes it back to `handoff` and re-claims the flags. A check
+  // allowed to start in the meantime would then be in flight during a genuine
+  // hand-off, and its failure would release `skipForcedQuit` with the installer
+  // owning the exit -- the one outcome this whole path exists to prevent. Checking
+  // is worth less than that: after a spent attempt it can only find a version this
+  // process is already refusing to download.
+  if (updateInstallQuit.isOutstanding()) return deriveAppUpdateState();
   if (appUpdateCheckPromise) {
     if (force) sendAppUpdatePush();
     const activeResult = await appUpdateCheckPromise;
     if (force) {
+      appUpdateLastAttemptAt = activeResult?.checkedAt || new Date().toISOString();
+      appUpdateLastError = resolveAppUpdateCheckError(appUpdateLastError, activeResult, { force: true });
       if (activeResult?.ok) {
         if (activeResult.newer) restoreDismissedAppUpdate(activeResult.latest?.version);
-        appUpdateLastError = null;
-      } else {
-        appUpdateLastError = activeResult?.error || 'Update check failed';
       }
       sendAppUpdatePush();
     }
-    return deriveAppUpdateState();
+    return maybeDownloadAutomaticAppUpdate(deriveAppUpdateState());
   }
   const block = settings?.appUpdate || {};
-  if (shouldSkipAppUpdateCheck({
+  if (!bypassCooldown && shouldSkipAppUpdateCheck({
     force,
     lastCheckedAt: block.lastCheckedAt,
     latest: block.lastKnownLatest,
     dismissedVersion: block.dismissedVersion,
     currentVersion: app.getVersion()
   })) {
-    return deriveAppUpdateState();
+    return maybeDownloadAutomaticAppUpdate(deriveAppUpdateState());
   }
   const checkTask = (async () => {
     appUpdateCheckInFlight = true;
-    appUpdateLastError = null;
+    appUpdateLastAttemptAt = new Date().toISOString();
     if (force) sendAppUpdatePush();
     let result;
     try {
-      result = await checkLatestRelease(app.getVersion());
+      result = await checkAppUpdateProvider();
+      appUpdateLastAttemptAt = result.checkedAt || appUpdateLastAttemptAt;
       if (result.ok) {
-        rememberLatestAppUpdate(result.latest, result.checkedAt);
+        rememberSuccessfulAppUpdateCheck(result.latest, result.checkedAt, { clearLatest: result.clearLatest });
         if (force && result.newer) restoreDismissedAppUpdate(result.latest?.version);
-        appUpdateLastError = null;
       } else {
-        appUpdateLastError = force ? (result.error || 'Update check failed') : null;
+        appUpdateLastError = resolveAppUpdateCheckError(appUpdateLastError, result, { force });
         if (!force) console.warn('App update check failed:', result.error);
       }
     } catch (error) {
-      const message = error.message || String(error);
-      appUpdateLastError = force ? message : null;
+      const classified = classifyAppUpdateError(error);
+      appUpdateLastError = resolveAppUpdateCheckError(appUpdateLastError, {
+        ok: false,
+        error: classified.message,
+        errorKind: classified.kind
+      }, { force });
       if (!force) console.warn('App update check threw:', error);
-      return { ok: false, newer: false, latest: null, error: message };
+      return {
+        ok: false,
+        newer: false,
+        latest: null,
+        error: classified.message,
+        errorKind: classified.kind,
+        checkedAt: appUpdateLastAttemptAt
+      };
     } finally {
       appUpdateCheckInFlight = false;
       sendAppUpdatePush();
@@ -3325,7 +5063,15 @@ async function runAppUpdateCheck({ force = false } = {}) {
   } finally {
     if (appUpdateCheckPromise === checkTask) appUpdateCheckPromise = null;
   }
-  return deriveAppUpdateState();
+  return maybeDownloadAutomaticAppUpdate(deriveAppUpdateState());
+}
+
+async function maybeDownloadAutomaticAppUpdate(updateState) {
+  if (!shouldDownloadAutomaticAppUpdate({
+    automaticAppUpdates: settings?.automaticAppUpdates,
+    updateState
+  })) return updateState;
+  return downloadAndPrepareAppUpdate();
 }
 
 function maybeRunBackgroundUpdateCheck() {
@@ -3355,6 +5101,18 @@ async function downloadAndPrepareAppUpdate() {
     setNativeAppUpdateState({ phase: 'error', error: support.reason || 'unsupported-platform', progress: null });
     return deriveAppUpdateState();
   }
+  // Same ownership rule as the check path, and one more: a spent attempt can never
+  // be installed by this process either, so re-entering the download lifecycle
+  // rebuilds MacUpdater's local proxy while the listener the first quitAndInstall()
+  // attached is still on the native updater. The renderer stops offering this and
+  // the automatic downloader stands down, but neither of those is the boundary --
+  // this is, and an IPC action queued before the attempt ended still arrives here.
+  //
+  // Every entry point uses the same rule, for the same reason (see
+  // runAppUpdateCheck): while the guard holds anything, nothing else drives the
+  // updater.
+  if (updateInstallQuit.isOutstanding()) return deriveAppUpdateState();
+  if (appUpdateCheckPromise) await appUpdateCheckPromise;
   if (appUpdateNativeBusy) return deriveAppUpdateState();
   const latest = settings?.appUpdate?.lastKnownLatest || null;
   if (downloadedAppUpdateMatchesLatest({
@@ -3362,19 +5120,26 @@ async function downloadAndPrepareAppUpdate() {
     downloadedVersion: appUpdateNativeState.version,
     latest
   })) return deriveAppUpdateState();
-  restoreDismissedAppUpdate(latest?.version);
   configureNativeAppUpdater();
   appUpdateNativeBusy = true;
   setNativeAppUpdateState({ phase: 'checking', progress: null, error: null });
   try {
     const result = await autoUpdater.checkForUpdates();
-    const info = result?.updateInfo || null;
-    const version = semver.valid(info?.version) || null;
-    if (!version || !semver.gt(version, app.getVersion())) {
+    const availability = providerUpdateCheckAvailability(result, app.getVersion());
+    if (!availability.valid) throw new Error('Update metadata missing or invalid');
+    const checkedAt = new Date().toISOString();
+    const latestFromCheck = rememberSuccessfulAppUpdateCheck(
+      availability.latest,
+      checkedAt,
+      { clearLatest: availability.clearLatest }
+    );
+    const version = latestFromCheck?.version || null;
+    if (!availability.newer || !version) {
       appUpdateNativeBusy = false;
       setNativeAppUpdateState({ phase: 'idle', version, progress: null, error: null });
       return deriveAppUpdateState();
     }
+    restoreDismissedAppUpdate(version);
     setNativeAppUpdateState({ phase: 'downloading', version, progress: 0, error: null });
     await autoUpdater.downloadUpdate();
   } catch (error) {
@@ -3384,15 +5149,52 @@ async function downloadAndPrepareAppUpdate() {
   return deriveAppUpdateState();
 }
 
-function installDownloadedAppUpdate() {
+async function installDownloadedAppUpdate() {
+  // The other half of the same rule. Refusing new operations during the install
+  // only holds the boundary if nothing was already running when it started, and a
+  // check begun a moment earlier would still be reporting on the shared event.
+  // Waiting rather than refusing, since this one is a button press: the checks
+  // below are read afterwards, when the update it is about to install is settled.
+  if (appUpdateCheckPromise) await appUpdateCheckPromise;
   const latest = settings?.appUpdate?.lastKnownLatest || null;
   if (!downloadedAppUpdateMatchesLatest({
     phase: appUpdateNativeState.phase,
     downloadedVersion: appUpdateNativeState.version,
     latest
   })) return deriveAppUpdateState();
-  quitRequested = true;
-  autoUpdater.quitAndInstall(false, true);
+  // quitAndInstall goes through before-quit, and electron-updater owns the
+  // restart from there. Stand the forced exit down or the installer never runs.
+  // Refused while an earlier request is still outstanding, and permanently once an
+  // attempt is spent, so a second press can never stack install attempts.
+  if (!updateInstallQuit.request()) {
+    // Say so rather than leave a button that quietly does nothing: a spent attempt
+    // cannot be retried in this process at all.
+    if (updateInstallQuit.phase() === 'spent') {
+      setNativeAppUpdateState({
+        phase: 'error',
+        progress: null,
+        error: 'Update install was already attempted',
+        errorKind: 'attempt-spent'
+      });
+    }
+    return deriveAppUpdateState();
+  }
+  try {
+    // isSilent: skip the NSIS installer UI on Windows so the update feels seamless
+    // (per-user install needs no elevation); isForceRunAfter relaunches the app.
+    autoUpdater.quitAndInstall(true, true);
+  } catch (error) {
+    // The abort above ended the attempt this call had just made, so unlike the
+    // updater's own error handler there is nothing else this failure could belong
+    // to, and the same recovery applies.
+    updateInstallQuit.abort();
+    setNativeAppUpdateState({
+      phase: 'error',
+      progress: null,
+      error: error?.message || String(error || 'Update failed'),
+      errorKind: installFailureErrorKind({ spent: updateInstallQuit.isSpent() })
+    });
+  }
   return deriveAppUpdateState();
 }
 
@@ -3407,8 +5209,14 @@ function isAllowedExternalUrl(value) {
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/junhoyeo/tokscale')) return true;
   if (parsed.hostname === 'www.npmjs.com' && parsed.pathname.startsWith('/package/@tokscale/')) return true;
   if (parsed.hostname === 'github.com' && parsed.pathname.startsWith('/Javis603/token-monitor')) return true;
+  if (
+    (parsed.hostname === 'javis-ai.com' || parsed.hostname === 'www.javis-ai.com')
+    && (parsed.pathname === '/token-monitor' || parsed.pathname.startsWith('/token-monitor/'))
+  ) return true;
+  if (parsed.hostname === 'claude.ai' && parsed.pathname.startsWith('/settings')) return true;
   if ((parsed.hostname === 'cursor.com' || parsed.hostname === 'www.cursor.com') && parsed.pathname.startsWith('/settings')) return true;
   if (parsed.hostname === 'opencode.ai' || parsed.hostname === 'www.opencode.ai') return true;
+  if (parsed.hostname === 'openrouter.ai' && parsed.pathname.startsWith('/settings/keys')) return true;
   if (parsed.hostname === 'platform.deepseek.com' && parsed.pathname.startsWith('/api_keys')) return true;
   if (parsed.hostname === 'platform.minimaxi.com') return true;
   if (parsed.hostname === 'platform.minimax.io') return true;
@@ -3438,6 +5246,11 @@ function loadWindowFile(target, options = {}) {
     if (revealed) return;
     revealed = true;
     if (settings?.trayMode) return; // stay hidden until tray click
+    if (restoreWindowMaximizedForReveal(target, settings, {
+      restoreMaximized: options.restoreMaximized === true,
+      inactive: options.inactive === true,
+      collapsedFloatingBubble: options.collapsedFloatingBubble === true
+    })) return;
     revealWindow(target, { inactive: options.inactive === true });
   };
   const waitForContent = options.waitForContent === true;
@@ -3480,6 +5293,8 @@ function createWindow(boundsOverride, options = {}) {
   ensureSettingsLoaded();
   const collapsedFloatingBubble = options.collapsedFloatingBubble === true;
   const glass = nativeBlurEnabled();
+  const windowsBackdrop = normalizeWindowsBackdropMode(settings?.windowsBackdrop);
+  const windowsAccent = process.platform === 'win32' && glass && windowsBackdrop === WINDOWS_BACKDROP_ACCENT;
   const bounds = boundsOverride || restoredBounds() || DEFAULT_WINDOW;
   const collapsedSizeLimits = {
     minWidth: bounds.width,
@@ -3500,9 +5315,11 @@ function createWindow(boundsOverride, options = {}) {
     icon: APP_ICON_PATH,
     skipTaskbar: collapsedFloatingBubble || Boolean(settings?.trayMode),
     ...(collapsedFloatingBubble ? { fullscreenable: false, maximizable: false, minimizable: false } : {}),
+    // Keeps a popover unmaximizable across rebuilds, which never re-run enterTrayMode().
+    ...(settings?.trayMode ? { maximizable: false } : {}),
     ...floatingBubbleWindowChrome(process.platform, collapsedFloatingBubble),
     ...(process.platform === 'darwin' && glass ? { vibrancy: 'hud', visualEffectState: 'active' } : {}),
-    ...(process.platform === 'win32' && glass ? { backgroundMaterial: 'acrylic' } : {}),
+    ...(process.platform === 'win32' && glass && !windowsAccent ? { backgroundMaterial: 'acrylic' } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -3511,7 +5328,33 @@ function createWindow(boundsOverride, options = {}) {
   });
   mainWindow = win;
   mainWindowChrome = { collapsedFloatingBubble };
+  applyMacSpaceBehavior();
   applyWindowsChrome(win, { round: true });
+  let windowsAccentFallback = false;
+  if (windowsAccent && !applyWindowsAccentBlur(win)) {
+    // The Accent API is undocumented and can disappear or reject a window on
+    // a future Windows build. This window is still non-transparent, so the
+    // documented Electron Acrylic material is a safe in-place fallback.
+    windowsAccentFallback = true;
+    console.warn('[window] AccentBlurBehind unavailable; falling back to Acrylic');
+    try { win.setBackgroundMaterial('acrylic'); } catch (_) {}
+  }
+  win.on('maximize', () => {
+    if (!shouldTrackWindowMaximized(settings, floatingBubbleState)) {
+      // A tray popover is sized from getBounds() on every open, so a maximized
+      // one would open full-screen. setMaximizable() covers Windows and macOS;
+      // it is a no-op on Linux, which is why this bounce still has to exist.
+      if (settings?.trayMode) suspendWindowMaximized(win);
+      return;
+    }
+    stopPersistBoundsTimer();
+    persistWindowState(settings, saveSettings, normalWindowBounds(win), true);
+  });
+  win.on('unmaximize', () => {
+    if (!shouldTrackWindowMaximized(settings, floatingBubbleState)) return;
+    persistWindowState(settings, saveSettings, normalWindowBounds(win), false);
+    persistBoundsSoon();
+  });
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
     return { action: 'deny' };
@@ -3551,13 +5394,16 @@ function createWindow(boundsOverride, options = {}) {
   loadWindowFile(win, {
     waitForContent: options.waitForContent === true,
     inactive: options.inactive === true,
+    collapsedFloatingBubble,
+    restoreMaximized: !collapsedFloatingBubble,
     query: {
       ...floatingBubbleInitialRendererQuery(floatingBubbleState, {
         collapsedWindow: collapsedFloatingBubble,
         suppressInitialNumberAnimation: options.suppressInitialNumberAnimation === true,
         viewState: rendererViewState
       }),
-      ...(settings?.systemGlass === false ? { systemGlassDisabled: '1' } : {})
+      ...(settings?.systemGlass === false ? { systemGlassDisabled: '1' } : {}),
+      ...(windowsAccentFallback ? { windowsBackdropFallback: '1' } : {})
     }
   });
 }
@@ -3661,35 +5507,7 @@ function createDashboardWindow() {
 }
 
 async function getDashboardHistory() {
-  if (settings?.historyEnabled === false) return aggregateHistory([]);
-  if (mode === 'local') {
-    // The local collector keeps localDevice.history current (watch + interval
-    // ticks, with carry-forward), so read it directly — exactly as the hub
-    // branch reads /api/history. Forcing a full collection tick here made the
-    // fetch take seconds; on a quick close/reopen the response outlived the
-    // renderer and was dropped, stranding the dashboard on its empty state.
-    return aggregateHistory(localDevice ? [localDevice] : []);
-  }
-  if (settings.hubMode === 'host' && embeddedHub) {
-    // Host mode reads its own hub store in-process, so the dashboard history
-    // doesn't depend on a loopback fetch the local firewall/proxy might block.
-    return embeddedHub.hub.getHistory();
-  }
-  const { url: hubUrl, secret } = effectiveHubConfig();
-  if (!hubUrl) return aggregateHistory([]);
-  const url = `${hubUrl.replace(/\/$/, '')}/api/history`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const response = await fetch(url, {
-      headers: secret ? { authorization: `Bearer ${secret}` } : {},
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(`Hub ${response.status}: ${(await response.text()).slice(0, 200)}`);
-    return response.json();
-  } finally {
-    clearTimeout(timeout);
-  }
+  return getCompleteHistory();
 }
 
 let cursorStatusCache = { value: null, at: 0 };
@@ -3710,9 +5528,7 @@ function normalizeManualCookie(input) {
 
 function rebuildWindow() {
   if (!mainWindow) return;
-  const bounds = floatingBubbleState.collapsed && floatingBubbleState.expandedBounds
-    ? floatingBubbleState.expandedBounds
-    : mainWindow.getBounds();
+  const bounds = rebuildWindowBounds(mainWindow, floatingBubbleState);
   const wasFocused = mainWindow.isFocused();
   const old = mainWindow;
   floatingBubbleState.collapsed = false;
@@ -3748,6 +5564,17 @@ app.whenReady().then(() => {
   }
   if (process.platform === 'darwin' && app.dock) app.dock.setIcon(APP_ICON_PATH);
   ensureSettingsLoaded();
+  const widgetRecoveryAbort = new AbortController();
+  const abortWidgetRecovery = () => widgetRecoveryAbort.abort();
+  app.once('before-quit', abortWidgetRecovery);
+  const widgetRecovery = recoverMacWidgetLaunchServicesRegistration({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    userDataPath: app.getPath('userData'),
+    signal: widgetRecoveryAbort.signal,
+    logger: (message) => console.warn(message)
+  });
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
@@ -3762,9 +5589,18 @@ app.whenReady().then(() => {
   configureWindowToggleShortcut();
   cleanupStaleStaging().catch((error) => console.log(`[tokscale] staging cleanup failed: ${error.message}`));
   ensureTray();
+  if (pendingMacWidgetOpen) setImmediate(openMainWindowFromWidget);
   if (settings.trayMode) enterTrayMode();
   regenerateTokscalePricing();
   startMode();
+  void widgetRecovery.finally(() => {
+    app.removeListener('before-quit', abortWidgetRecovery);
+    if (!widgetRecoveryAbort.signal.aborted) {
+      macWidgetPublicationReady = true;
+      macWidgetSnapshotController?.resume();
+    }
+  });
+  void hydrateCodexManagedWorkspaceLabels();
   if (settings.discordRpcEnabled) startDiscordRpc();
   rateCache = readRateCache();
   applyEffectiveRates();                 // use cache/defaults immediately, avoid first-paint gap
@@ -3772,6 +5608,27 @@ app.whenReady().then(() => {
   rateRefreshTimer = setInterval(() => { refreshExchangeRates(); }, 6 * 60 * 60 * 1000);
   setTimeout(() => { checkTokscaleNpm({ silent: true }); }, 2000);
   ipcMain.handle('settings:get', () => settingsForRenderer());
+
+  ipcMain.handle('subscriptions:adoptOrphans', async () => {
+    try {
+      return await adoptOrphanedSubscriptions();
+    } catch (error) {
+      throw new Error(subscriptionWriteFailureCode(error), { cause: error });
+    }
+  });
+
+  ipcMain.handle('subscriptions:discardOrphans', () => discardOrphanedSubscriptions());
+
+  ipcMain.handle('subscriptions:save', async (_event, subscriptions, base) => {
+    try {
+      return await saveSubscriptions(subscriptions, base);
+    } catch (error) {
+      // The renderer has to tell "another device won" apart from "the hub is
+      // down": one means re-read and redo, the other means try again later. Only
+      // the message survives the IPC boundary, so the code goes in it.
+      throw new Error(subscriptionWriteFailureCode(error), { cause: error });
+    }
+  });
   ipcMain.handle('sessionUsageArchive:clear', () => {
     if (isExternalAgentActive()) return { ok: false, error: 'agentActive' };
     try {
@@ -3794,55 +5651,50 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle('settings:update', (_event, patch) => {
+    if (patch?.claudeWebCookie !== undefined) claudeWebCookieMutationRevision += 1;
+    const previousSettingsState = settings;
+    const previousRuntimeSettings = JSON.parse(JSON.stringify(settings));
     const previousNativeMaterial = nativeBlurEnabled();
-    const previousHubMode = settings.hubMode;
-    const previousHubHostPort = settings.hubHostPort;
-    const previousHubHostSecret = settings.hubHostSecret;
-    const previousHubUrl = settings.hubUrl;
-    const previousSecret = settings.secret;
-    const previousDeviceId = settings.deviceId;
+    const previousWindowsBackdrop = normalizeWindowsBackdropMode(settings?.windowsBackdrop);
     const previousClients = settings.clients;
-    const previousLimitsEnabled = settings.limitsEnabled;
-    const previousLimitProviders = settings.limitProviders;
-    const previousLimitsRefreshMs = settings.limitsRefreshMs;
-    const previousHistoryEnabled = settings.historyEnabled;
-    const previousProjectsEnabled = settings.projectsEnabled;
-    const previousSessionUsageArchiveEnabled = settings.sessionUsageArchiveEnabled;
-    const previousHistoryIntervalMs = settings.historyIntervalMs;
-    const previousWslScanEnabled = settings.wslScanEnabled;
-    const previousCollectionMode = settings.collectionMode;
-    const previousCollectionIntervalMs = settings.collectionIntervalMs;
-    const previousSyncUploadIntervalMs = settings.syncUploadIntervalMs;
-    const previousDeepSeekApiKey = settings.deepseekApiKey;
-    const previousMinimaxApiKey = settings.minimaxApiKey;
-    const previousCopilotApiToken = settings.copilotApiToken;
-    const previousCopilotEnterpriseHost = settings.copilotEnterpriseHost;
-    const previousZaiApiKey = settings.zaiApiKey;
-    const previousZaiApiRegion = settings.zaiApiRegion;
-    const previousZaiTeamApiKey = settings.zaiTeamApiKey;
-    const previousZaiTeamOrganizationId = settings.zaiTeamOrganizationId;
-    const previousZaiTeamProjectId = settings.zaiTeamProjectId;
-    const previousVolcengineAccessKeyId = settings.volcengineAccessKeyId;
-    const previousVolcengineSecretAccessKey = settings.volcengineSecretAccessKey;
-    const previousVolcengineRegion = settings.volcengineRegion;
-    const previousQoderCookie = settings.qoderCookie;
-    const previousQoderSite = settings.qoderSite;
-    const previousKimiApiKey = settings.kimiApiKey;
-    const previousOllamaCookie = settings.ollamaCookie;
     const previousDiscordRpcEnabled = settings.discordRpcEnabled;
     const previousShowTrayIcon = settings.showTrayIcon;
     const previousTrayMode = settings.trayMode;
     const previousTrayContent = settings.trayContent;
+    const previousTrayCustomLayout = JSON.stringify(settings.trayCustomLayout || {});
+    const previousFloatingBubbleCustomLayout = JSON.stringify(settings.floatingBubbleCustomLayout || {});
     const previousShowTrayProviderBadge = settings.showTrayProviderBadge;
+    const previousOpenCodeLocalLimitsEnabled = settings.opencodeLocalLimitsEnabled === true;
     const previousCurrency = settings.currency;
+    const previousCompactTokenUnits = settings.compactTokenUnits;
+    const previousLanguage = settings.language;
     const previousStartAtLogin = settings.startAtLogin;
+    const previousAutomaticAppUpdates = settings.automaticAppUpdates;
     const previousCustomModelPricing = JSON.stringify(settings.customModelPricing || []);
     const normalizedCurrency = patch.currency !== undefined ? normalizeCurrency(patch.currency, settings.currency) : normalizeCurrency(settings.currency);
     const normalizedPatch = { ...patch, currency: normalizedCurrency };
+    delete normalizedPatch.windowMaximized;
     delete normalizedPatch.codexManagedAccounts;
     delete normalizedPatch.mimoManagedAccounts;
+    delete normalizedPatch.openrouterProfiles;
+    delete normalizedPatch.thirdPartyProfiles;
     delete normalizedPatch.customModelPricing;
+    // Subscriptions go through subscriptions:save, which knows whether this
+    // device owns the list or shares it with a hub. The explicit fields further
+    // down are what actually hold the line — they are applied after the spread
+    // and source from settings — but stripping the keys here keeps a future
+    // reorder from quietly turning the spread back into a second way in.
+    delete normalizedPatch.subscriptions;
+    delete normalizedPatch.subscriptionsOrphaned;
+    delete normalizedPatch.subscriptionsCacheHub;
+    // Derived for the renderer from the hub document, not settings. Persisting a
+    // copy would leave a key on disk that describes a hub as of whenever a form
+    // was last saved, waiting to be mistaken for the real thing.
+    delete normalizedPatch.subscriptionsShared;
+    delete normalizedPatch.subscriptionsHub;
+    delete normalizedPatch.subscriptionsUpdatedAt;
     if (patch.clients !== undefined) normalizedPatch.clients = clientsCsvForSetting(patch.clients, '');
+    if (patch.claudeWebCookie !== undefined) normalizedPatch.claudeWebCookie = normalizeClaudeWebCookie(patch.claudeWebCookie);
     if (patch.deepseekApiKey !== undefined) normalizedPatch.deepseekApiKey = normalizeDeepSeekApiKey(patch.deepseekApiKey);
     if (patch.minimaxApiKey !== undefined) normalizedPatch.minimaxApiKey = normalizeMinimaxApiKey(patch.minimaxApiKey);
     if (patch.copilotApiToken !== undefined) normalizedPatch.copilotApiToken = normalizeCopilotApiToken(patch.copilotApiToken);
@@ -3858,11 +5710,13 @@ app.whenReady().then(() => {
     if (patch.qoderCookie !== undefined) normalizedPatch.qoderCookie = normalizeQoderCookie(patch.qoderCookie);
     if (patch.qoderSite !== undefined) normalizedPatch.qoderSite = normalizeQoderSite(patch.qoderSite);
     if (patch.kimiApiKey !== undefined) normalizedPatch.kimiApiKey = normalizeKimiApiKey(patch.kimiApiKey);
+    if (patch.kimiWebAccessToken !== undefined) normalizedPatch.kimiWebAccessToken = normalizeKimiWebAccessToken(patch.kimiWebAccessToken);
     if (patch.ollamaCookie !== undefined) normalizedPatch.ollamaCookie = normalizeOllamaCookie(patch.ollamaCookie);
     if (patch.collectionMode !== undefined) normalizedPatch.collectionMode = normalizeCollectionMode(patch.collectionMode, settings.collectionMode);
     if (patch.collectionIntervalMs !== undefined) normalizedPatch.collectionIntervalMs = normalizeCollectionIntervalMs(patch.collectionIntervalMs, settings.collectionIntervalMs);
     if (patch.syncUploadIntervalMs !== undefined) normalizedPatch.syncUploadIntervalMs = normalizeSyncUploadIntervalMs(patch.syncUploadIntervalMs, settings.syncUploadIntervalMs);
     if (patch.heatmapMetric !== undefined) normalizedPatch.heatmapMetric = normalizeHeatmapMetric(patch.heatmapMetric, settings.heatmapMetric);
+    if (patch.homeActiveDaysWindow !== undefined) normalizedPatch.homeActiveDaysWindow = normalizeHomeActiveDaysWindow(patch.homeActiveDaysWindow, settings.homeActiveDaysWindow);
     settings = normalizeWindowBehaviorSettings({
       ...settings,
       ...normalizedPatch,
@@ -3875,14 +5729,33 @@ app.whenReady().then(() => {
       glassOpacity: Math.max(0, Math.min(100, Number(patch.glassOpacity ?? settings.glassOpacity ?? 68))),
       glassBlur: Math.max(0, Math.min(100, Number(patch.glassBlur ?? settings.glassBlur ?? 32))),
       systemGlass: patch.systemGlass ?? settings.systemGlass ?? true,
+      windowsBackdrop: normalizeWindowsBackdropMode(patch.windowsBackdrop ?? settings.windowsBackdrop),
       reduceMotion: motionPreferenceApi.normalize(patch.reduceMotion ?? settings.reduceMotion),
       showLiveDot: patch.showLiveDot ?? settings.showLiveDot ?? true,
       showToolIcons: patch.showToolIcons ?? settings.showToolIcons ?? true,
       titleIconOnly: parseBoolean(patch.titleIconOnly ?? settings.titleIconOnly, false),
       showCompactTotalTokens: parseBoolean(patch.showCompactTotalTokens ?? settings.showCompactTotalTokens, false),
+      compactTokenUnits: normalizeCompactTokenUnits(patch.compactTokenUnits ?? settings.compactTokenUnits),
+      tokenRateMode: normalizeTokenRateMode(patch.tokenRateMode ?? settings.tokenRateMode),
       floatingBubbleEnabled: parseBoolean(patch.floatingBubbleEnabled ?? settings.floatingBubbleEnabled, false),
       discordRpcEnabled: patch.discordRpcEnabled ?? settings.discordRpcEnabled ?? false,
       limitsEnabled: parseBoolean(patch.limitsEnabled ?? settings.limitsEnabled, true),
+      // Sourced from settings only, never from the patch: subscriptions:save is
+      // the one write path, because it knows whether this device owns the list
+      // or shares it with a hub. Reading the patch here would let any caller
+      // fork the shared list past that decision.
+      subscriptions: subscriptionDisplay.normalizeSubscriptions(
+        settings.subscriptions,
+        { currencyApi: { normalizeCurrency } }
+      ),
+      subscriptionsCacheHub: String(settings.subscriptionsCacheHub || ''),
+      subscriptionsOrphaned: {
+        hubUrl: orphanedSubscriptions().hubUrl,
+        records: subscriptionDisplay.normalizeSubscriptions(
+          orphanedSubscriptions().records,
+          { currencyApi: { normalizeCurrency } }
+        )
+      },
       limitProviders: patch.limitProviders !== undefined ? parseLimitProviders(patch.limitProviders).join(',') : settings.limitProviders,
       limitProviderOrder: patch.limitProviderOrder !== undefined ? migrateLimitProviderOrder(patch.limitProviderOrder) : settings.limitProviderOrder,
       clientDisplayOrder: patch.clientDisplayOrder !== undefined ? migrateClientDisplayOrder(patch.clientDisplayOrder) : (settings.clientDisplayOrder || ''),
@@ -3911,20 +5784,29 @@ app.whenReady().then(() => {
       limitsRefreshMs: normalizeLimitsRefreshMs(patch.limitsRefreshMs ?? settings.limitsRefreshMs),
       showLimitSource: parseBoolean(patch.showLimitSource ?? settings.showLimitSource, false),
       maskLimitAccountEmails: parseBoolean(patch.maskLimitAccountEmails ?? settings.maskLimitAccountEmails, false),
+      claudePrepaidBalanceEnabled: parseBoolean(patch.claudePrepaidBalanceEnabled ?? settings.claudePrepaidBalanceEnabled, true),
+      opencodeLocalLimitsEnabled: parseBoolean(patch.opencodeLocalLimitsEnabled ?? settings.opencodeLocalLimitsEnabled, false),
       showLimitUsed: parseBoolean(patch.showLimitUsed ?? settings.showLimitUsed, false),
+      windowMaximized: parseBoolean(settings.windowMaximized, false),
       zoomFactor: clampZoom(patch.zoomFactor ?? settings.zoomFactor),
       ...normalizeTrayModeSettings({
         showTrayIcon: patch.showTrayIcon ?? settings.showTrayIcon,
         trayMode: patch.trayMode ?? settings.trayMode
       }),
       trayContent: normalizeTrayContent(patch.trayContent ?? settings.trayContent),
+      trayCustomLayout: normalizeTrayLayout(patch.trayCustomLayout ?? settings.trayCustomLayout),
       showTrayProviderBadge: parseBoolean(patch.showTrayProviderBadge ?? settings.showTrayProviderBadge, false),
       floatingBubbleContent: normalizeTrayContent(patch.floatingBubbleContent ?? settings.floatingBubbleContent, 'icon'),
+      floatingBubbleCustomLayout: normalizeTrayLayout(patch.floatingBubbleCustomLayout ?? settings.floatingBubbleCustomLayout),
       windowToggleShortcut: normalizeWindowToggleShortcut(patch.windowToggleShortcut ?? settings.windowToggleShortcut),
       currency: normalizedCurrency,
       currencyRates: patch.currencyRates !== undefined ? normalizeCurrencyOverrides(patch.currencyRates) : normalizeCurrencyOverrides(settings.currencyRates),
       language: patch.language !== undefined ? normalizeLanguageSetting(patch.language, settings.language) : normalizeLanguageSetting(settings.language),
       startAtLogin: loginItemEnabledHere() ? parseBoolean(patch.startAtLogin ?? settings.startAtLogin, false) : false,
+      automaticAppUpdates: parseBoolean(patch.automaticAppUpdates ?? settings.automaticAppUpdates, false),
+      claudeWebCookie: patch.claudeWebCookie !== undefined
+        ? normalizeClaudeWebCookie(patch.claudeWebCookie)
+        : (settings.claudeWebCookie || ''),
       deepseekApiKey: patch.deepseekApiKey !== undefined ? normalizeDeepSeekApiKey(patch.deepseekApiKey) : (settings.deepseekApiKey || ''),
       minimaxApiKey: patch.minimaxApiKey !== undefined ? normalizeMinimaxApiKey(patch.minimaxApiKey) : (settings.minimaxApiKey || ''),
       copilotApiToken: patch.copilotApiToken !== undefined ? normalizeCopilotApiToken(patch.copilotApiToken) : (settings.copilotApiToken || ''),
@@ -3947,7 +5829,12 @@ app.whenReady().then(() => {
     settings.archivedClientUsage = normalizeArchivedClientUsage(settings.archivedClientUsage);
     if (settings.clients !== previousClients) updateArchivedClientUsage(previousClients, settings.clients);
     delete settings.edgeDrawerEnabled;
-    saveSettings({ throwOnError: true });
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      settings = previousSettingsState;
+      throw error;
+    }
     if (JSON.stringify(settings.customModelPricing || []) !== previousCustomModelPricing) {
       regenerateTokscalePricing();
       refreshAfterPricingChange();
@@ -3957,58 +5844,56 @@ app.whenReady().then(() => {
       settings.startAtLogin = applyLoginItem(settings.startAtLogin);
       saveSettings({ throwOnError: true });
     }
+    if (settings.automaticAppUpdates && !previousAutomaticAppUpdates) {
+      runAppUpdateCheck({ bypassCooldown: true }).catch(() => {});
+    }
     if (patch.zoomFactor !== undefined) applyZoomFactor();
     if (settings.discordRpcEnabled && !previousDiscordRpcEnabled) {
       startDiscordRpc();
-      if (latestStats) updateDiscordRpc(latestStats, settings.currency);
+      if (latestStats) updateDiscordRpcDisplay(latestStats);
     }
     else if (!settings.discordRpcEnabled && previousDiscordRpcEnabled) stopDiscordRpc();
-    else if (settings.discordRpcEnabled && settings.currency !== previousCurrency && latestStats) updateDiscordRpc(latestStats, settings.currency);
+    else if (settings.discordRpcEnabled && (
+      settings.currency !== previousCurrency
+      || settings.compactTokenUnits !== previousCompactTokenUnits
+      || settings.language !== previousLanguage
+    ) && latestStats) updateDiscordRpcDisplay(latestStats);
     applyWindowSettings();
     syncFloatingBubbleAvailability();
     const nextNativeMaterial = nativeBlurEnabled();
-    if (process.platform === 'win32' && previousNativeMaterial !== nextNativeMaterial) {
+    const nextWindowsBackdrop = normalizeWindowsBackdropMode(settings?.windowsBackdrop);
+    const windowsBackdropChanged = previousWindowsBackdrop !== nextWindowsBackdrop
+      && (previousNativeMaterial || nextNativeMaterial);
+    if (process.platform === 'win32' && (previousNativeMaterial !== nextNativeMaterial || windowsBackdropChanged)) {
       rebuildWindow();
     } else {
       applyNativeMaterial();
     }
-    if (
-      settings.hubMode !== previousHubMode ||
-      settings.hubHostPort !== previousHubHostPort ||
-      settings.hubHostSecret !== previousHubHostSecret ||
-      settings.hubUrl !== previousHubUrl ||
-      settings.secret !== previousSecret ||
-      settings.deviceId !== previousDeviceId ||
-      settings.clients !== previousClients ||
-      settings.limitsEnabled !== previousLimitsEnabled ||
-      settings.limitProviders !== previousLimitProviders ||
-      settings.limitsRefreshMs !== previousLimitsRefreshMs ||
-      settings.historyEnabled !== previousHistoryEnabled ||
-      settings.projectsEnabled !== previousProjectsEnabled ||
-      settings.sessionUsageArchiveEnabled !== previousSessionUsageArchiveEnabled ||
-      settings.historyIntervalMs !== previousHistoryIntervalMs ||
-      settings.wslScanEnabled !== previousWslScanEnabled ||
-      settings.collectionMode !== previousCollectionMode ||
-      settings.collectionIntervalMs !== previousCollectionIntervalMs ||
-      (settings.hubMode === 'client' && settings.syncUploadIntervalMs !== previousSyncUploadIntervalMs) ||
-      settings.deepseekApiKey !== previousDeepSeekApiKey ||
-      settings.minimaxApiKey !== previousMinimaxApiKey ||
-      settings.copilotApiToken !== previousCopilotApiToken ||
-      settings.copilotEnterpriseHost !== previousCopilotEnterpriseHost ||
-      settings.zaiApiKey !== previousZaiApiKey ||
-      settings.zaiApiRegion !== previousZaiApiRegion ||
-      settings.zaiTeamApiKey !== previousZaiTeamApiKey ||
-      settings.zaiTeamOrganizationId !== previousZaiTeamOrganizationId ||
-      settings.zaiTeamProjectId !== previousZaiTeamProjectId ||
-      settings.volcengineAccessKeyId !== previousVolcengineAccessKeyId ||
-      settings.volcengineSecretAccessKey !== previousVolcengineSecretAccessKey ||
-      settings.volcengineRegion !== previousVolcengineRegion ||
-      settings.qoderCookie !== previousQoderCookie ||
-      settings.qoderSite !== previousQoderSite ||
-      settings.kimiApiKey !== previousKimiApiKey ||
-      settings.ollamaCookie !== previousOllamaCookie
-    ) {
+    const runtimeChange = classifySettingsChange(previousRuntimeSettings, settings);
+    const widgetHistorySourceChanged = previousRuntimeSettings.historyEnabled !== settings.historyEnabled;
+    if (widgetHistorySourceChanged && !runtimeChange.modeStructural) {
+      refreshMacWidgetHistorySource();
+    }
+    const limitInvalidations = settingsLimitInvalidationPlan(runtimeChange);
+    if (runtimeChange.modeStructural) {
+      for (const { scope, reason, options } of limitInvalidations) {
+        rememberPendingLimitInvalidation(scope, reason, options);
+      }
       startMode();
+    } else if (runtimeChange.usageStructural || runtimeChange.sinkStructural) {
+      for (const { scope, reason, options } of limitInvalidations) {
+        rememberPendingLimitInvalidation(scope, reason, options);
+      }
+      restartDeviceRuntimeForMode();
+    } else {
+      if (runtimeChange.limitsReconfigure && deviceRuntimeHandle) {
+        deviceRuntimeHandle.reconfigureLimits(electronLimitsConfig());
+      }
+      for (const { scope, reason, options } of limitInvalidations) {
+        void queueLimitInvalidation(scope, reason, options).catch((error) => {
+          console.log(`[limits-runtime] settings refresh failed: ${error.message}`);
+        });
+      }
     }
     if (settings.showTrayIcon !== previousShowTrayIcon) {
       if (settings.showTrayIcon) ensureTray();
@@ -4019,17 +5904,27 @@ app.whenReady().then(() => {
       else exitTrayMode();
     } else if (
       settings.trayContent !== previousTrayContent ||
+      JSON.stringify(settings.trayCustomLayout || {}) !== previousTrayCustomLayout ||
+      JSON.stringify(settings.floatingBubbleCustomLayout || {}) !== previousFloatingBubbleCustomLayout ||
       settings.showTrayProviderBadge !== previousShowTrayProviderBadge ||
-      settings.currency !== previousCurrency
+      settings.currency !== previousCurrency ||
+      settings.compactTokenUnits !== previousCompactTokenUnits ||
+      settings.language !== previousLanguage
     ) {
       updateTrayDisplay();
     }
     if (patch.currency !== undefined || patch.currencyRates !== undefined) {
       applyEffectiveRates();               // sync: settingsForRenderer() below sees fresh effective map
       updateTrayDisplay();
-      if (settings.discordRpcEnabled && latestStats) updateDiscordRpc(latestStats, settings.currency);
+      if (settings.discordRpcEnabled && latestStats) updateDiscordRpcDisplay(latestStats);
       refreshExchangeRates();              // async: fetch if stale, then re-push
     }
+    if ((settings.opencodeLocalLimitsEnabled === true) !== previousOpenCodeLocalLimitsEnabled) {
+      // Re-project the cached aggregate immediately. The Hub can be offline and
+      // therefore may not send another frame after this local-only setting changes.
+      refreshLimitStatsPresentation();
+    }
+    pushSettingsToRenderer();
     return settingsForRenderer();
   });
   ipcMain.handle('appearance:preview', (_event, patch) => {
@@ -4138,7 +6033,13 @@ app.whenReady().then(() => {
     updateTrayDisplay();
     return true;
   });
-  ipcMain.handle('stats:get', (_event, options) => fetchStats(options));
+  ipcMain.handle('stats:get', async (_event, options) => {
+    const stats = await fetchStats(options);
+    // The stream normally carries the stamp, but it is precisely when the stream
+    // is down that this read is the only thing still arriving from the hub.
+    maybeAdoptSharedSubscriptionRevision(stats);
+    return electronPresentationStats(stats);
+  });
   ipcMain.handle('export:now', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
@@ -4160,7 +6061,7 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('session:getDetail', (_event, args) => {
     const { client, sessionId, period, sessionCost } = args || {};
-    return readSessionDetail({ client, sessionId, period, sessionCost, home: os.homedir() });
+    return readSessionDetailForPlatform({ client, sessionId, period, sessionCost });
   });
   ipcMain.handle('stream:status', () => ({ connected: streamConnected, mode, ...(streamFailure || {}) }));
   ipcMain.handle('serviceStatus:get', (_event, options) => serviceStatusClient.getServiceStatus({
@@ -4181,10 +6082,87 @@ app.whenReady().then(() => {
     osRelease: require('os').release(),
     isPackaged: app.isPackaged,
     userData: app.getPath('userData'),
+    // So the diagnostics panel can print ~/… instead of the user's account name.
+    homeDir: require('os').homedir(),
     sharedDataDir: sharedDataDir(),
     loginItemSupported: loginItemEnabledHere(),
     loginItemOpenAtLogin: currentLoginItemState()
   }));
+  ipcMain.handle('diagnostics:generate', async () => {
+    const report = await diagnosticReportGenerator.generate();
+    return {
+      generatedAt: report.generatedAt,
+      completeness: report.completeness,
+      text: report.text,
+      bytes: report.bytes,
+      truncated: report.truncated,
+      includedClientCount: report.includedClientCount,
+      omittedClientCount: report.omittedClientCount,
+      includedLimitProviderCount: report.includedLimitProviderCount,
+      omittedLimitProviderCount: report.omittedLimitProviderCount,
+      includedRemoteGroupCount: report.includedRemoteGroupCount,
+      omittedRemoteGroupCount: report.omittedRemoteGroupCount,
+      includedJournalEventCount: report.includedJournalEventCount,
+      journalOmittedCount: report.journalOmittedCount
+    };
+  });
+  // Where each tracked tool's data is read from on THIS machine. The absolute
+  // paths stay local by design — they carry the user's home directory and never
+  // go on the wire — so the renderer asks the main process for them instead.
+  //
+  // Probe only the client whose detail panel is open. The renderer caches the
+  // result for the current health snapshot, avoiding both eager filesystem work
+  // and path flicker when a stats tick rebuilds the panel.
+  ipcMain.handle('usage:clientSources', (_event, clientId) => {
+    const client = String(clientId || '').trim().toLowerCase();
+    const tracked = trackedClientSet(clientsCsvForSetting(settings?.clients));
+    if (!KNOWN_CLIENTS.split(',').includes(client) || !tracked.has(client)) return null;
+    try {
+      const seen = new Set();
+      const all = (visibleDiagnosticRoots(client)[client] || [])
+        .filter((root) => {
+          const key = `${root.id}\0${root.dir}`;
+          return !seen.has(key) && seen.add(key);
+        })
+        .map((root) => ({ id: root.id, dir: root.dir, exists: root.exists === true }));
+      const sources = all.slice(0, 32);
+      return { sources, omittedCount: all.length - sources.length };
+    } catch (_) {
+      return null;
+    }
+  });
+  // Reveals one of those paths. The renderer sends a client id, never a path:
+  // anything it could send would otherwise become an arbitrary filesystem open.
+  ipcMain.handle('usage:revealClientSource', async (_event, clientId) => {
+    const client = String(clientId || '').trim().toLowerCase();
+    const tracked = trackedClientSet(clientsCsvForSetting(settings?.clients));
+    if (!KNOWN_CLIENTS.split(',').includes(client) || !tracked.has(client)) return false;
+    try {
+      const roots = clientDiagnosticRoots(client)[client] || [];
+      const target = roots.find((root) => root.exists);
+      if (!target) return false;
+      // An exact-file source would otherwise be handed to openPath, which opens
+      // the file in whatever app claims .db/.jsonl. Select it in its folder
+      // instead — the user asked where the data lives, not to open it.
+      if (target.sourcePath) {
+        shell.showItemInFolder(target.sourcePath);
+        return true;
+      }
+      return await shell.openPath(target.dir) === '';
+    } catch (_) {
+      return false;
+    }
+  });
+  ipcMain.handle('usage:rescanClient', async (_event, clientId) => {
+    const client = String(clientId || '').trim().toLowerCase();
+    if (!client || !ownsUsageRuntime()) return false;
+    try {
+      return await refreshUsageClient(client, { forceSync: true }) === true;
+    } catch (error) {
+      console.log(`[usage-runtime] rescan failed: ${error.message}`);
+      return false;
+    }
+  });
   ipcMain.handle('clipboard:write', (_event, text) => {
     clipboard.writeText(String(text || ''));
     return true;
@@ -4225,9 +6203,70 @@ app.whenReady().then(() => {
       if (!probeResult.ok) return { ok: false, error: probeResult.error?.message || 'Cursor rejected the token' };
       await cursorAuth.runCursorLogin(token);
       cursorStatusCache = { value: null, at: 0 };
+      void queueLimitInvalidation({ provider: 'cursor' }, 'login', { clear: true });
+      bestEffortTrackedUsageRefresh('cursor', { forceSync: true });
       return { ok: true, email: probeResult.user.email };
     } catch (err) {
       return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('claude:saveCookie', async (_event, raw) => {
+    const requestRevision = ++claudeWebCookieMutationRevision;
+    let cookie;
+    try {
+      cookie = normalizeClaudeWebCookie(raw);
+    } catch (error) {
+      return {
+        ok: false,
+        status: 'invalid',
+        errorCode: error?.code || 'INVALID_CLAUDE_WEB_SESSION_KEY'
+      };
+    }
+    if (!cookie) {
+      return {
+        ok: false,
+        status: 'notConfigured',
+        errorCode: 'INVALID_CLAUDE_WEB_SESSION_KEY'
+      };
+    }
+    try {
+      let cookieToPersist = cookie;
+      const provider = await fetchClaudeLimits(
+        { claudeWebCookie: cookie },
+        {
+          claudeWebFetch: electronClaudeWebFetch,
+          providerRuntimeState: new Map(),
+          onClaudeWebCookieRenewed: ({ cookie: renewedCookie }) => {
+            cookieToPersist = renewedCookie;
+          }
+        }
+      );
+      if (provider?.status !== 'ok') {
+        return {
+          ok: false,
+          status: provider?.status || 'error'
+        };
+      }
+      if (claudeWebCookieMutationRevision !== requestRevision) {
+        return {
+          ok: false,
+          status: 'superseded',
+          superseded: true
+        };
+      }
+      settings.claudeWebCookie = cookieToPersist;
+      saveSettings({ throwOnError: true });
+      void queueLimitInvalidation({ provider: 'claude' }, 'login', { clear: true });
+      return {
+        ok: true,
+        status: 'ok'
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        status: error?.status || 'error',
+        errorCode: error?.code || ''
+      };
     }
   });
   ipcMain.handle('ollama:validateCookie', async (_event, raw) => {
@@ -4248,7 +6287,7 @@ app.whenReady().then(() => {
         return { ok: false, error: error?.message || 'Could not persist OpenCode credentials' };
       }
       opencodeStatusCache = { value: null, at: 0 };
-      startMode();
+      void queueLimitInvalidation({ provider: 'opencode' }, 'logout', { clear: true });
       return { ok: true, cleared: true };
     }
     try {
@@ -4265,7 +6304,7 @@ app.whenReady().then(() => {
       settings.opencodeCookie = cookie;
       saveSettings({ throwOnError: true });
       opencodeStatusCache = { value: null, at: 0 };
-      startMode();
+      void queueLimitInvalidation({ provider: 'opencode' }, 'credential-save', { clear: true });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -4275,6 +6314,8 @@ app.whenReady().then(() => {
     try {
       await cursorAuth.runCursorLogout();
       cursorStatusCache = { value: null, at: 0 };
+      void queueLimitInvalidation({ provider: 'cursor' }, 'logout', { clear: true });
+      bestEffortTrackedUsageRefresh('cursor', { forceSync: true });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -4286,7 +6327,7 @@ app.whenReady().then(() => {
       settings.opencodeCookie = '';
       saveSettings({ throwOnError: true });
       opencodeStatusCache = { value: null, at: 0 };
-      startMode();
+      void queueLimitInvalidation({ provider: 'opencode' }, 'logout', { clear: true });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -4382,7 +6423,7 @@ app.whenReady().then(() => {
       settings.opencodeProfiles = profiles;
       saveSettings({ throwOnError: true });
       opencodeStatusCache = { value: null, at: 0 };
-      startMode();
+      void queueLimitInvalidation({ provider: 'opencode', accountName: name }, 'profile-save');
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -4402,7 +6443,10 @@ app.whenReady().then(() => {
       return { ok: false, error: error?.message || 'Could not persist OpenCode profile deletion' };
     }
     opencodeStatusCache = { value: null, at: 0 };
-    startMode();
+    void queueLimitInvalidation({ provider: 'opencode', accountName: name }, 'profile-delete', {
+      clear: true,
+      refresh: false
+    });
     return { ok: true };
   });
   ipcMain.handle('opencode:renameProfile', async (_event, oldName, newName) => {
@@ -4419,7 +6463,11 @@ app.whenReady().then(() => {
       return { ok: false, error: error?.message || 'Could not persist OpenCode profile rename' };
     }
     opencodeStatusCache = { value: null, at: 0 };
-    startMode();
+    void queueLimitInvalidation({ provider: 'opencode', accountName: oldName }, 'profile-rename', {
+      clear: true,
+      refresh: false
+    });
+    void queueLimitInvalidation({ provider: 'opencode', accountName: newName }, 'profile-rename');
     return { ok: true };
   });
   ipcMain.handle('opencode:setProfileEnabled', async (_event, name, enabled) => {
@@ -4433,7 +6481,235 @@ app.whenReady().then(() => {
       return { ok: false, error: error?.message || 'Could not persist OpenCode profile state' };
     }
     opencodeStatusCache = { value: null, at: 0 };
-    startMode();
+    void queueLimitInvalidation({ provider: 'opencode', accountName: name }, 'profile-state', {
+      clear: !enabled,
+      refresh: Boolean(enabled)
+    });
+    return { ok: true };
+  });
+  ipcMain.handle('openrouter:getProfiles', async () => {
+    return {
+      profiles: redactOpenRouterProfilesForRenderer(settings.openrouterProfiles || {}),
+      hasEnvVar: Boolean(openrouterLimits.openrouterToken(process.env))
+    };
+  });
+  ipcMain.handle('openrouter:saveProfile', async (_event, rawName, rawApiKey) => {
+    const name = openrouterLimits.openrouterProfileName(rawName);
+    const apiKey = openrouterLimits.openrouterToken({}, rawApiKey);
+    if (!name) return { ok: false, errorCode: 'invalidName' };
+    if (!apiKey) return { ok: false, errorCode: 'missingApiKey' };
+    try {
+      const provider = await openrouterLimits.fetchOpenRouterAccount(name, apiKey, {
+        env: process.env,
+        signal: AbortSignal.timeout(15_000)
+      });
+      if (provider?.status !== 'ok') {
+        return { ok: false, error: provider?.status === 'unauthorized' ? 'OpenRouter rejected the API key' : 'Could not validate the OpenRouter API key' };
+      }
+      settings.openrouterProfiles = {
+        ...(settings.openrouterProfiles || {}),
+        [name]: { apiKey, enabled: true }
+      };
+      saveSettings({ throwOnError: true });
+      void queueLimitInvalidation({ provider: 'openrouter', accountName: name }, 'profile-save');
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not validate the OpenRouter API key' };
+    }
+  });
+  ipcMain.handle('openrouter:deleteProfile', async (_event, rawName) => {
+    const name = String(rawName || '').trim();
+    const profiles = { ...(settings.openrouterProfiles || {}) };
+    if (!profiles[name]) return { ok: false, error: 'Profile not found' };
+    delete profiles[name];
+    settings.openrouterProfiles = profiles;
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist OpenRouter profile deletion' };
+    }
+    void queueLimitInvalidation({ provider: 'openrouter', accountName: name }, 'profile-delete', {
+      clear: true,
+      refresh: false
+    });
+    return { ok: true };
+  });
+  ipcMain.handle('openrouter:renameProfile', async (_event, rawOldName, rawNewName) => {
+    const oldName = String(rawOldName || '').trim();
+    const newName = openrouterLimits.openrouterProfileName(rawNewName);
+    const profiles = { ...(settings.openrouterProfiles || {}) };
+    if (!newName || oldName === newName) return { ok: false, errorCode: 'invalidName' };
+    if (!profiles[oldName]) return { ok: false, error: 'Profile not found' };
+    if (profiles[newName]) return { ok: false, error: 'Profile name already exists' };
+    profiles[newName] = profiles[oldName];
+    delete profiles[oldName];
+    settings.openrouterProfiles = profiles;
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist OpenRouter profile rename' };
+    }
+    void queueLimitInvalidation({ provider: 'openrouter', accountName: oldName }, 'profile-rename', {
+      clear: true,
+      refresh: false
+    });
+    void queueLimitInvalidation({ provider: 'openrouter', accountName: newName }, 'profile-rename');
+    return { ok: true };
+  });
+  ipcMain.handle('openrouter:setProfileEnabled', async (_event, rawName, enabled) => {
+    const name = String(rawName || '').trim();
+    const profiles = { ...(settings.openrouterProfiles || {}) };
+    if (!profiles[name]) return { ok: false, error: 'Profile not found' };
+    profiles[name] = { ...profiles[name], enabled: Boolean(enabled) };
+    settings.openrouterProfiles = profiles;
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist OpenRouter profile state' };
+    }
+    void queueLimitInvalidation({ provider: 'openrouter', accountName: name }, 'profile-state', {
+      clear: !enabled,
+      refresh: Boolean(enabled)
+    });
+    return { ok: true };
+  });
+  ipcMain.handle('thirdparty:getProfiles', async () => {
+    return {
+      profiles: redactThirdPartyProfilesForRenderer(settings.thirdPartyProfiles || {}),
+      hasEnvVar: thirdPartyLimits.configuredAccounts({}, { env: process.env }).length > 0
+    };
+  });
+  ipcMain.handle('thirdparty:saveProfile', async (_event, rawProfile = {}) => {
+    const name = thirdPartyLimits.thirdPartyProfileName(rawProfile.name);
+    const adapter = thirdPartyLimits.normalizeAdapterId(rawProfile.adapter);
+    const customAdapter = adapter === thirdPartyLimits.CUSTOM_BALANCE_ADAPTER;
+    const baseUrl = thirdPartyLimits.normalizeThirdPartyBaseUrl(rawProfile.baseUrl, {
+      stripTerminalV1: !customAdapter
+    });
+    if (!name) return { ok: false, errorCode: 'invalidName' };
+    if (!adapter) return { ok: false, errorCode: 'invalidAdapter' };
+    if (!baseUrl) return { ok: false, errorCode: 'invalidBaseUrl' };
+    if (
+      adapter === thirdPartyLimits.NEWAPI_ACCOUNT_ADAPTER
+      && !thirdPartyLimits.newapiAccessToken({}, rawProfile.accessToken)
+    ) return { ok: false, errorCode: 'missingAccessToken' };
+    if (
+      [thirdPartyLimits.NEWAPI_TOKEN_ADAPTER, thirdPartyLimits.CUSTOM_BALANCE_ADAPTER].includes(adapter)
+      && !thirdPartyLimits.newapiApiKey({}, rawProfile.apiKey)
+    ) return { ok: false, errorCode: 'missingApiKey' };
+    if (
+      customAdapter
+      && !thirdPartyLimits.normalizeCustomEndpointPath(rawProfile.endpointPath)
+    ) return { ok: false, errorCode: 'invalidEndpointPath' };
+    if (
+      customAdapter
+      && !thirdPartyLimits.normalizeCustomAuthMode(rawProfile.authMode)
+    ) return { ok: false, errorCode: 'invalidAuthMode' };
+    if (
+      customAdapter
+      && (
+        !thirdPartyLimits.normalizeCustomJsonPath(rawProfile.remainingPath)
+        || (
+          String(rawProfile.usedPath || '').trim()
+          && !thirdPartyLimits.normalizeCustomJsonPath(rawProfile.usedPath)
+        )
+        || (
+          String(rawProfile.totalPath || '').trim()
+          && !thirdPartyLimits.normalizeCustomJsonPath(rawProfile.totalPath)
+        )
+      )
+    ) return { ok: false, errorCode: 'invalidJsonPath' };
+    if (
+      customAdapter
+      && !thirdPartyLimits.normalizeCustomCurrency(rawProfile.currency)
+    ) return { ok: false, errorCode: 'invalidCurrency' };
+    if (
+      customAdapter
+      && thirdPartyLimits.normalizeCustomDivisor(rawProfile.divisor) === null
+    ) return { ok: false, errorCode: 'invalidDivisor' };
+    const profile = thirdPartyLimits.normalizeThirdPartyProfile({
+      ...rawProfile,
+      adapter,
+      baseUrl,
+      enabled: true
+    });
+    if (!profile) return { ok: false, errorCode: 'invalidCredential' };
+    try {
+      const provider = await thirdPartyLimits.fetchThirdPartyAccount({ name, ...profile }, {
+        env: process.env,
+        signal: AbortSignal.timeout(15_000)
+      });
+      if (provider?.status !== 'ok') {
+        return {
+          ok: false,
+          errorCode: provider?.status === 'unauthorized' ? 'invalidCredential' : 'unavailable'
+        };
+      }
+      settings.thirdPartyProfiles = {
+        ...(settings.thirdPartyProfiles || {}),
+        [name]: profile
+      };
+      saveSettings({ throwOnError: true });
+      void queueLimitInvalidation({ provider: 'thirdparty', accountName: name }, 'profile-save');
+      return { ok: true };
+    } catch (_) {
+      return { ok: false, errorCode: 'unavailable' };
+    }
+  });
+  ipcMain.handle('thirdparty:deleteProfile', async (_event, rawName) => {
+    const name = String(rawName || '').trim();
+    const profiles = { ...(settings.thirdPartyProfiles || {}) };
+    if (!profiles[name]) return { ok: false, error: 'Profile not found' };
+    delete profiles[name];
+    settings.thirdPartyProfiles = profiles;
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist third-party API profile deletion' };
+    }
+    void queueLimitInvalidation({ provider: 'thirdparty', accountName: name }, 'profile-delete', {
+      clear: true,
+      refresh: false
+    });
+    return { ok: true };
+  });
+  ipcMain.handle('thirdparty:renameProfile', async (_event, rawOldName, rawNewName) => {
+    const oldName = String(rawOldName || '').trim();
+    const newName = thirdPartyLimits.thirdPartyProfileName(rawNewName);
+    const profiles = { ...(settings.thirdPartyProfiles || {}) };
+    if (!newName || oldName === newName) return { ok: false, errorCode: 'invalidName' };
+    if (!profiles[oldName]) return { ok: false, error: 'Profile not found' };
+    if (profiles[newName]) return { ok: false, error: 'Profile name already exists' };
+    profiles[newName] = profiles[oldName];
+    delete profiles[oldName];
+    settings.thirdPartyProfiles = profiles;
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist third-party API profile rename' };
+    }
+    void queueLimitInvalidation({ provider: 'thirdparty', accountName: oldName }, 'profile-rename', {
+      clear: true,
+      refresh: false
+    });
+    void queueLimitInvalidation({ provider: 'thirdparty', accountName: newName }, 'profile-rename');
+    return { ok: true };
+  });
+  ipcMain.handle('thirdparty:setProfileEnabled', async (_event, rawName, enabled) => {
+    const name = String(rawName || '').trim();
+    const profiles = { ...(settings.thirdPartyProfiles || {}) };
+    if (!profiles[name]) return { ok: false, error: 'Profile not found' };
+    profiles[name] = { ...profiles[name], enabled: Boolean(enabled) };
+    settings.thirdPartyProfiles = profiles;
+    try {
+      saveSettings({ throwOnError: true });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Could not persist third-party API profile state' };
+    }
+    void queueLimitInvalidation({ provider: 'thirdparty', accountName: name }, 'profile-state', {
+      clear: !enabled,
+      refresh: Boolean(enabled)
+    });
     return { ok: true };
   });
   ipcMain.handle('codex:accounts', () => codexAccountsForRenderer());
@@ -4465,6 +6741,28 @@ app.whenReady().then(() => {
         });
       }, {
         signal: controller.signal,
+        selectWorkspace: ({ email, currentWorkspaceId, workspaces }) => new Promise((resolve) => {
+          const finish = (workspaceId) => {
+            if (codexWorkspaceSelection?.controller === controller) codexWorkspaceSelection = null;
+            controller.signal.removeEventListener('abort', onAbort);
+            resolve(workspaceId);
+          };
+          const onAbort = () => finish('');
+          codexWorkspaceSelection = {
+            controller,
+            flowId,
+            webContentsId: event.sender.id,
+            workspaceIds: new Set(workspaces.map((workspace) => workspace.id)),
+            finish
+          };
+          controller.signal.addEventListener('abort', onAbort, { once: true });
+          sendStatus({
+            phase: 'workspaceSelection',
+            email,
+            currentWorkspaceId,
+            workspaces: workspaces.map(({ id, label, workspaceKind }) => ({ id, label, workspaceKind }))
+          });
+        }),
         onCommit: () => {
           if (codexLoginController === controller) codexLoginCanCancel = false;
         }
@@ -4475,11 +6773,24 @@ app.whenReady().then(() => {
       return { ...result, flowId };
     } finally {
       if (codexLoginController === controller) {
+        if (codexWorkspaceSelection?.controller === controller) codexWorkspaceSelection.finish('');
         codexLoginController = null;
         codexLoginFlowId = '';
         codexLoginCanCancel = false;
       }
     }
+  });
+  ipcMain.handle('codex:selectWorkspace', (event, request = {}) => {
+    const flowId = String(request?.flowId || '').trim();
+    const workspaceId = normalizeWorkspaceId(request?.workspaceId);
+    const pending = codexWorkspaceSelection;
+    if (!pending || pending.webContentsId !== event.sender.id) return { ok: false, stale: true };
+    if (flowId && pending.flowId && flowId !== pending.flowId) return { ok: false, stale: true };
+    if (!workspaceId || !pending.workspaceIds.has(workspaceId)) {
+      return { ok: false, error: 'Unknown Codex workspace.' };
+    }
+    pending.finish(workspaceId);
+    return { ok: true };
   });
   ipcMain.handle('codex:cancelLogin', (_event, request = {}) => {
     const flowId = String(request?.flowId || '').trim();
@@ -4519,7 +6830,7 @@ app.whenReady().then(() => {
       settings.copilotApiToken = normalizeCopilotApiToken(result.accessToken);
       saveSettings({ throwOnError: true });
       pushSettingsToRenderer();
-      startMode();
+      void queueLimitInvalidation({ provider: 'copilot' }, 'login', { clear: true });
       return { ok: true, flowId };
     } catch (error) {
       const message = copilotLoginErrorMessage(error);

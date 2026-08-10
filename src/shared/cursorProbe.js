@@ -1,6 +1,8 @@
 'use strict';
 
 const https = require('node:https');
+const { abortError } = require('./probeDeadline');
+const { BROWSER_USER_AGENT } = require('./browserUserAgent');
 
 const USAGE_SUMMARY_URL = 'https://cursor.com/api/usage-summary';
 const AUTH_ME_URL = 'https://cursor.com/api/auth/me';
@@ -10,7 +12,7 @@ const DEFAULT_HEADERS = {
   'Accept': '*/*',
   'Accept-Language': 'en-US,en;q=0.9',
   'Referer': 'https://www.cursor.com/settings',
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  'User-Agent': BROWSER_USER_AGENT
 };
 
 function clampPercent(n) {
@@ -144,16 +146,24 @@ function parseUserInfo(input) {
   };
 }
 
-function requestJson(url, sessionToken, { timeoutMs = 15000, httpsLib = https } = {}) {
+function requestJson(url, sessionToken, { timeoutMs = 15000, httpsLib = https, signal } = {}) {
+  if (signal?.aborted) return Promise.reject(abortError(signal));
   return new Promise((resolve) => {
     const parsed = new URL(url);
     let settled = false;
+    let req = null;
     const finish = (value) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener?.('abort', onAbort);
       resolve(value);
     };
-    const req = httpsLib.request({
+    const onAbort = () => {
+      const error = abortError(signal);
+      try { req?.destroy?.(error); } catch (_) {}
+      finish({ ok: false, error: { kind: 'network', message: error.message } });
+    };
+    req = httpsLib.request({
       method: 'GET',
       hostname: parsed.hostname,
       path: `${parsed.pathname}${parsed.search}`,
@@ -186,6 +196,11 @@ function requestJson(url, sessionToken, { timeoutMs = 15000, httpsLib = https } 
       });
     }
     req.on('error', (err) => finish({ ok: false, error: { kind: 'network', message: err.message } }));
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
     req.end();
   });
 }

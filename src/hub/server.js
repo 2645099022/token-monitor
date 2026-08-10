@@ -4,7 +4,14 @@ const http = require('node:http');
 const path = require('node:path');
 const { URL } = require('node:url');
 const { aggregateDevices, mergeDeviceRecord, aggregateHistory } = require('../shared/usage');
+const { DEFAULT_STALE_AFTER_MS } = require('../shared/syncUploadInterval');
 const { historyPreview, historyRevision } = require('../shared/history');
+const {
+  emptySubscriptionDocument,
+  isStaleSubscriptionWrite,
+  subscriptionDocument
+} = require('../shared/subscriptionDisplay');
+const { CURRENCY_CODES, normalizeCurrency } = require('../shared/currency');
 const { isAuthorized, readJsonBody, sendJson, sendText } = require('../shared/http');
 const { loadDotEnv, parseArgs, projectRoot, readJson, writeJsonAtomic } = require('../shared/config');
 
@@ -24,12 +31,17 @@ function createHub({
   port = 17321,
   host = '0.0.0.0',
   secret = '',
-  staleAfterMs = 10 * 60 * 1000,
+  staleAfterMs = DEFAULT_STALE_AFTER_MS,
   dataFile = path.join(projectRoot(), 'data', 'devices.json'),
   logger = console
 } = {}) {
   const store = readJson(dataFile, { version: 1, devices: {} }) || { version: 1, devices: {} };
   if (!store.devices || typeof store.devices !== 'object') store.devices = {};
+  // Subscriptions are shared by every device on this hub rather than owned by one
+  // of them, so they sit beside the device map rather than inside it.
+  if (!store.subscriptions || typeof store.subscriptions !== 'object') {
+    store.subscriptions = emptySubscriptionDocument();
+  }
   const bindHost = resolveBindHost(host, secret);
 
   function persist() {
@@ -44,6 +56,11 @@ function createHub({
     const history = aggregateHistory(Object.values(store.devices));
     stats.historyPreview = historyPreview(history);
     stats.historyRevision = historyRevision(history);
+    // The version of the shared subscription list, never the list itself. A
+    // device compares it against the copy it holds and re-reads only when it has
+    // been overtaken, so learning about another device's edit costs nothing in
+    // the steady state and does not put what the user pays into every frame.
+    stats.subscriptionsUpdatedAt = store.subscriptions?.updatedAt || '';
     return stats;
   }
 
@@ -90,6 +107,62 @@ function createHub({
     delete store.devices[deviceId];
     persist();
     broadcastStats('delete');
+  }
+
+  function getSubscriptions() {
+    return store.subscriptions;
+  }
+
+  // Transport-agnostic like ingest(), so a host-mode widget writes its own hub
+  // in-process instead of looping back over HTTP to itself.
+  function setSubscriptions(subscriptions, baseUpdatedAt) {
+    // A non-array would normalize to an empty list and be stored as a perfectly
+    // successful replacement, wiping records that exist nowhere else. An
+    // intentional clear still sends [].
+    if (!Array.isArray(subscriptions)) {
+      const error = new Error('subscriptions must be an array');
+      error.code = 'bad_subscriptions';
+      throw error;
+    }
+    if (isStaleSubscriptionWrite(store.subscriptions, baseUpdatedAt)) {
+      const error = new Error('stale_write');
+      error.code = 'stale_write';
+      error.current = store.subscriptions;
+      throw error;
+    }
+    // A currency with no exchange rate would be coerced to USD and reported as
+    // an amount the user never entered. The endpoint says it validates, so it
+    // refuses rather than quietly rewriting what somebody pays.
+    const unsupported = subscriptions.find(
+      (entry) => entry?.currency && !CURRENCY_CODES.includes(String(entry.currency).trim().toUpperCase())
+    );
+    if (unsupported) {
+      const error = new Error(`unsupported currency: ${String(unsupported.currency).trim().toUpperCase()}`);
+      error.code = 'bad_subscriptions';
+      throw error;
+    }
+    const next = subscriptionDocument(subscriptions, {
+      previousUpdatedAt: store.subscriptions?.updatedAt,
+      currencyApi: { normalizeCurrency }
+    });
+    // Persist before the in-memory list moves. Otherwise a failed write leaves
+    // this process serving records the file does not have, and a restart quietly
+    // reverts to the old ones — the worst shape for data that exists nowhere else.
+    const previous = store.subscriptions;
+    const previousSavedAt = store.savedAt;
+    store.subscriptions = next;
+    try {
+      persist();
+    } catch (error) {
+      store.subscriptions = previous;
+      store.savedAt = previousSavedAt;
+      throw error;
+    }
+    // Same reason ingest() broadcasts: the other devices are holding a copy that
+    // has just been overtaken, and without this they only find out on their next
+    // poll — which is five minutes apart while the stream is up.
+    broadcastStats('subscriptions');
+    return store.subscriptions;
   }
 
   function onStats(listener) {
@@ -149,6 +222,32 @@ function createHub({
       }
     }
 
+    // Shared, and deliberately behind the same secret gate as every other data
+    // route: this is the one place the user records money.
+    if (req.method === 'GET' && url.pathname === '/api/subscriptions') {
+      return sendJson(res, 200, { ok: true, ...getSubscriptions() });
+    }
+
+    if (req.method === 'PUT' && url.pathname === '/api/subscriptions') {
+      try {
+        const payload = await readJsonBody(req);
+        const stored = setSubscriptions(payload?.subscriptions, payload?.baseUpdatedAt);
+        return sendJson(res, 200, { ok: true, ...stored });
+      } catch (error) {
+        if (error.code === 'stale_write') {
+          return sendJson(res, 409, { error: 'stale_write', ...error.current });
+        }
+        if (error.code === 'bad_subscriptions') {
+          return sendJson(res, 400, { error: 'bad_request', message: error.message });
+        }
+        if (error.code === 'payload_too_large') {
+          res.shouldKeepAlive = false;
+          return sendJson(res, 413, { error: 'payload_too_large', message: error.message }, { connection: 'close' });
+        }
+        return sendJson(res, 400, { error: 'bad_request', message: error.message });
+      }
+    }
+
     if (req.method === 'DELETE' && url.pathname.startsWith('/api/devices/')) {
       const deviceId = decodeURIComponent(url.pathname.slice('/api/devices/'.length));
       deleteDevice(deviceId);
@@ -183,7 +282,10 @@ function createHub({
     });
   }
 
-  return { start, stop, server, getStats, getHistory, ingest, deleteDevice, onStats, bindHost };
+  return {
+    start, stop, server, getStats, getHistory, ingest, deleteDevice, onStats, bindHost,
+    getSubscriptions, setSubscriptions
+  };
 }
 
 if (require.main === module) {
@@ -192,7 +294,7 @@ if (require.main === module) {
   const port = Number(args.port || process.env.TOKEN_MONITOR_PORT || 17321);
   const host = String(args.host || process.env.TOKEN_MONITOR_HOST || '0.0.0.0');
   const secret = String(args.secret || process.env.TOKEN_MONITOR_SECRET || '').trim();
-  const staleAfterMs = Number(args.staleAfterMs || process.env.TOKEN_MONITOR_STALE_AFTER_MS || 10 * 60 * 1000);
+  const staleAfterMs = Number(args.staleAfterMs || process.env.TOKEN_MONITOR_STALE_AFTER_MS || DEFAULT_STALE_AFTER_MS);
   const dataFile = String(args.dataFile || process.env.TOKEN_MONITOR_DATA_FILE || path.join(projectRoot(), 'data', 'devices.json'));
 
   const hub = createHub({ port, host, secret, staleAfterMs, dataFile });

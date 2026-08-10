@@ -1,15 +1,20 @@
 'use strict';
 
 const { staleAfterMsForSyncUpload } = require('./syncUploadInterval');
+const { LIMIT_PROVIDER_IDS, VALID_LIMIT_WINDOW_METRICS } = require('./limitProviders');
 
 const DEFAULT_LIMITS_REFRESH_MS = 5 * 60 * 1000;
-const VALID_PROVIDERS = new Set(['claude', 'codex', 'cursor', 'antigravity', 'opencode', 'deepseek', 'minimax', 'mimo', 'grok', 'copilot', 'kiro', 'zai', 'volcengine', 'qoder', 'zaiteam', 'kimi', 'ollama']);
+const VALID_PROVIDERS = new Set(LIMIT_PROVIDER_IDS);
 const VALID_STATUSES = new Set(['ok', 'disabled', 'notConfigured', 'unauthorized', 'rateLimited', 'sourceRateLimited', 'unavailable', 'error']);
 const VALID_SOURCES = new Set(['oauth', 'cli', 'web', 'rpc', 'local', 'api']);
+const VALID_LIMIT_WINDOW_SOURCES = new Set(['web', 'local']);
 const VALID_SOURCE_DETAILS = new Set(['app', 'cli', 'ide', 'managed', 'unknown']);
 const WINDOW_ORDER = ['session', 'weekly', 'billing'];
 const CODEX_TRANSIENT_WINDOW_RETENTION_MS = 10 * 60 * 1000;
 const CODEX_TRANSIENT_PROVIDER_STATUSES = new Set(['unavailable', 'error', 'rateLimited', 'sourceRateLimited']);
+const MAX_ACCOUNT_LABEL_INPUT_LENGTH = 256;
+const MAX_ACCOUNT_NAME_INPUT_LENGTH = 512;
+const MAX_OPENCODE_ACCOUNT_KEY_ALIASES = 8;
 
 function asNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -45,18 +50,39 @@ function normalizeSourceDetail(value) {
   return VALID_SOURCE_DETAILS.has(raw) ? raw : '';
 }
 
+function containsSensitiveAccountText(value) {
+  const normalized = value.normalize('NFKC');
+  return normalized.includes('@') || /https?:\/\//i.test(normalized);
+}
+
 function normalizeAccountLabel(value) {
   const raw = String(value || '').trim();
-  if (!raw || raw.length > 32 || raw.includes('@') || /^https?:\/\//i.test(raw)) return '';
-  const clean = raw.replace(/[^a-z0-9 +._-]/gi, '').replace(/\s+/g, ' ').trim();
-  return clean.length <= 32 ? clean : '';
+  if (
+    !raw
+    || raw.length > MAX_ACCOUNT_LABEL_INPUT_LENGTH
+    || containsSensitiveAccountText(raw)
+  ) return '';
+  const clean = raw
+    .normalize('NFC')
+    .replace(/[^\p{L}\p{M}\p{N} +._-]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return clean && [...clean].length <= 32 ? clean : '';
 }
 
 function normalizeAccountName(value) {
   const raw = String(value || '').trim();
-  if (!raw || raw.length > 64 || raw.includes('@') || /^https?:\/\//i.test(raw)) return '';
-  const clean = raw.replace(/[^a-z0-9 ._-]/gi, '').replace(/\s+/g, ' ').trim();
-  return clean.length <= 64 ? clean : '';
+  if (
+    !raw
+    || raw.length > MAX_ACCOUNT_NAME_INPUT_LENGTH
+    || containsSensitiveAccountText(raw)
+  ) return '';
+  const clean = raw
+    .normalize('NFC')
+    .replace(/[^\p{L}\p{M}\p{N} ._-]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return clean && [...clean].length <= 64 ? clean : '';
 }
 
 function normalizeAccountEmail(value) {
@@ -78,6 +104,15 @@ function normalizeWindowLabel(value) {
   if (!raw || raw.length > 32) return '';
   const clean = raw.replace(/[^a-z0-9 +._/-]/gi, '').replace(/\s+/g, ' ').trim();
   return clean.length <= 32 ? clean : '';
+}
+
+function normalizeWindowDetail(value) {
+  const raw = String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  return raw.slice(0, 96);
+}
+
+function normalizeWindowCurrency(value) {
+  return String(value || '').trim().toUpperCase().slice(0, 8) || null;
 }
 
 function normalizeIsoTimestamp(value) {
@@ -116,12 +151,18 @@ function normalizeLimitWindow(input) {
   if (!input || typeof input !== 'object') return null;
   const kind = normalizeWindowKind(input.kind || input.type || input.name || input.window || input.windowKind);
   if (!kind) return null;
+  const metricValue = String(input.metric || '').trim().toLowerCase();
+  const metric = VALID_LIMIT_WINDOW_METRICS.has(metricValue) ? metricValue : null;
+  const sourceValue = String(input.source || '').trim().toLowerCase();
+  const source = VALID_LIMIT_WINDOW_SOURCES.has(sourceValue) ? sourceValue : null;
   const used = numberOrNull(input.used);
   const limit = numberOrNull(input.limit);
   const remaining = numberOrNull(input.remaining);
   const usedPercent = percentFromWindow(input, used, limit);
   return {
     kind,
+    ...(metric ? { metric } : {}),
+    ...(source ? { source } : {}),
     label: normalizeWindowLabel(input.label || input.displayLabel || input.title),
     used,
     limit,
@@ -131,8 +172,35 @@ function normalizeLimitWindow(input) {
     resetsAt: normalizeIsoTimestamp(input.resetsAt ?? input.resets_at ?? input.resetAt ?? input.reset_at),
     windowMinutes: numberOrNull(input.windowMinutes ?? input.window_minutes ?? input.windowDurationMins),
     resetDescription: input.resetDescription ? String(input.resetDescription) : '',
+    detail: normalizeWindowDetail(input.detail ?? input.detailText ?? input.detail_text),
+    currency: normalizeWindowCurrency(input.currency),
     showMeter: input.showMeter !== false && input.meter !== false
   };
+}
+
+// Prepaid credit grants, each with its own expiry. Soonest expiry first so the
+// renderer can list them without re-sorting; grants with no expiry sort last.
+function normalizeBalanceTranches(input) {
+  const raw = input?.tranches;
+  if (!Array.isArray(raw)) return [];
+  const tranches = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const amount = numberOrNull(entry.amount);
+    if (amount === null) continue;
+    tranches.push({
+      amount,
+      currency: String(entry.currency || '').trim().toUpperCase().slice(0, 8) || null,
+      expiresAt: normalizeIsoTimestamp(entry.expiresAt ?? entry.expires_at)
+    });
+  }
+  tranches.sort((a, b) => {
+    if (!a.expiresAt && !b.expiresAt) return 0;
+    if (!a.expiresAt) return 1;
+    if (!b.expiresAt) return -1;
+    return Date.parse(a.expiresAt) - Date.parse(b.expiresAt);
+  });
+  return tranches;
 }
 
 function normalizeProviderBalance(input) {
@@ -147,7 +215,14 @@ function normalizeProviderBalance(input) {
     || ''
   ).trim().toUpperCase().slice(0, 8) || null;
   const todaySpend = numberOrNull(input.todaySpend ?? input.today_spend);
+  const weekSpend = numberOrNull(input.weekSpend ?? input.week_spend);
   const monthSpend = numberOrNull(input.monthSpend ?? input.month_spend);
+  const allTimeSpend = numberOrNull(input.allTimeSpend ?? input.all_time_spend);
+  const requestCountRaw = numberOrNull(input.requestCount ?? input.request_count);
+  const requestCount = requestCountRaw === null ? null : Math.max(0, Math.trunc(requestCountRaw));
+  const quotaGroup = String(input.quotaGroup ?? input.quota_group ?? '').trim().slice(0, 64);
+  const expiresAt = normalizeIsoTimestamp(input.expiresAt ?? input.expires_at);
+  const trackingSince = normalizeIsoTimestamp(input.trackingSince ?? input.tracking_since);
   const monthSinceTracking = input.monthSinceTracking ?? input.month_since_tracking;
   const giftBalance = numberOrNull(input.giftBalance ?? input.gift_balance);
   const cashBalance = numberOrNull(input.cashBalance ?? input.cash_balance);
@@ -162,11 +237,18 @@ function normalizeProviderBalance(input) {
   const latestModelUsageDate = normalizeDateText(input.latestModelUsageDate ?? input.latest_model_usage_date);
   const todayUsageBasis = String(input.todayUsageBasis ?? input.today_usage_basis ?? '').trim().slice(0, 64);
   const snapshotDate = normalizeDateText(input.snapshotDate ?? input.snapshot_date ?? input.date);
+  const tranches = normalizeBalanceTranches(input);
   if (
     amount === null
     && !currency
     && todaySpend === null
+    && weekSpend === null
     && monthSpend === null
+    && allTimeSpend === null
+    && requestCount === null
+    && !quotaGroup
+    && !expiresAt
+    && !trackingSince
     && monthSinceTracking === undefined
     && giftBalance === null
     && cashBalance === null
@@ -179,12 +261,19 @@ function normalizeProviderBalance(input) {
     && !latestModelUsageDate
     && !todayUsageBasis
     && !snapshotDate
+    && tranches.length === 0
   ) return null;
   return {
     amount,
     currency,
     todaySpend,
+    weekSpend,
     monthSpend,
+    allTimeSpend,
+    requestCount,
+    quotaGroup,
+    expiresAt,
+    trackingSince,
     monthSinceTracking: Boolean(monthSinceTracking),
     giftBalance,
     cashBalance,
@@ -196,7 +285,8 @@ function normalizeProviderBalance(input) {
     todayUsageDate,
     latestModelUsageDate,
     todayUsageBasis,
-    snapshotDate
+    snapshotDate,
+    ...(tranches.length > 0 ? { tranches } : {})
   };
 }
 
@@ -259,10 +349,28 @@ function normalizeRegion(value) {
   return raw.length <= 16 ? raw : '';
 }
 
+function normalizeWorkspaceKind(value) {
+  return String(value || '').trim().toLowerCase() === 'personal' ? 'personal' : '';
+}
+
+function normalizeOpenCodeAccountKeyAliases(values, accountKey = '') {
+  if (!Array.isArray(values)) return [];
+  const canonical = String(accountKey || '').trim();
+  return [...new Set(values
+    .map((value) => String(value || '').trim())
+    .filter((value) => value && value !== canonical && value.length <= 128))]
+    .sort()
+    .slice(0, MAX_OPENCODE_ACCOUNT_KEY_ALIASES);
+}
+
 function normalizeLimitProvider(input) {
   if (!input || typeof input !== 'object') return null;
   const provider = normalizeProviderId(input.provider);
   if (!provider) return null;
+  const accountKey = input.accountKey ? String(input.accountKey) : '';
+  const accountKeyAliases = provider === 'opencode'
+    ? normalizeOpenCodeAccountKeyAliases(input.accountKeyAliases, accountKey)
+    : [];
   const accountLabel = normalizeAccountLabel(input.accountLabel);
   const windows = Array.isArray(input.windows)
     ? input.windows.map(normalizeLimitWindow).filter(Boolean)
@@ -279,20 +387,41 @@ function normalizeLimitProvider(input) {
   } else {
     windows.sort((a, b) => WINDOW_ORDER.indexOf(a.kind) - WINDOW_ORDER.indexOf(b.kind));
   }
+  const balance = normalizeProviderBalance(input.balance);
+  // Compatibility shim: devices older than the credits-window change post a
+  // balance with no window at all, so every renderer would drop the row.
+  // Synthesize the window here — the one funnel both the local collector and
+  // hub ingest pass through — so no surface has to remember to do it. Only the
+  // amount is restored; the meter percentage stays a display-layer derivation.
+  // Removable once no supported device predates that change.
+  if (balance && balance.amount !== null && !windows.some((window) => window.metric === 'credits')) {
+    windows.push(normalizeLimitWindow({
+      kind: 'billing',
+      metric: 'credits',
+      label: 'Balance',
+      remaining: balance.amount,
+      currency: balance.currency
+    }));
+  }
   return {
     provider,
-    accountKey: input.accountKey ? String(input.accountKey) : '',
+    accountKey,
+    ...(provider === 'opencode' && input.webAccountKey
+      ? { webAccountKey: String(input.webAccountKey) }
+      : {}),
+    ...(accountKeyAliases.length > 0 ? { accountKeyAliases } : {}),
     accountLabel,
     planLabel: normalizeAccountLabel(input.planLabel),
     accountName: normalizeAccountName(input.accountName ?? input.accountLogin ?? input.login),
     accountEmail: normalizeAccountEmail(input.accountEmail ?? input.email),
+    workspaceKind: normalizeWorkspaceKind(input.workspaceKind),
     status: normalizeStatus(input.status),
     source: normalizeSource(input.source),
     sourceDetail: normalizeSourceDetail(input.sourceDetail ?? input.source_detail),
     updatedAt: normalizeIsoTimestamp(input.updatedAt) || normalizeIsoTimestamp(input.checkedAt),
     windows,
     balanceUsd: numberOrNull(input.balanceUsd),
-    balance: normalizeProviderBalance(input.balance),
+    balance,
     resetCredits: normalizeProviderResetCredits(input.resetCredits ?? input.rateLimitResetCredits ?? input.rate_limit_reset_credits),
     region: normalizeRegion(input.region)
   };
@@ -347,23 +476,33 @@ function isConfiguredProvider(provider) {
 }
 
 function providerCollapseKey(provider) {
-  if ((provider.provider === 'codex' || provider.provider === 'opencode' || provider.provider === 'mimo') && isConfiguredProvider(provider)) {
+  if (
+    (provider.provider === 'claude'
+      || provider.provider === 'codex'
+      || provider.provider === 'opencode'
+      || provider.provider === 'openrouter'
+      || provider.provider === 'thirdparty'
+      || provider.provider === 'mimo')
+    && isConfiguredProvider(provider)
+  ) {
     return providerAggregateKey(provider);
   }
   return provider.provider;
 }
 
 function providerWindowRank(provider) {
-  if (provider?.provider !== 'codex') return 0;
-  return Array.isArray(provider.windows) && provider.windows.length > 0 ? 1 : 0;
+  const windowCount = Array.isArray(provider?.windows) ? provider.windows.length : 0;
+  if (provider?.provider === 'codex') return windowCount > 0 ? 1 : 0;
+  if (provider?.provider === 'opencode') return windowCount;
+  return 0;
 }
 
 function codexProviderIdentityKeys(provider) {
   if (provider?.provider !== 'codex') return [];
-  const keys = [];
-  if (provider.accountKey) keys.push(`key:${provider.accountKey}`);
-  if (provider.accountEmail) keys.push(`email:${provider.accountEmail}`);
-  return keys;
+  return [
+    provider.accountKey ? `key:${provider.accountKey}` : '',
+    provider.accountEmail ? `email:${provider.accountEmail}` : ''
+  ].filter(Boolean);
 }
 
 function hasProviderWindows(provider) {
@@ -423,7 +562,11 @@ function mergeCodexTransientWindows(previousInput, currentInput, nowMs = Date.no
     eligiblePreviousCodexProviders.push(eligibleProvider);
     for (const key of codexProviderIdentityKeys(eligibleProvider)) {
       const existing = previousByIdentity.get(key);
-      if (!existing || providerUpdatedAt >= timestampMs(existing.updatedAt)) previousByIdentity.set(key, eligibleProvider);
+      if (existing === undefined) {
+        previousByIdentity.set(key, eligibleProvider);
+      } else if (existing && existing !== eligibleProvider) {
+        previousByIdentity.set(key, null);
+      }
     }
   }
 
@@ -450,8 +593,162 @@ function mergeCodexTransientWindows(previousInput, currentInput, nowMs = Date.no
   };
 }
 
+// A prepaid balance is an account-level fact that only one device can usually
+// observe — Claude's pool is readable solely through a claude.ai Web session, so
+// the same account collected over OAuth elsewhere reports no balance at all.
+// Without this, the freshest record wins and the balance blinks in and out as
+// devices take turns posting. Carry it onto the winner instead; a stale observer
+// is not carried forward, so an offline device cannot pin an old balance.
+function carryProviderBalance(winner, loser) {
+  if (!loser || winner.balance || !loser.balance || loser.stale) return winner;
+  const creditsWindow = (loser.windows || []).find((window) => window?.metric === 'credits');
+  const windows = creditsWindow && !(winner.windows || []).some((window) => window?.metric === 'credits')
+    ? [...(winner.windows || []), creditsWindow]
+    : winner.windows;
+  return { ...winner, balance: loser.balance, windows };
+}
+
+function openCodeWindowKey(window) {
+  const normalized = normalizeLimitWindow(window);
+  if (!normalized) return '';
+  return [normalized.kind, normalized.metric, normalized.label]
+    .map((value) => String(value || ''))
+    .join(':');
+}
+
+function openCodeWindowSourceRank(window) {
+  if (window?.source === 'web') return 2;
+  if (window?.source === 'local') return 1;
+  return 0;
+}
+
+function openCodeIdentityKeys(provider) {
+  if (provider?.provider !== 'opencode') return [];
+  return [...new Set([
+    provider.accountKey,
+    provider.webAccountKey,
+    ...(Array.isArray(provider.accountKeyAliases) ? provider.accountKeyAliases : [])
+  ].map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function groupOpenCodeCandidates(candidates) {
+  const groups = [];
+  for (const candidate of candidates) {
+    const identityKeys = new Set(openCodeIdentityKeys(candidate));
+    const matching = groups.filter((group) => [...identityKeys].some((key) => group.identityKeys.has(key)));
+    if (matching.length === 0) {
+      groups.push({ candidates: [candidate], identityKeys });
+      continue;
+    }
+    const merged = {
+      candidates: [candidate, ...matching.flatMap((group) => group.candidates)],
+      identityKeys: new Set([
+        ...identityKeys,
+        ...matching.flatMap((group) => [...group.identityKeys])
+      ])
+    };
+    for (const group of matching) groups.splice(groups.indexOf(group), 1);
+    groups.push(merged);
+  }
+  return groups.map((group) => group.candidates);
+}
+
+function openCodeProviderTieBreakKey(provider) {
+  return JSON.stringify([
+    provider?.sourceDeviceId || '',
+    provider?.source || '',
+    provider?.accountLabel || '',
+    provider?.windows || [],
+    provider?.balanceUsd
+  ]);
+}
+
+function betterOpenCodeProvider(current, candidate) {
+  if (!current) return candidate;
+  if (current.stale !== candidate.stale) return current.stale ? candidate : current;
+  const rankDiff = statusRank(candidate.status) - statusRank(current.status);
+  if (rankDiff !== 0) return rankDiff > 0 ? candidate : current;
+  const timestampDiff = timestampMs(candidate.updatedAt) - timestampMs(current.updatedAt);
+  if (timestampDiff !== 0) return timestampDiff > 0 ? candidate : current;
+  const windowRankDiff = providerWindowRank(candidate) - providerWindowRank(current);
+  if (windowRankDiff !== 0) return windowRankDiff > 0 ? candidate : current;
+  return openCodeProviderTieBreakKey(candidate).localeCompare(openCodeProviderTieBreakKey(current)) > 0
+    ? candidate
+    : current;
+}
+
+function betterOpenCodeWindow(current, candidate) {
+  if (!current) return candidate;
+  const sourceRankDiff = openCodeWindowSourceRank(candidate.window) - openCodeWindowSourceRank(current.window);
+  if (sourceRankDiff !== 0) return sourceRankDiff > 0 ? candidate : current;
+  // Released collectors appended Go Web windows before subscription.get
+  // windows without component provenance. Preserve that authority only within
+  // the same legacy observation; cross-device candidates still use freshness
+  // and the deterministic tie-break below.
+  if (
+    current.provider === candidate.provider
+    && openCodeWindowSourceRank(current.window) === 0
+    && openCodeWindowSourceRank(candidate.window) === 0
+  ) return current;
+  const timestampDiff = timestampMs(candidate.provider.updatedAt) - timestampMs(current.provider.updatedAt);
+  if (timestampDiff !== 0) return timestampDiff > 0 ? candidate : current;
+  const candidateKey = JSON.stringify([candidate.provider.sourceDeviceId || '', candidate.window]);
+  const currentKey = JSON.stringify([current.provider.sourceDeviceId || '', current.window]);
+  return candidateKey.localeCompare(currentKey) > 0 ? candidate : current;
+}
+
+function mergeOpenCodeProviderComponents(candidates) {
+  const winner = candidates.reduce(betterOpenCodeProvider, null);
+  if (!winner || winner.provider !== 'opencode') return winner;
+  const eligible = candidates.filter((provider) => !(
+    (provider.stale && !winner.stale)
+    || (provider.status !== 'ok' && winner.status === 'ok')
+  ));
+  const entries = new Map();
+  for (const provider of eligible) {
+    for (const window of provider.windows || []) {
+      const key = openCodeWindowKey(window);
+      entries.set(key, betterOpenCodeWindow(entries.get(key), { window, provider }));
+    }
+  }
+
+  const windows = Array.from(entries.values())
+    .map((entry) => entry.window)
+    .sort((a, b) => WINDOW_ORDER.indexOf(a.kind) - WINDOW_ORDER.indexOf(b.kind)
+      || String(a.label || '').localeCompare(String(b.label || '')));
+  const balanceProvider = eligible
+    .filter((provider) => provider.balanceUsd !== null && provider.balanceUsd !== undefined)
+    .sort((a, b) => timestampMs(b.updatedAt) - timestampMs(a.updatedAt)
+      || openCodeProviderTieBreakKey(b).localeCompare(openCodeProviderTieBreakKey(a)))[0];
+  const balanceUsd = balanceProvider ? balanceProvider.balanceUsd : winner.balanceUsd;
+  const hasWebComponent = windows.some((window) => window.source === 'web')
+    || balanceUsd !== null && balanceUsd !== undefined;
+  const canonicalWebAccountKey = [...new Set(candidates
+    .map((provider) => String(provider.webAccountKey || '').trim())
+    .filter(Boolean))].sort()[0] || '';
+  const accountKey = canonicalWebAccountKey || winner.accountKey;
+  const accountKeyAliases = normalizeOpenCodeAccountKeyAliases(
+    candidates.flatMap(openCodeIdentityKeys),
+    accountKey
+  );
+  return {
+    ...winner,
+    accountKey,
+    ...(canonicalWebAccountKey ? { webAccountKey: canonicalWebAccountKey } : {}),
+    ...(accountKeyAliases.length > 0 ? { accountKeyAliases } : {}),
+    source: hasWebComponent ? 'web' : winner.source,
+    windows,
+    balanceUsd
+  };
+}
+
 function pickBetterProvider(current, candidate) {
   if (!current) return candidate;
+  const winner = betterProvider(current, candidate);
+  return carryProviderBalance(winner, winner === current ? candidate : current);
+}
+
+function betterProvider(current, candidate) {
   if (current.stale !== candidate.stale) return current.stale ? candidate : current;
   const rankDiff = statusRank(candidate.status) - statusRank(current.status);
   if (rankDiff !== 0) return rankDiff > 0 ? candidate : current;
@@ -463,6 +760,8 @@ function pickBetterProvider(current, candidate) {
 function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
   const aggregate = { updatedAt: new Date(nowMs).toISOString(), providers: [] };
   const byKey = new Map();
+  const candidatesByKey = new Map();
+  const openCodeCandidates = [];
   const providersWithConfiguredAccounts = new Set();
   const providersWithFreshConfiguredAccounts = new Set();
   const providersWithFreshObservations = new Set();
@@ -481,8 +780,22 @@ function aggregateLimits(devices, staleAfterMs = 0, nowMs = Date.now()) {
         if (isConfiguredProvider(provider)) providersWithFreshConfiguredAccounts.add(provider.provider);
       }
       const key = providerAggregateKey(provider);
-      byKey.set(key, pickBetterProvider(byKey.get(key), candidate));
+      if (candidate.provider === 'opencode' && isConfiguredProvider(candidate)) {
+        openCodeCandidates.push(candidate);
+        continue;
+      }
+      const candidates = candidatesByKey.get(key) || [];
+      candidates.push(candidate);
+      candidatesByKey.set(key, candidates);
     }
+  }
+
+  for (const [key, candidates] of candidatesByKey) {
+    byKey.set(key, candidates.reduce(pickBetterProvider, null));
+  }
+  for (const candidates of groupOpenCodeCandidates(openCodeCandidates)) {
+    const provider = mergeOpenCodeProviderComponents(candidates);
+    byKey.set(providerAggregateKey(provider), provider);
   }
 
   // Second pass: collapse by provider name. Same OAuth account on Mac vs Windows
@@ -516,7 +829,23 @@ function publicLimits(limits) {
   return {
     updatedAt: normalized.updatedAt,
     refreshMs: normalized.refreshMs,
-    providers: normalized.providers.map(({ accountKey, accountEmail, accountName, accountLabel, planLabel, ...provider }) => provider)
+    providers: normalized.providers.map(({
+      accountKey,
+      webAccountKey,
+      accountKeyAliases,
+      accountEmail,
+      accountName,
+      accountLabel,
+      planLabel,
+      workspaceKind,
+      ...provider
+    }) => {
+      if (!provider.balance) return provider;
+      // `tranches` carries per-grant amounts and expiry dates — billing detail
+      // with no public value, dropped alongside the custom group label.
+      const { quotaGroup, tranches, ...publicBalance } = provider.balance;
+      return { ...provider, balance: publicBalance };
+    })
   };
 }
 
@@ -541,6 +870,7 @@ module.exports = {
   normalizeLimitProvider,
   normalizeLimitsSummary,
   normalizeLimitWindow,
+  openCodeWindowKey,
   publicLimits,
   syncLimits
 };

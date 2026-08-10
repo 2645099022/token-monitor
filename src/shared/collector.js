@@ -9,20 +9,45 @@ const semver = require('semver');
 const { readJson, sharedDataDir } = require('./config');
 const { appVersion } = require('./appVersion');
 const { normalizeClientsCsv } = require('./clientTracking');
+const {
+  CLIENT_HEALTH_VERSION,
+  MAX_SYNC_DETAIL_INPUT_LENGTH,
+  MAX_DIAGNOSTICS_PER_CLIENT,
+  classifyClientSyncDetailCode,
+  deriveClientOverall
+} = require('./clientHealth');
 const { tokscalePackageNameForPlatform, tokscalePlatformKey } = require('./tokscalePlatform');
 const { customPricingPath } = require('./tokscaleConfig');
-const { applyPeriodDelta, emptyPeriod, extractUsageFromTokscale, mergePeriods } = require('./usage');
+const {
+  applyPeriodDelta,
+  emptyPeriod,
+  extractUsageBundleFromTokscale,
+  extractUsageFromTokscale,
+  mergePeriods,
+  normalizeClientName,
+  UNATTRIBUTED_USAGE_CLIENT
+} = require('./usage');
 const { collectWslUsage: collectWslUsageImpl, emptyWslBundle, probeWslState: probeWslStateImpl } = require('./wslUsage');
 const { hermesProfileWatchDirs, resolveHermesHome } = require('./hermesProfiles');
 const { mergeHistories, parseGraphResult, normalizeHistory } = require('./history');
-const { retainDailyHistory } = require('./dailyHistoryArchive');
-const { collectLimitsOnce, createLimitsCollector } = require('./limitCollector');
+const { retainDailyHistory, retainLiveDailyHistory } = require('./dailyHistoryArchive');
 const cursorAuth = require('./cursorAuth');
 const { findSessionFiles, codexSessionFile } = require('./sessionFiles');
 const opencodeSession = require('./opencodeSession');
 const { buildPromaHistoryGraph, buildPromaPeriods, collectPromaRows } = require('./promaUsage');
 const { hashKey } = require('./hashKey');
 const { hostOsInfo, normalizeOsInfo } = require('./osVersion');
+const {
+  clampTimerDelayMs,
+  createSelfSyncThrottle,
+  createSourceSyncQueue,
+  mergeSelfSyncSelection
+} = require('./selfSyncThrottle');
+const {
+  LIMITS_RESET_BOUNDARY_MAX_TIMER_MS,
+  nextLimitsResetBoundary,
+  pruneAttemptedResetBoundaries
+} = require('./limitResetBoundary');
 
 function toUnpackedPath(p) {
   // electron-builder asarUnpack stores real files at .../app.asar.unpacked/...
@@ -139,7 +164,11 @@ function spawnTokscaleJson(userArgs, commandTimeoutMs) {
 // `antigravity sync`), separate from the IDE-backed `antigravity`. Widen the
 // tokscale --client filter so those sub-source rows aren't filtered out;
 // extractUsageFromTokscale's normalizeClientName folds them back into the umbrella
-// id. Unknown ids are dropped silently by tokscale, so this is safe on any 4.x.
+// id. Every alias must be a real tokscale client id: an unknown --client value is
+// rejected with exit 2 and takes the whole scan down with it (verified on 4.7.0
+// and 4.8.0), so this list is not a free-form place to invent sub-source names.
+// Clients tokscale doesn't know at all — `proma`, which we parse ourselves — are
+// stripped in collectUsageOnce before the filter is built, not dropped here.
 const TOKSCALE_CLIENT_ALIASES = { antigravity: ['antigravity-cli'] };
 
 function tokscaleClientFilter(clients) {
@@ -483,27 +512,34 @@ function applySessionTimestamps(periods, home, deps = {}) {
   }
 }
 
-// Cursor/antigravity usage only changes when these syncs run, so re-running them
-// on every tick is pure overhead — each one spawns a subprocess and rewrites the
-// tokscale cache (issue #15). Keep them on their own slow cadence.
-const SYNC_MIN_INTERVAL_MS = 5 * 60 * 1000;
-const lastSyncAt = { cursor: 0, antigravity: 0 };
+// The process-wide rationing for cursor/antigravity syncs. Deliberately a single
+// module-scoped instance with no per-call override: the tokscale cache it guards
+// is one directory on disk, so a collector rebuilt by a settings change must not
+// hand itself a fresh allowance — and a second instance would split the state
+// that decides a sync from the state that schedules the catch-up waiting on it,
+// which is the divergence this whole path keeps being bitten by. Tests read it
+// through the export to pin a floor without driving a whole tick; a test wanting
+// isolation builds its own with createSelfSyncThrottle() and drives that
+// directly, rather than threading one back in here.
+const selfSyncThrottle = createSelfSyncThrottle();
 
-function syncDue(kind, nowMs = Date.now()) {
-  if (nowMs - lastSyncAt[kind] < SYNC_MIN_INTERVAL_MS) return false;
-  lastSyncAt[kind] = nowMs;
-  return true;
-}
-
-async function maybeSyncCursor(clientsCsv, logger) {
+async function maybeSyncCursor(clientsCsv, logger, options = {}) {
   const enabled = new Set(normalizeClientsCsv(clientsCsv).split(',').filter(Boolean));
   if (!enabled.has('cursor')) return;
   if (!cursorAuth.readActiveAccount()) return;
-  if (!syncDue('cursor')) return;
+  if (!selfSyncThrottle.claim('cursor', options.minIntervalMs)) return;
+  const attempt = selfSyncThrottle.beginAttempt('cursor');
   try {
     await cursorAuth.runCursorSync();
+    selfSyncThrottle.completeAttempt('cursor', attempt, false);
   } catch (err) {
     if (typeof logger === 'function') logger(`cursor sync failed: ${err.message}`);
+    selfSyncThrottle.completeAttempt('cursor', attempt, true, '', {
+      failureStage: err?.syncFailureStage,
+      detailCode: err?.syncDetailCode || classifyClientSyncDetailCode({ client: 'cursor', text: err?.message }),
+      exitCode: err?.syncExitCode
+    });
+    options.onFailure?.('cursor');
   }
 }
 
@@ -511,26 +547,87 @@ async function maybeSyncCursor(clientsCsv, logger) {
 // ~/.gemini/; when none exist there is nothing to sync, so don't spawn at all.
 const ANTIGRAVITY_DATA_ROOTS = ['antigravity', 'antigravity-ide', 'antigravity-backup'];
 
-function antigravityDataPresent(home) {
-  return ANTIGRAVITY_DATA_ROOTS.some((name) => dirExists(path.join(home, '.gemini', name)));
+function antigravityDataRoots(home = os.homedir()) {
+  return ANTIGRAVITY_DATA_ROOTS.map((name) => path.join(home, '.gemini', name));
 }
 
-async function maybeSyncAntigravity(clientsCsv, logger, home = os.homedir()) {
+function antigravityDataPresent(home) {
+  return antigravityDataRoots(home).some(dirExists);
+}
+
+async function maybeSyncAntigravity(clientsCsv, logger, home = os.homedir(), options = {}) {
   const enabled = new Set(normalizeClientsCsv(clientsCsv).split(',').filter(Boolean));
   if (!enabled.has('antigravity')) return;
   if (!antigravityDataPresent(home)) return;
-  if (!syncDue('antigravity')) return;
+  if (!selfSyncThrottle.claim('antigravity', options.minIntervalMs)) return;
+  const attempt = selfSyncThrottle.beginAttempt('antigravity');
+  if (typeof options.run === 'function') {
+    try {
+      await options.run();
+      selfSyncThrottle.completeAttempt('antigravity', attempt, false);
+    } catch (err) {
+      if (typeof logger === 'function') logger(`antigravity sync failed: ${err.message}`);
+      selfSyncThrottle.completeAttempt('antigravity', attempt, true, '', {
+        failureStage: err?.syncFailureStage,
+        detailCode: err?.syncDetailCode || classifyClientSyncDetailCode({ client: 'antigravity', text: err?.message }),
+        exitCode: err?.syncExitCode
+      });
+      options.onFailure?.('antigravity');
+    }
+    return;
+  }
   const { bin, prefixArgs, env } = tokscaleCommand();
+  // Every outcome resolves — a stuck sync must not hold the tick open — so a
+  // failure is only visible through onFailure. The caller needs it: the tick has
+  // already consumed the source event that asked for this sync, and silently
+  // scanning the unchanged cache would put the refresh back on the fallback
+  // interval, which is the latency this whole path exists to remove.
   await new Promise((resolve) => {
     const child = spawn(bin, [...prefixArgs, 'antigravity', 'sync'], { env, windowsHide: true });
     let stderr = '';
-    const timer = setTimeout(() => { child.kill('SIGTERM'); resolve(); }, 30000);
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', () => { clearTimeout(timer); resolve(); });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code !== 0 && typeof logger === 'function') logger(`antigravity sync exited ${code}: ${stderr.trim().slice(0, 200)}`);
+    // One outcome per spawn. A child reports more than once — a SIGTERM'd
+    // timeout still emits close afterwards, and error is usually followed by
+    // close — which was harmless while every path only resolved a promise, but
+    // onFailure has a side effect: re-arming the catch-up. A late duplicate could
+    // land after a subsequent catch-up already succeeded and put the same source
+    // event back into a set that no longer has anything to collect.
+    let settled = false;
+    let timer = null;
+    // The failure code reaches the health record; stderr only ever reaches the
+    // local log, since it is neither translatable nor reliably free of the
+    // user's paths.
+    const settle = (failed, code = '', details = {}) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      selfSyncThrottle.completeAttempt('antigravity', attempt, failed, code, details);
+      if (failed) options.onFailure?.('antigravity');
       resolve();
+    };
+    timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(true, 'sync-timeout', { failureStage: 'timeout' });
+    }, 30000);
+    child.stderr.on('data', (chunk) => {
+      if (stderr.length >= MAX_SYNC_DETAIL_INPUT_LENGTH) return;
+      const remaining = MAX_SYNC_DETAIL_INPUT_LENGTH - stderr.length;
+      stderr += chunk.toString().slice(0, remaining);
+    });
+    child.on('error', (err) => settle(true, 'sync-spawn-failed', {
+      failureStage: 'spawn',
+      detailCode: classifyClientSyncDetailCode({ client: 'antigravity', text: err?.message })
+    }));
+    child.on('close', (code) => {
+      if (code !== 0 && !settled && typeof logger === 'function') {
+        logger(`antigravity sync exited ${code}: ${stderr.trim().slice(0, 200)}`);
+      }
+      settle(code !== 0, 'sync-exit-error', {
+        failureStage: code !== 0 ? 'process-exit' : null,
+        detailCode: code !== 0
+          ? classifyClientSyncDetailCode({ client: 'antigravity', text: stderr })
+          : null,
+        exitCode: code
+      });
     });
     child.stdin?.end();
   });
@@ -547,6 +644,21 @@ function normalizeHistoryIntervalMs(value) {
 }
 
 async function collectHistoryOnce(options) {
+  const startedAt = Date.now();
+  const attemptedAt = new Date(startedAt).toISOString();
+  let failureCode = null;
+  const reportStatus = (success) => {
+    try {
+      options.onHistoryStatus?.({
+        attemptedAt,
+        successAt: success ? new Date().toISOString() : null,
+        failureCode,
+        durationMs: Math.max(0, Date.now() - startedAt)
+      });
+    } catch (_) {
+      // Diagnostic observers must never affect history collection.
+    }
+  };
   const clients = normalizeClientsCsv(options.clients);
   if (options.historyEnabled === false) return null;
   const histories = [];
@@ -560,6 +672,7 @@ async function collectHistoryOnce(options) {
       rawGraphs.push(graphJson);
       histories.push(normalizeHistory(parseGraphResult(graphJson), { capDays, todayKey }));
     } catch (error) {
+      failureCode = 'history-graph-failed';
       if (typeof options.logger === 'function') options.logger(`tokscale graph failed: ${error.message}`);
     }
   }
@@ -571,19 +684,28 @@ async function collectHistoryOnce(options) {
     try {
       const retainedGraph = retainDailyHistory(rawGraphs, {
         ...(options.dailyHistoryArchiveOptions || {}),
+        liveDays: options.dailyHistoryLiveDays,
         todayKey,
         capDays,
         writeEnabled: options.dailyHistoryArchiveWriteEnabled
       });
       const retained = normalizeHistory(parseGraphResult(retainedGraph), { capDays, todayKey });
-      return retained.daily.length || retained.monthly.length ? retained : null;
+      const result = retained.daily.length || retained.monthly.length ? retained : null;
+      reportStatus(failureCode === null);
+      return result;
     } catch (error) {
+      failureCode = failureCode || 'daily-history-archive-failed';
       if (typeof options.logger === 'function') options.logger(`daily history archive failed: ${error.message}`);
     }
   }
-  if (histories.length === 0) return null;
+  if (histories.length === 0) {
+    reportStatus(false);
+    return null;
+  }
   const history = histories.length === 1 ? histories[0] : mergeHistories(histories, { todayKey });
-  return history.daily.length || history.monthly.length ? history : null;
+  const result = history.daily.length || history.monthly.length ? history : null;
+  reportStatus(failureCode === null);
+  return result;
 }
 
 function shouldIncludeHistory(nowMs, lastHistoryAtMs, historyIntervalMs, force, enabled = true) {
@@ -626,18 +748,36 @@ async function collectUsageOnce(options) {
   // separately below and merged back in.
   const tokscaleClients = normalizedClients ? normalizedClients.split(',').filter((c) => c !== 'proma').join(',') : normalizedClients;
   const includesProma = normalizedClients.split(',').includes('proma');
+  const trackedClientSet = new Set(normalizedClients.split(',').filter(Boolean));
+  const targetClients = [...new Set(normalizeClientsCsv(options.targetClients).split(',').filter((client) => trackedClientSet.has(client)))];
+  const targetRequested = targetClients.length > 0;
+  const targetTokscaleClients = targetClients.filter((client) => client !== 'proma').join(',');
   let today = emptyPeriod();
   let month = emptyPeriod();
   let allTime = emptyPeriod();
+  let dailyHistoryLiveDays = options.dailyHistoryLiveDays;
+  let todayPartitions = null;
   const anchor = options.todayOnlyAnchor;
-  const anchorUsed = Boolean(anchor && anchor.dateKey === localTodayKey(collectedAt));
+  const anchorUsed = Boolean(
+    anchor
+    && anchor.dateKey === localTodayKey(collectedAt)
+    && canTargetTodayPartitions(anchor, targetClients)
+  );
   let promaPeriods = null;
   let promaRows = null;
   let promaPricing = null;
   if (normalizedClients) {
-    await maybeSyncCursor(tokscaleClients, options.logger);
-    await maybeSyncAntigravity(tokscaleClients, options.logger, options.homeDir || os.homedir());
-    if (includesProma) {
+    const syncClients = targetRequested ? targetTokscaleClients : tokscaleClients;
+    await maybeSyncCursor(syncClients, options.logger, {
+      minIntervalMs: selfSyncThrottle.minIntervalForTick(options, 'cursor'),
+      onFailure: options.onSelfSyncFailed
+    });
+    await maybeSyncAntigravity(syncClients, options.logger, options.homeDir || os.homedir(), {
+      minIntervalMs: selfSyncThrottle.minIntervalForTick(options, 'antigravity'),
+      run: options.runAntigravitySync,
+      onFailure: options.onSelfSyncFailed
+    });
+    if (includesProma && (!targetRequested || targetClients.includes('proma'))) {
       try {
         promaRows = collectPromaRows();
         promaPricing = await resolvePromaPricing(promaRows, {
@@ -659,21 +799,40 @@ async function collectUsageOnce(options) {
       // Anchored tick (watch-triggered): every tokscale period scan costs the
       // same full load + filter, so scan only --today and update the broader
       // windows exactly via applyPeriodDelta — one spawn instead of three.
-      if (tokscaleClients) {
-        const todayJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs });
-        today = extractUsageFromTokscale(todayJson);
+      const scanClients = targetRequested ? targetTokscaleClients : tokscaleClients;
+      let freshPartitions = Object.create(null);
+      let useTargetedPartitions = targetRequested;
+      if (scanClients) {
+        const todayJson = await runTokscaleFn({ clients: scanClients, flags: ['--today'], commandTimeoutMs });
+        const bundle = extractUsageBundleFromTokscale(todayJson);
+        freshPartitions = bundle.byClient;
+        const unattributed = freshPartitions[UNATTRIBUTED_USAGE_CLIENT];
+        if (targetRequested && periodHasUsage(unattributed)) {
+          // A row without a client cannot be replaced safely inside one client
+          // partition. Fall back to one all-client today scan for correctness.
+          const fullTodayJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs });
+          freshPartitions = extractUsageBundleFromTokscale(fullTodayJson).byClient;
+          useTargetedPartitions = false;
+        } else if (targetRequested) {
+          // Empty tokscale output uses the unattributed fallback shape. Keep the
+          // anchor's real unattributed partition while clearing the target.
+          delete freshPartitions[UNATTRIBUTED_USAGE_CLIENT];
+        }
       }
-      // The persisted anchor contains every Windows-side client, including
-      // locally parsed Proma. Include its fresh today usage before deriving
-      // broader windows so base + (fresh today - anchor today) stays exact.
-      if (promaPeriods) today = mergePeriods(today, promaPeriods.today);
+      if (promaPeriods) freshPartitions.proma = promaPeriods.today;
+      todayPartitions = useTargetedPartitions
+        ? replaceTodayPartitions(anchor.todayPartitions, freshPartitions, targetClients)
+        : completeTodayPartitions(freshPartitions, normalizedClients);
+      today = mergeTodayPartitions(todayPartitions);
       month = applyPeriodDelta(anchor.month, today, anchor.today);
       allTime = applyPeriodDelta(anchor.allTime, today, anchor.today);
     } else if (tokscaleClients) {
       // Serial on purpose: concurrent scans triple the peak CPU/IO load, which
       // is what let the issue #15 self-trigger loop spike tokscale past 500% CPU.
       const todayJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--today'], commandTimeoutMs });
-      today = extractUsageFromTokscale(todayJson);
+      const todayBundle = extractUsageBundleFromTokscale(todayJson);
+      today = todayBundle.period;
+      todayPartitions = todayBundle.byClient;
       if (typeof options.onProgress === 'function') decorateLocalPeriods({ today });
       try { if (typeof options.onProgress === 'function') options.onProgress({ today, updatedAt: new Date().toISOString() }); } catch (_) {}
       const monthJson = await runTokscaleFn({ clients: tokscaleClients, flags: ['--month'], commandTimeoutMs });
@@ -703,7 +862,12 @@ async function collectUsageOnce(options) {
       today = mergePeriods(today, promaPeriods.today);
       month = mergePeriods(month, promaPeriods.month);
       allTime = mergePeriods(allTime, promaPeriods.allTime);
+      todayPartitions = { ...(todayPartitions || {}), proma: promaPeriods.today };
     }
+    todayPartitions = completeTodayPartitions(todayPartitions, normalizedClients);
+    // Partition metadata is internal but must remain as complete as the public
+    // period: a later targeted tick re-merges these sessions into `today`.
+    propagateTodayProjects(today, Object.values(todayPartitions));
   }
 
   // WSL contribution (Windows only; no-op elsewhere). Full tick scans running WSL
@@ -765,6 +929,28 @@ async function collectUsageOnce(options) {
   month = mergePeriods(windowsPeriods.month, wslBundle.month);
   allTime = mergePeriods(windowsPeriods.allTime, wslBundle.allTime);
 
+  // The renderer intentionally uses the live today period while a day is in
+  // progress. Callers that do not defer capture persist the largest complete
+  // live snapshot here; startCollector defers it until after transformUsage so
+  // the saved value matches the period delivered to the renderer.
+  if (
+    options.historyEnabled !== false
+    && options.dailyHistoryArchiveEnabled
+    && options.deferLiveHistoryCapture !== true
+  ) {
+    try {
+      const retainedLive = retainLiveDailyHistory(today, {
+        ...(options.dailyHistoryArchiveOptions || {}),
+        liveDays: dailyHistoryLiveDays,
+        todayKey: localTodayKey(collectedAt),
+        writeEnabled: options.dailyHistoryArchiveWriteEnabled
+      });
+      dailyHistoryLiveDays = retainedLive.liveDays || {};
+    } catch (error) {
+      if (typeof options.logger === 'function') options.logger(`daily live history archive failed: ${error.message}`);
+    }
+  }
+
   // WSL attribution (Windows only; null elsewhere). detected = markers found,
   // withData = clients whose WSL scan or local parser returned tokens. The gap
   // is the diagnostic (e.g. Hermes detected but unreadable over 9P).
@@ -793,8 +979,14 @@ async function collectUsageOnce(options) {
   }
 
   if (typeof options.onAnchorComputed === 'function') {
-    options.onAnchorComputed({ windowsPeriods, wslBundle, wslStatus });
+    options.onAnchorComputed({ windowsPeriods, todayPartitions, wslBundle, wslStatus });
   }
+
+  // One filesystem probe per tick, shared by the legacy status and the health
+  // record below. Probing twice cost a second pass over every client's roots —
+  // including the per-workspace walk Copilot needs — and let one snapshot report
+  // a directory as both present and absent when it appeared between the two.
+  const sourceChecks = clientSourceChecks(normalizedClients, { wslDetected: wslStatus?.detected });
 
   const summary = {
     deviceId,
@@ -807,7 +999,7 @@ async function collectUsageOnce(options) {
     ...(agentRuntime ? { agentRuntime } : {}),
     projectsEnabled,
     trackedClients: normalizedClients ? normalizedClients.split(',') : [],
-    clientStatus: deriveClientStatus(normalizedClients, allTime),
+    clientStatus: deriveClientStatus(normalizedClients, allTime, { sourceChecks }),
     wslStatus,
     periodWindows: computePeriodWindows(collectedAt),
     today,
@@ -828,20 +1020,105 @@ async function collectUsageOnce(options) {
       dailyHistoryArchiveEnabled: options.dailyHistoryArchiveEnabled,
       dailyHistoryArchiveWriteEnabled: options.dailyHistoryArchiveWriteEnabled,
       dailyHistoryArchiveOptions: options.dailyHistoryArchiveOptions,
+      dailyHistoryLiveDays,
+      onHistoryStatus: options.onHistoryStatus,
       logger: options.logger
     });
     if (history) summary.history = history;
   }
-  if (options.limitsEnabled !== false) {
-    summary.limits = options.limitsCollector
-      ? await options.limitsCollector.snapshot(Boolean(options.forceLimits))
-      : await collectLimitsOnce(options);
-  }
+  // After history, so `lastActivityDay` can come from the daily buckets this
+  // scan already produced rather than from a second source of truth.
+  const clientHealth = deriveClientHealth(normalizedClients, allTime, {
+    sourceChecks,
+    wslStatus,
+    observedAt: collectedAt,
+    lastActivityDays: mergeClientActivityDays(
+      options.lastActivityDays,
+      summary.history,
+      today,
+      localTodayKey(collectedAt)
+    )
+  });
+  if (clientHealth) summary.clientHealth = clientHealth;
   return summary;
 }
 
 function dirExists(dir) {
   try { return fs.statSync(dir).isDirectory(); } catch (_) { return false; }
+}
+
+function fileExists(file) {
+  try { return fs.statSync(file).isFile(); } catch (_) { return false; }
+}
+
+function nonBlankEnvPath(name, fallback) {
+  const value = process.env[name];
+  return typeof value === 'string' && value.trim() ? value : fallback;
+}
+
+function xdgDataHome(home) {
+  return nonBlankEnvPath('XDG_DATA_HOME', path.join(home, '.local', 'share'));
+}
+
+// Where tokscale looks for captured `codex exec --json` output. Both defaults
+// are scanned on every platform — upstream pushes them with no cfg gate, so the
+// Application Support one is not a macOS variant of the .config one — and
+// TOKSCALE_HEADLESS_DIR replaces the pair rather than adding to it
+// (scanner.rs `headless_roots_with_env_strategy`). Neither default follows
+// XDG_CONFIG_HOME: upstream spells the .config path as a literal.
+//
+// `optional` marks a root whose absence carries no information. Nobody has
+// these unless they opted into a capture workflow, so the diagnostics panel
+// hides them when they are missing rather than showing them struck through
+// beside a real "Codex wrote nothing here". A configured root is the opposite:
+// the user named that path, so its absence is exactly what they want to see.
+function tokscaleHeadlessRoots(home) {
+  const configured = nonBlankEnvPath('TOKSCALE_HEADLESS_DIR', null);
+  if (configured) return [{ dir: configured, optional: false }];
+  return [
+    { dir: path.join(home, '.config', 'tokscale', 'headless'), optional: true },
+    { dir: path.join(home, 'Library', 'Application Support', 'tokscale', 'headless'), optional: true }
+  ];
+}
+
+function copilotExporterPath() {
+  const configured = process.env.COPILOT_OTEL_FILE_EXPORTER_PATH;
+  if (typeof configured !== 'string') return null;
+  const trimmed = configured.trim();
+  return trimmed ? path.resolve(trimmed) : null;
+}
+
+function hasWatchableParent(file) {
+  return path.dirname(file) !== path.parse(file).root;
+}
+
+// The one derivation of the custom Copilot OTel exporter, shared by the source
+// table, the watcher's ignore matcher and the attribution map. It used to exist
+// in two places that canonicalised differently before comparing against
+// ~/.copilot/otel, and the two answers diverge as soon as any part of that path
+// is a symlink — which either leaves the exporter's parent watched with no
+// pruning at all, or silently drops the exporter's own events.
+//
+// tokscale reads exactly the file this env var names (`path.is_file()`, no glob,
+// no directory walk), so the watch is pinned to that one file. Anything under
+// ~/.copilot/otel is already covered recursively and returns null here.
+function copilotExporterWatch(home) {
+  const file = copilotExporterPath();
+  if (!file || !hasWatchableParent(file)) return null;
+  const otelRoot = path.resolve(canonicalWatchPath(path.join(home, '.copilot', 'otel')));
+  const canonicalFile = canonicalWatchFilePath(file);
+  if (canonicalFile.startsWith(otelRoot + path.sep)) return null;
+  return { file, canonicalFile, dir: path.dirname(file) };
+}
+
+function clineCliSessionRoot(home) {
+  const sessionDataDir = nonBlankEnvPath('CLINE_SESSION_DATA_DIR', null);
+  if (sessionDataDir) return sessionDataDir;
+  const dataDir = nonBlankEnvPath('CLINE_DATA_DIR', null);
+  if (dataDir) return path.join(dataDir, 'sessions');
+  const clineDir = nonBlankEnvPath('CLINE_DIR', null);
+  if (clineDir) return path.join(clineDir, 'data', 'sessions');
+  return path.join(home, '.cline', 'data', 'sessions');
 }
 
 function hasCopilotChatSessions(workspaceRoot) {
@@ -854,23 +1131,67 @@ function hasCopilotChatSessions(workspaceRoot) {
 }
 
 // Per-client data-dir candidates, keyed by client. Drives the detection-status
-// derivation and (minus the self-synced clients below) the chokidar watch list.
-function clientWatchCandidates(clientsCsv) {
+// derivation and (minus the self-synced clients below) the chokidar watch list;
+// Antigravity's read-only source roots are added back explicitly below.
+// The watched roots, each tagged with a stable id for its *kind*. One id may
+// cover several paths: Copilot's workspaceStorage has a variant per platform and
+// Kiro's IDE globalStorage has four, but "the VS Code workspace storage is
+// missing" is the useful statement, not which spelling was probed. Absolute
+// paths contain the user's home directory and never leave this process, so a
+// health record carries the id instead — CLIENT_SOURCE_CHECK_IDS in
+// clientHealth.js is the allowlist every id here must appear in.
+function clientSourceRoots(clientsCsv) {
   const home = os.homedir();
   const enabled = new Set(String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
   const byClient = {};
-  const add = (client, ...dirs) => { if (enabled.has(client)) byClient[client] = dirs; };
-  add('claude', path.join(home, '.claude', 'projects'), path.join(home, '.claude', 'transcripts'));
-  add('codex', path.join(home, '.codex', 'sessions'));
+  const add = (client, ...roots) => {
+    if (enabled.has(client)) {
+      byClient[client] = roots.map(([id, dir, sourcePath, optional]) => ({
+        id,
+        dir,
+        ...(sourcePath ? { sourcePath } : {}),
+        ...(optional ? { optional: true } : {})
+      }));
+    }
+  };
+  add('claude', ['claude-projects', path.join(home, '.claude', 'projects')], ['claude-transcripts', path.join(home, '.claude', 'transcripts')]);
+  const codexHome = nonBlankEnvPath('CODEX_HOME', path.join(home, '.codex'));
+  add(
+    'codex',
+    ['codex-sessions', path.join(codexHome, 'sessions')],
+    ['codex-sessions', path.join(codexHome, 'archived_sessions')],
+    ...tokscaleHeadlessRoots(home).map(({ dir, optional }) => ['codex-sessions', path.join(dir, 'codex'), null, optional])
+  );
   const hermesHome = resolveHermesHome({ env: process.env, homeDir: home });
-  add('hermes', hermesHome, ...hermesProfileWatchDirs(hermesHome));
-  add('opencode', path.join(home, '.local', 'share', 'opencode'));
-  add('openclaw', path.join(home, '.openclaw', 'agents'));
-  add('cursor', path.join(home, '.config', 'tokscale', 'cursor-cache'));
-  add('antigravity', path.join(home, '.config', 'tokscale', 'antigravity-cache'));
-  add('kimi', path.join(home, '.kimi', 'sessions'), path.join(process.env.KIMI_CODE_HOME || path.join(home, '.kimi-code'), 'sessions'));
-  add('qwen', path.join(home, '.qwen', 'projects'));
-  add('grok', path.join(process.env.GROK_HOME || path.join(home, '.grok'), 'sessions'));
+  add('hermes', ['hermes-home', hermesHome], ...hermesProfileWatchDirs(hermesHome).map((dir) => ['hermes-profile', dir]));
+  // Within the default OpenCode data root, Tokscale reads the direct
+  // opencode*.db family and the legacy storage/message/*/*.json source. The
+  // watcher prunes the rest of this broad app data root below.
+  //
+  // Only the roots tokscale declares as `PathRoot::XdgData` go through this —
+  // opencode, zed and micode (clients.rs), plus the CodeBuddy extension logs it
+  // resolves via `dirs::data_local_dir()`. Kiro's CLI database is deliberately
+  // NOT one of them: tokscale spells it as a home-relative literal
+  // (`{home}/.local/share/kiro-cli/data.sqlite3`, scanner.rs), so following XDG
+  // there would watch a directory it never reads. The split is upstream's, not
+  // an oversight — check clients.rs before adding or removing a root here.
+  const xdgHome = xdgDataHome(home);
+  add('opencode', ['opencode-data', path.join(xdgHome, 'opencode')]);
+  add('openclaw', ['openclaw-agents', path.join(home, '.openclaw', 'agents')]);
+  add('cursor', ['tokscale-cursor-cache', path.join(home, '.config', 'tokscale', 'cursor-cache')]);
+  add('antigravity', ['tokscale-antigravity-cache', path.join(home, '.config', 'tokscale', 'antigravity-cache')]);
+  // A whitespace-only KIMI_CODE_HOME counts as unset, matching tokscale: it
+  // joins `sessions` onto the raw value, so a blank export would resolve to the
+  // root-level /sessions and hide the real one.
+  const kimiCodeHome = nonBlankEnvPath('KIMI_CODE_HOME', path.join(home, '.kimi-code'));
+  add('kimi', ['kimi-sessions', path.join(home, '.kimi', 'sessions')], ['kimi-code-sessions', path.join(kimiCodeHome, 'sessions')]);
+  add('qwen', ['qwen-projects', path.join(home, '.qwen', 'projects')]);
+  const grokHome = nonBlankEnvPath('GROK_HOME', path.join(home, '.grok'));
+  add(
+    'grok',
+    ['grok-sessions', path.join(grokHome, 'sessions')],
+    ['grok-unified-log', path.join(grokHome, 'logs'), path.join(grokHome, 'logs', 'unified.jsonl')]
+  );
   // Tokscale 4.5.2 also parses VS Code Copilot Chat JSONL under each
   // workspaceStorage/*/chatSessions directory. Watch the workspaceStorage roots
   // so newly created workspaces are picked up; watchIgnoreMatcher prunes every
@@ -883,17 +1204,29 @@ function clientWatchCandidates(clientsCsv) {
       : []),
     path.join(home, 'AppData', 'Roaming', 'Code', 'User', 'workspaceStorage')
   ];
-  add('copilot', path.join(home, '.copilot', 'otel'), ...new Set(copilotWorkspaceRoots));
-  add('pi', path.join(home, '.pi', 'agent', 'sessions'), path.join(home, '.omp', 'agent', 'sessions'));
+  const copilotOtelRoot = path.join(home, '.copilot', 'otel');
+  const copilotRoots = [
+    ['copilot-otel', copilotOtelRoot],
+    ['copilot-data', path.join(home, '.copilot'), path.join(home, '.copilot', 'data.db')],
+    ...[...new Set(copilotWorkspaceRoots)].map((dir) => ['vscode-workspace-storage', dir])
+  ];
+  // The parent is the watch root because the exporter file may not exist yet;
+  // the exact file is the source. watchAttributionRootsForClients() keeps that
+  // parent from becoming a copilot attribution prefix — it is an arbitrary
+  // user-chosen directory and can be $HOME.
+  const exporter = copilotExporterWatch(home);
+  if (exporter) copilotRoots.push(['copilot-otel-exporter', exporter.dir, exporter.file]);
+  add('copilot', ...copilotRoots);
+  add('pi', ['pi-sessions', path.join(home, '.pi', 'agent', 'sessions')], ['omp-sessions', path.join(home, '.omp', 'agent', 'sessions')]);
   // Zed: tokscale reads the XdgData root on every platform AND the native macOS
   // (Application Support) / Windows (LOCALAPPDATA) roots (see tokscale scanner.rs
   // cfg(macos)/cfg(windows) blocks) — watch all three so native mac/win users get
   // seconds-level refresh and a correct waiting/missing status.
   add(
     'zed',
-    path.join(home, '.local', 'share', 'zed', 'threads'),
-    path.join(home, 'Library', 'Application Support', 'Zed', 'threads'),
-    path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Zed', 'threads')
+    ['zed-threads', path.join(xdgHome, 'zed', 'threads')],
+    ['zed-threads', path.join(home, 'Library', 'Application Support', 'Zed', 'threads')],
+    ['zed-threads', path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Zed', 'threads')]
   );
   // Kilo Code (VS Code ext): tokscale 3.1.3 only scans the Linux .config root and
   // the .vscode-server (remote) root for KiloCode — unlike Cline, it does NOT scan
@@ -902,32 +1235,67 @@ function clientWatchCandidates(clientsCsv) {
   // tokscale reads. (Native mac/win support pending upstream tokscale.)
   add(
     'kilocode',
-    path.join(home, '.config', 'Code', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks'),
-    path.join(home, '.vscode-server', 'data', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks')
+    ['kilocode-tasks', path.join(home, '.config', 'Code', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks')],
+    ['kilocode-tasks', path.join(home, '.vscode-server', 'data', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks')]
   );
-  add('micode', path.join(home, '.local', 'share', 'mimocode'));
-  add('zcode', path.join(home, '.zcode', 'projects'));
+  // MiMo Code: tokscale 4.8.0 unions the XDG data dir with orca's hook-sandbox
+  // copy (scanner.rs `discover_micode_dbs_in_dirs`), and that copy can hold
+  // sessions the XDG one is missing. Watch both so an orca-driven install still
+  // refreshes in seconds; the orca root only exists on macOS in practice and a
+  // missing dir is dropped by watchClientRootsForClients.
+  add(
+    'micode',
+    ['mimocode-data', path.join(xdgHome, 'mimocode')],
+    ['mimocode-orca-data', path.join(home, 'Library', 'Application Support', 'orca', 'mimocode-hooks', 'shared', 'data')]
+  );
+  const zcodeDbDir = path.join(home, '.zcode', 'cli', 'db');
+  add(
+    'zcode',
+    ['zcode-projects', path.join(home, '.zcode', 'projects')],
+    ['zcode-cli-db', zcodeDbDir, path.join(zcodeDbDir, 'db.sqlite')]
+  );
   // CodeBuddy (Tencent): tokscale reads the home-relative CLI/WebUI JSONL dir on
   // every platform, plus the IDE / VS Code extension logs under a platform-
   // specific CodeBuddyExtension/Logs root (scanner.rs). Watch both so CLI and
   // IDE usage each refresh in seconds; the shared Code/logs tree is deliberately
   // not watched (too broad for polling — full ticks still scan it). No --home
   // host-DB fallback, so every root is safe to watch cross-platform.
-  const codebuddyExtLogs = process.platform === 'win32'
-    ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'CodeBuddyExtension', 'Logs')
-    : process.platform === 'darwin'
-      ? path.join(home, 'Library', 'Application Support', 'CodeBuddyExtension', 'Logs')
-      : path.join(home, '.local', 'share', 'CodeBuddyExtension', 'Logs');
-  add('codebuddy', path.join(home, '.codebuddy', 'projects'), codebuddyExtLogs);
+  // Two extension-log roots, because tokscale scans two (scanner.rs). It seeds
+  // the list with the home-relative Windows-shaped path on EVERY platform, and
+  // only then adds the native `dirs::data_local_dir()` root — so a home carried
+  // over from Windows is scanned on macOS/Linux too, and watching only the
+  // native one would let the periodic scan see usage the watcher never does.
+  //
+  // `dirs::data_local_dir()` is %LOCALAPPDATA% on Windows, Application Support
+  // on macOS, and the XDG data home on Linux, so the Linux arm follows
+  // XDG_DATA_HOME rather than a hardcoded .local/share. Being a `dirs` lookup
+  // rather than a path literal is why it does not appear in tokscale's strings.
+  //
+  // On Windows the two normally resolve to the same directory and the Set
+  // collapses them; elsewhere watchClientRootsForClients drops whichever is
+  // absent, which is the usual case for the Windows-shaped one.
+  const codebuddyExtLogRoots = [
+    path.join(home, 'AppData', 'Local', 'CodeBuddyExtension', 'Logs'),
+    process.platform === 'win32'
+      ? path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'CodeBuddyExtension', 'Logs')
+      : process.platform === 'darwin'
+        ? path.join(home, 'Library', 'Application Support', 'CodeBuddyExtension', 'Logs')
+        : path.join(xdgHome, 'CodeBuddyExtension', 'Logs')
+  ];
+  add(
+    'codebuddy',
+    ['codebuddy-projects', path.join(home, '.codebuddy', 'projects')],
+    ...[...new Set(codebuddyExtLogRoots)].map((dir) => ['codebuddy-extension-logs', dir])
+  );
   // WorkBuddy (Tencent): watch only the detailed session dir (projects/*.jsonl,
   // the preferred source) — not the whole ~/.workbuddy app home, whose config /
   // auth churn would add polling load and spurious ticks with no usage change.
   // A legacy install with only ~/.workbuddy/workbuddy.db (no projects/) still
   // refreshes via the periodic full tick; the WSL marker stays the broader
   // `.workbuddy` so a db-only WSL home is still scanned.
-  add('workbuddy', path.join(home, '.workbuddy', 'projects'));
+  add('workbuddy', ['workbuddy-projects', path.join(home, '.workbuddy', 'projects')]);
   // Proma — session transcripts at ~/.proma/agent-sessions/*.jsonl
-  add('proma', path.join(home, '.proma', 'agent-sessions'));
+  add('proma', ['proma-sessions', path.join(home, '.proma', 'agent-sessions')]);
   // Kiro (AWS): tokscale reads home-relative roots — the sessions tree used by
   // both CLI and IDE, the Kiro IDE globalStorage root (native macOS / Linux /
   // Windows), and the kiro-cli sqlite dir. None falls back to a host-absolute
@@ -952,21 +1320,38 @@ function clientWatchCandidates(clientsCsv) {
   // (APPDATA || home AppData\Roaming mirrors how cline resolves the Windows root.)
   add(
     'kiro',
-    path.join(home, '.kiro', 'sessions'),
-    path.join(home, 'Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
-    path.join(home, '.config', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
-    path.join(home, '.config', 'kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
-    path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
-    path.join(home, '.local', 'share', 'kiro-cli'),
-    path.join(home, 'Library', 'Application Support', 'kiro-cli')
+    ['kiro-sessions', path.join(home, '.kiro', 'sessions')],
+    ['kiro-ide-globalstorage', path.join(home, 'Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
+    ['kiro-ide-globalstorage', path.join(home, '.config', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
+    ['kiro-ide-globalstorage', path.join(home, '.config', 'kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
+    ['kiro-ide-globalstorage', path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent')],
+    ['kiro-cli-data', path.join(home, '.local', 'share', 'kiro-cli')],
+    ['kiro-cli-data', path.join(home, 'Library', 'Application Support', 'kiro-cli')]
   );
   add(
     'cline',
-    path.join(home, '.config', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks'),
-    path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks'),
-    path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks'),
-    path.join(home, '.vscode-server', 'data', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')
+    ['cline-tasks', path.join(home, '.config', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
+    ['cline-tasks', path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
+    ['cline-tasks', path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
+    ['cline-tasks', path.join(home, '.vscode-server', 'data', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks')],
+    ['cline-cli-sessions', clineCliSessionRoot(home)]
   );
+  return byClient;
+}
+
+// The watcher only ever wants paths, so it keeps its original shape rather than
+// learning about check ids it would immediately discard.
+function clientWatchCandidates(clientsCsv) {
+  const byClient = {};
+  for (const [client, roots] of Object.entries(clientSourceRoots(clientsCsv))) {
+    // The Copilot data root already keeps its `otel/` child through the
+    // matcher below. Keep that child as a diagnostic/source check, but do not
+    // hand both nested paths to chokidar or it may install two native watches
+    // over the same tree.
+    byClient[client] = roots
+      .filter((root) => !(client === 'copilot' && root.id === 'copilot-otel'))
+      .map((root) => root.dir);
+  }
   return byClient;
 }
 
@@ -983,19 +1368,91 @@ function antigravityCliDataDir() {
   return path.join(geminiHome, 'antigravity-cli', 'conversations');
 }
 
-function watchPathsForClients(clientsCsv) {
-  const candidates = [];
+// Watch roots that feed a self-sync, keyed by client. Antigravity's IDE cache is
+// written by our sync and must stay watch-excluded, but the native session roots
+// are read-only inputs to that sync (tokscale only ever readdir/stats them —
+// every write it makes lands in its own cache dir). Watching those gives the
+// collector an event to target without recreating the issue #15
+// cache-write -> watcher -> sync loop, and an event here is what earns the sync
+// its short source-event floor.
+//
+// The parse-local antigravity-cli dir is deliberately not in here even though it
+// shares the umbrella client id: tokscale reads it directly, so a CLI write has
+// nothing to re-sync and must not pay for the subprocess.
+function selfSyncSourceRootsForClients(clientsCsv) {
+  const enabled = new Set(String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
+  const rootsByClient = {};
+  if (enabled.has('antigravity')) {
+    const sourceRoots = [...new Set(antigravityDataRoots().filter(dirExists))];
+    if (sourceRoots.length > 0) rootsByClient.antigravity = sourceRoots;
+  }
+  return rootsByClient;
+}
+
+function watchClientRootsForClients(clientsCsv) {
+  const rootsByClient = {};
   for (const [client, dirs] of Object.entries(clientWatchCandidates(clientsCsv))) {
     if (SELF_SYNCED_CLIENTS.has(client)) continue;
-    candidates.push(...dirs);
+    const existing = [...new Set(dirs.filter(dirExists))];
+    if (existing.length > 0) rootsByClient[client] = existing;
   }
-  // antigravity is self-synced (its IDE cache is written by our sync and must stay
-  // watch-excluded), but its CLI data dir is safe to watch (no self-trigger loop)
-  // and gives the seconds-level refresh the sync path can't. tokscaleClientFilter
-  // pulls the antigravity-cli rows in on the tick.
+  for (const [client, dirs] of Object.entries(selfSyncSourceRootsForClients(clientsCsv))) {
+    rootsByClient[client] = [...new Set([...(rootsByClient[client] || []), ...dirs])];
+  }
+  // The Antigravity CLI writes parse-local SQLite that tokscale reads directly,
+  // so it is also safe to watch and shares the umbrella client id. The filter
+  // expands that id to antigravity-cli when the targeted scan runs.
   const enabled = new Set(String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
-  if (enabled.has('antigravity')) candidates.push(antigravityCliDataDir());
-  return [...new Set(candidates.filter(dirExists))];
+  const antigravityCliDir = antigravityCliDataDir();
+  if (enabled.has('antigravity') && dirExists(antigravityCliDir)) {
+    rootsByClient.antigravity = [...new Set([...(rootsByClient.antigravity || []), antigravityCliDir])];
+  }
+  return rootsByClient;
+}
+
+function watchPathsForClients(clientsCsv) {
+  return [...new Set(Object.values(watchClientRootsForClients(clientsCsv)).flat())];
+}
+
+// The same roots, but as attribution prefixes rather than watch targets. The two
+// differ in exactly one place: a custom Copilot exporter has to be *watched* by
+// its parent directory (the file can appear later), while attributing by that
+// parent would be wrong — it is an arbitrary user-chosen path, and one pointing
+// at a file in $HOME would make every other client's event also target copilot,
+// turning each targeted scan into a two-client scan. The exact file attributes
+// instead. The parent survives only when another copilot source already owns it
+// (an exporter written straight into ~/.copilot), so `otel/` keeps its prefix.
+// Takes the watch roots when the caller already has them: setupWatchers() needs
+// both maps from one probe, and deriving them from two separate dirExists sweeps
+// would let a directory created between the two land in one map and not the
+// other — the same "two derivations of one thing" trap the exporter had.
+function watchAttributionRootsForClients(clientsCsv, watchRoots = null) {
+  const rootsByClient = watchRoots || watchClientRootsForClients(clientsCsv);
+  const exporter = copilotExporterWatch(os.homedir());
+  if (!exporter || !rootsByClient.copilot) return rootsByClient;
+  const exporterDir = path.resolve(exporter.dir);
+  const ownedByOtherSource = new Set(
+    (clientSourceRoots(clientsCsv).copilot || [])
+      .filter((root) => root.id !== 'copilot-otel-exporter')
+      .map((root) => path.resolve(root.dir))
+  );
+  const copilot = rootsByClient.copilot
+    .filter((root) => path.resolve(root) !== exporterDir || ownedByOtherSource.has(exporterDir));
+  copilot.push(exporter.canonicalFile);
+  return { ...rootsByClient, copilot: [...new Set(copilot)] };
+}
+
+function clientsForWatchPath(filePath, rootsByClient) {
+  if (!filePath) return [];
+  const resolved = path.resolve(filePath);
+  const matched = [];
+  for (const [client, roots] of Object.entries(rootsByClient || {})) {
+    if (roots.some((root) => {
+      const resolvedRoot = path.resolve(root);
+      return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + path.sep);
+    })) matched.push(client);
+  }
+  return matched;
 }
 
 // Inside a Hermes home dir tokscale only reads the SQLite db; the rest is the
@@ -1008,59 +1465,327 @@ function watchPathsForClients(clientsCsv) {
 // never recurses into an ignored dir (so the runaway poll is gone), yet a
 // newly created state.db-wal is still seen on the next top-level readdir.
 const HERMES_DB_FILES = new Set(['state.db', 'state.db-wal', 'state.db-shm']);
+// OpenCode discovers only direct opencode.db / opencode-<channel>.db files.
+// WAL/SHM are not database inputs to tokscale, but they are the live-write
+// signals that must remain watched so a transaction committed before a
+// checkpoint refreshes the usage view.
+const OPENCODE_DB_WATCH_PATTERN = /^opencode(?:-[A-Za-z0-9._-]+)?\.db(?:-(?:wal|shm))?$/;
+// MiMo Code keeps a multi-gigabyte log/ tree alongside its SQLite state files.
+// A plain recursive watch of ~/.local/share/mimocode storms the watcher (every
+// SQLite WAL/SHM transaction is a chokidar event, the log dir holds thousands
+// of rotated files). Tokscale discovers mimocode.db and
+// mimocode-<channel>.db directly under each data root; the sidecars are not
+// parsed but must stay watched so a write through WAL/SHM triggers a refresh.
+// Keep the home dir watched but ignore everything except that direct db family.
+// The home root itself stays watched so a freshly created database or sidecar
+// still surfaces on the next top-level readdir.
+const MICODE_DB_WATCH_PATTERN = /^mimocode(?:-[A-Za-z0-9._-]+)?\.db(?:-(?:wal|shm))?$/;
+// Kiro CLI and Zed expose one SQLite database at a known path. Keep their
+// parent dirs watched so the database can appear after startup, but do not
+// recurse through the application data trees around them.
+const KIRO_DB_WATCH_PATTERN = /^data\.sqlite3(?:-(?:wal|shm))?$/;
+const ZED_DB_WATCH_PATTERN = /^threads\.db(?:-(?:wal|shm))?$/;
+const COPILOT_DB_WATCH_PATTERN = /^data\.db(?:-(?:wal|shm))?$/;
+const ZCODE_DB_WATCH_PATTERN = /^db\.sqlite(?:-(?:wal|shm))?$/;
+const GROK_UNIFIED_LOG_FILE = 'unified.jsonl';
+// Tokscale scans only these two CodeBuddy extension log subtrees. Keep their
+// recursive layout intact, but prune unrelated siblings under Logs before
+// chokidar allocates watches for them.
+const CODEBUDDY_EXTENSION_SOURCE_DIRS = new Set(['CodeBuddyIDE', 'VSCode']);
+// Which parts of an Antigravity IDE home are worth an event. Not "what tokscale
+// parses" — tokscale gets the token data over RPC from the running language
+// server and only reads `brain/`+`conversations/` to enumerate session ids.
+// These are the paths the IDE touches while a turn is in progress, so they are
+// what tells us the synced cache went stale. The rest of the home is runtime and
+// cache material (bin/, builtin/, crashes/, antigravity_state.pbtxt …) that
+// would make every background write a scan trigger.
+const ANTIGRAVITY_SOURCE_DIRS = new Set(['annotations', 'brain', 'conversations']);
+const ANTIGRAVITY_SOURCE_FILES = new Set(['agyhub_summaries_proto.pb']);
+// `brain/` is watched one level deep only. Its children are per-session working
+// dirs holding plans, uploads and screenshots — on a 26-session home that is
+// ~508 directories and ~780 files for ~4 changes a week, while the actual
+// per-turn signal is `conversations/<id>.db-wal`. Recursing costs an inotify
+// descriptor per directory on Linux, which is what makes the ENOSPC fallback to
+// polling (sticky for the process) more likely, and once polling that whole tree
+// gets stat'd every interval — the Hermes runaway of issue #38 in miniature.
+// Watching `brain/` itself still catches a new session directory appearing.
+const ANTIGRAVITY_SHALLOW_SOURCE_DIRS = new Set(['brain']);
+
+// A watch policy answers one question about one source root: given a path
+// inside it, does this source want the event? It never sees the root itself,
+// which is always kept, so `parts` is a non-empty relative path already split.
+//
+// Roots overlap. An explicit CODEX_HOME can sit inside another client's data
+// root, a custom Copilot exporter can name a file inside OpenCode's, and two
+// clients can resolve to the same directory outright. chokidar's `ignored` is
+// global to the instance, so every root containing a path shares one answer for
+// it, and the only safe one is the union of what they read: prune when EVERY
+// containing root declines the path, keep it as soon as one wants it.
+//
+// This replaced an ordered chain of per-client branches in which the first
+// matching root answered for all of them, so overlap resolved by declaration
+// order rather than by what tokscale reads. A bounded root pruned an
+// equally-rooted recursive source out of existence, two bounded roots resolved
+// by whichever branch was written first, and the exporter needed its own checks
+// hoisted above the chain to survive a broader root declared over it.
+const KEEP_EVERYTHING = () => false;
+const EMPTY_SET = new Set();
+
+// Tokscale opens one exact database directly under this root instead of walking
+// it. Keep the direct children it names — including the WAL/SHM sidecars, which
+// are the live-write signal even though tokscale never parses them as databases
+// — so a database created later is still discovered, and never recurse into the
+// runtime files beside it.
+function directChildOnly(isSource) {
+  return (parts) => parts.length > 1 || !isSource(parts[0]);
+}
+
+// Every source root of every tracked client, paired with its policy. Bounded
+// roots are counted so a client set with nothing to prune can skip the matcher
+// entirely rather than hand chokidar a predicate that always answers false.
+function watchPolicyEntries(clientsCsv) {
+  const candidates = clientWatchCandidates(clientsCsv);
+  // canonicalWatchPath must be applied here too: chokidar reports events under
+  // whatever root it was handed, so a matcher built on the uncanonicalised path
+  // would stop matching on Windows and silently un-prune the Hermes runtime
+  // (issue #38) while the watch itself still worked.
+  const canonicalRoot = (dir) => path.resolve(canonicalWatchPath(dir));
+  const entries = [];
+  const claimed = new Map();
+  let boundedCount = 0;
+  // Same-root duplicates within one client (Kiro's cased globalStorage spellings,
+  // Zed's per-platform roots) collapse here. Duplicates ACROSS clients must not:
+  // two policies on one directory is precisely the overlap the union resolves,
+  // which is why `claimed` is keyed per client — an identical path under two
+  // clients would otherwise let the bounded one swallow the recursive one, the
+  // very failure this table replaced.
+  const bound = (client, dirs, policy) => {
+    if (!claimed.has(client)) claimed.set(client, new Set());
+    const seen = claimed.get(client);
+    for (const dir of dirs) seen.add(dir);
+    for (const root of new Set(dirs.map(canonicalRoot))) {
+      entries.push({ root, prefix: root + path.sep, policy });
+      boundedCount += 1;
+    }
+  };
+  const withBasename = (client, basename) =>
+    (candidates[client] || []).filter((dir) => path.basename(dir) === basename);
+
+  // Hermes: the SQLite trio is the only source, at any depth. Each explicit
+  // watch root — the home AND every profile dir under it — is kept by the
+  // matcher itself, so a profile's own database still reports.
+  bound('hermes', candidates.hermes || [], (parts) => !HERMES_DB_FILES.has(parts[parts.length - 1]));
+
+  bound('copilot', withBasename('copilot', '.copilot'), (parts) => {
+    if (parts[0] === 'otel') return false;
+    if (parts.length === 1) return !COPILOT_DB_WATCH_PATTERN.test(parts[0]);
+    return true;
+  });
+  bound('copilot', withBasename('copilot', 'workspaceStorage'), (parts) => {
+    if (parts.length === 1) return false; // workspace hash dir
+    if (parts[1] === 'chatSessions') return false;
+    if (parts.length === 2 && parts[1] === 'workspace.json') return false;
+    return true;
+  });
+  // Tokscale ingests exactly the file COPILOT_OTEL_FILE_EXPORTER_PATH names
+  // (`path.is_file()`, no glob), but that file need not exist yet, so its parent
+  // is what gets watched. The parent is an arbitrary user-chosen directory and
+  // can be $HOME — everything in it except that one file is pruned, and
+  // watchAttributionRootsForClients keeps it from becoming a copilot prefix.
+  const exporter = copilotExporterWatch(os.homedir());
+  if (exporter) bound('copilot', [exporter.dir], (_parts, resolved) => resolved !== exporter.canonicalFile);
+
+  const antigravityEnabled = String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).includes('antigravity');
+  bound('antigravity', antigravityEnabled ? antigravityDataRoots() : [], (parts) => {
+    if (parts.length === 1) {
+      return !ANTIGRAVITY_SOURCE_DIRS.has(parts[0]) && !ANTIGRAVITY_SOURCE_FILES.has(parts[0]);
+    }
+    const firstChild = parts[0];
+    if (!ANTIGRAVITY_SOURCE_DIRS.has(firstChild)) return true;
+    // brain/<session> is kept (a new session shows up there); brain/<session>/**
+    // is not — see ANTIGRAVITY_SHALLOW_SOURCE_DIRS.
+    if (ANTIGRAVITY_SHALLOW_SOURCE_DIRS.has(firstChild)) return parts.length > 2;
+    return false;
+  });
+
+  bound('opencode', candidates.opencode || [], (parts) => {
+    if (parts.length === 1) {
+      // Keep the root's readdir visible for newly created channel DBs, but
+      // do not descend into unrelated app files or directories.
+      return parts[0] !== 'storage' && !OPENCODE_DB_WATCH_PATTERN.test(parts[0]);
+    }
+    if (parts[0] !== 'storage') return true;
+    if (parts.length === 2) return parts[1] !== 'message';
+    if (parts[1] !== 'message') return true;
+    // Tokscale's legacy OpenCode source is storage/message/*/*.json. Keep
+    // the message root, one session directory, and its direct JSON files;
+    // prune deeper runtime trees before chokidar allocates more watches.
+    if (parts.length === 3) return false;
+    if (parts.length === 4) return !parts[3].endsWith('.json');
+    return true;
+  });
+
+  // Tokscale reads only direct children of each MiMo root, so log/* and every
+  // other recursive subtree is pruned before chokidar descends into it.
+  bound('micode', candidates.micode || [], directChildOnly((name) => MICODE_DB_WATCH_PATTERN.test(name)));
+  // The dual-source Grok scanner derives exactly logs/unified.jsonl from each
+  // Grok home.
+  bound('grok', withBasename('grok', 'logs'), directChildOnly((name) => name === GROK_UNIFIED_LOG_FILE));
+  // ZCode v2 is a direct SQLite path, not a recursive project source.
+  bound('zcode', withBasename('zcode', 'db'), directChildOnly((name) => ZCODE_DB_WATCH_PATTERN.test(name)));
+  bound('kiro', withBasename('kiro', 'kiro-cli'), directChildOnly((name) => KIRO_DB_WATCH_PATTERN.test(name)));
+  bound('zed', withBasename('zed', 'threads'), directChildOnly((name) => ZED_DB_WATCH_PATTERN.test(name)));
+  bound('codebuddy', withBasename('codebuddy', 'Logs'), (parts) => !CODEBUDDY_EXTENSION_SOURCE_DIRS.has(parts[0]));
+
+  // Everything left is a recursive transcript tree: tokscale walks it, so every
+  // path inside it is a potential source. Copilot is excluded wholesale because
+  // each of its roots is bounded above, and the self-synced cache roots are
+  // never handed to chokidar in the first place. The parse-local Antigravity CLI
+  // dir is added back explicitly — it shares the umbrella client id but is
+  // written by `agy`, not by our sync.
+  const recursive = [
+    ...Object.entries(candidates)
+      .filter(([client]) => client !== 'copilot' && !SELF_SYNCED_CLIENTS.has(client))
+      .flatMap(([client, dirs]) => dirs.filter((dir) => !(claimed.get(client) || EMPTY_SET).has(dir))),
+    ...(antigravityEnabled && dirExists(antigravityCliDataDir()) ? [antigravityCliDataDir()] : [])
+  ];
+  for (const root of new Set(recursive.map(canonicalRoot))) {
+    entries.push({ root, prefix: root + path.sep, policy: KEEP_EVERYTHING });
+  }
+  return { entries, boundedCount };
+}
 
 function watchIgnoreMatcher(clientsCsv) {
-  const candidates = clientWatchCandidates(clientsCsv);
-  const hermesRoots = (candidates.hermes || []).map((dir) => path.resolve(dir));
-  const hermesRootSet = new Set(hermesRoots);
-  const copilotRoots = (candidates.copilot || [])
-    .filter((dir) => path.basename(dir) === 'workspaceStorage')
-    .map((dir) => path.resolve(dir));
-  if (hermesRoots.length === 0 && copilotRoots.length === 0) return undefined;
+  const { entries, boundedCount } = watchPolicyEntries(clientsCsv);
+  if (boundedCount === 0) return undefined;
   return (target) => {
     const resolved = path.resolve(target);
-    // Every explicit watch root stays watched — the home dir AND each profile
-    // dir. A profile dir lives under the home root, so the child-prune below
-    // would otherwise ignore it (basename isn't a db file) before we recognise
-    // it as a watch root in its own right, silencing profile-db change events.
-    if (hermesRootSet.has(resolved)) return false;
-    for (const root of hermesRoots) {
-      if (resolved.startsWith(root + path.sep)) return !HERMES_DB_FILES.has(path.basename(resolved));
-    }
-    for (const root of copilotRoots) {
+    let contained = false;
+    for (const { root, prefix, policy } of entries) {
+      // A watch root is a source in its own right — a Hermes profile dir inside
+      // the Hermes home, the parent of a database created later — so it survives
+      // whatever the roots around it would say about a path at that depth.
       if (resolved === root) return false;
-      if (!resolved.startsWith(root + path.sep)) continue;
-      const parts = path.relative(root, resolved).split(path.sep);
-      if (parts.length === 1) return false; // workspace hash dir
-      if (parts[1] === 'chatSessions') return false;
-      if (parts.length === 2 && parts[1] === 'workspace.json') return false;
-      return true;
+      if (!resolved.startsWith(prefix)) continue;
+      contained = true;
+      if (!policy(path.relative(root, resolved).split(path.sep), resolved)) return false;
     }
-    return false; // paths outside the bounded Hermes/Copilot roots are never ignored
+    return contained; // a path under no source root at all is never ignored
   };
 }
 
-// Whether each tracked client has at least one data directory on disk.
-function clientDataDirPresence(clientsCsv) {
+// Which source roots each tracked client actually has on disk, one entry per
+// check id with same-kind paths collapsed by OR. clientDataDirPresence() is
+// derived from this rather than computed beside it, so the presence dot in the
+// UI and the health record can never disagree about what was found.
+function sourceRootExists(root) {
+  if (root.sourcePath) return fileExists(root.sourcePath);
+  return root.id === 'vscode-workspace-storage'
+    ? hasCopilotChatSessions(root.dir)
+    : dirExists(root.dir);
+}
+
+// `dir` is what the diagnostics panel prints, so for an exact-file source it has
+// to be the file `exists` actually answered for. Printing the watch parent while
+// `exists` probed a file inside it makes the panel report a directory that is
+// plainly there as missing — the one question the panel exists to answer. The
+// watch root stays available to the watcher through clientWatchCandidates(),
+// which reads clientSourceRoots() directly; `sourcePath` rides along so a reveal
+// can tell a file from a directory without stat-ing it again.
+function evaluatedClientSourceRoots(clientsCsv) {
+  return Object.fromEntries(Object.entries(clientSourceRoots(clientsCsv)).map(([client, roots]) => [
+    client,
+    roots.map((root) => ({
+      id: root.id,
+      dir: root.sourcePath || root.dir,
+      ...(root.sourcePath ? { sourcePath: root.sourcePath } : {}),
+      ...(root.optional ? { optional: true } : {}),
+      exists: sourceRootExists(root)
+    }))
+  ]));
+}
+
+function clientSourceChecks(clientsCsv, options = {}) {
+  const checks = {};
+  const push = (client, id, exists) => {
+    const list = checks[client] || (checks[client] = []);
+    const found = list.find((entry) => entry.id === id);
+    if (found) found.exists = found.exists || exists;
+    else list.push({ id, exists });
+  };
+  for (const [client, roots] of Object.entries(evaluatedClientSourceRoots(clientsCsv))) {
+    checks[client] = checks[client] || [];
+    for (const { id, exists } of roots) push(client, id, exists);
+  }
+  // antigravity's watch candidate is only the IDE sync cache, which our own sync
+  // writes. Its two real sources are separate checks so a health record can say
+  // "the IDE is installed but the cache was never written" rather than collapse
+  // all three into one boolean. A source-only or CLI-only install with no
+  // countable usage yet must read `waiting`, not `missing`; the sync cache stays
+  // a valid presence signal for snapshots taken before either of the others
+  // existed.
+  if (Object.prototype.hasOwnProperty.call(checks, 'antigravity')) {
+    push('antigravity', 'antigravity-ide-source', antigravityDataPresent(os.homedir()));
+    push('antigravity', 'antigravity-cli-data', dirExists(antigravityCliDataDir()));
+  }
+  // A client installed only inside WSL has no host directory, but its usage is
+  // merged into the same periods — so without this its source reads `missing`
+  // while the very same snapshot counts its tokens. The WSL marker is a source
+  // that exists; it just lives in a filesystem this process reaches through
+  // `wsl.exe` rather than through `fs`.
+  for (const client of options.wslDetected || []) {
+    if (Object.prototype.hasOwnProperty.call(checks, client)) push(client, 'wsl-home', true);
+  }
+  return checks;
+}
+
+// Every directory a tracked client's usage can come from on this machine, keyed
+// by client as {id, dir, exists} — the path-level table behind
+// clientSourceChecks(), before same-id roots are collapsed into one boolean.
+//
+// Only the diagnostics panel wants this shape: a user asking "is it looking
+// where I installed it" needs the paths, and a check id cannot answer that. The
+// self-synced clients are why it is not simply clientSourceRoots(): that table
+// holds antigravity's *sync cache*, which is ours and says nothing about which
+// Antigravity is installed — the IDE session roots and the CLI's own data dir
+// are the ones that answer it, and they are checks without being watch roots.
+// What the diagnostics panel should list, which is not everything probed. An
+// optional root that is absent is dropped here, in the main process, so the
+// flag never crosses IPC: the renderer flattens cached sources to
+// `exists: false, pending: true` while a re-probe is in flight, and any
+// visibility rule that reads `exists` downstream of that would blink an
+// existing capture directory out of the panel and back on every snapshot.
+// Deciding it where `exists` is still the answer to a real stat() is the only
+// place the question can be asked once.
+//
+// clientDiagnosticRoots() stays faithful for callers that want every probed
+// root — the reveal handler picks from it and selects on `exists` itself.
+function visibleDiagnosticRoots(clientsCsv) {
+  return Object.fromEntries(Object.entries(clientDiagnosticRoots(clientsCsv)).map(([client, roots]) => [
+    client,
+    roots.filter((root) => !(root.optional === true && root.exists !== true))
+  ]));
+}
+
+function clientDiagnosticRoots(clientsCsv) {
+  const byClient = evaluatedClientSourceRoots(clientsCsv);
+  if (byClient.antigravity) {
+    byClient.antigravity.unshift(
+      ...antigravityDataRoots().map((dir) => ({ id: 'antigravity-ide-source', dir, exists: dirExists(dir) })),
+      { id: 'antigravity-cli-data', dir: antigravityCliDataDir(), exists: dirExists(antigravityCliDataDir()) }
+    );
+  }
+  return byClient;
+}
+
+// Whether each tracked client has at least one data directory on disk. Takes
+// pre-computed checks when the caller already has them: a tick derives the
+// legacy status and the health record from one probe, so the two cannot
+// disagree about a directory created between two scans of the same snapshot.
+function clientDataDirPresence(clientsCsv, options = {}) {
   const presence = {};
-  const candidates = clientWatchCandidates(clientsCsv);
-  for (const [client, dirs] of Object.entries(candidates)) {
-    presence[client] = dirs.some(dirExists);
-  }
-  // workspaceStorage is shared by every VS Code extension. Count it as Copilot
-  // presence only when at least one workspace contains the chatSessions source
-  // Tokscale actually parses; the broader root is watched solely to catch a new
-  // workspace appearing after startup.
-  if (Object.prototype.hasOwnProperty.call(presence, 'copilot')) {
-    presence.copilot = (candidates.copilot || []).some((dir) => (
-      path.basename(dir) === 'workspaceStorage' ? hasCopilotChatSessions(dir) : dirExists(dir)
-    ));
-  }
-  // antigravity's watch candidate is only the IDE sync cache, so fold its separate
-  // CLI data dir into the umbrella presence too — otherwise a CLI-only user with no
-  // countable usage yet reads `missing` instead of `waiting`.
-  if (Object.prototype.hasOwnProperty.call(presence, 'antigravity') && dirExists(antigravityCliDataDir())) {
-    presence.antigravity = true;
+  for (const [client, checks] of Object.entries(options.sourceChecks || clientSourceChecks(clientsCsv, options))) {
+    presence[client] = checks.some((check) => check.exists);
   }
   return presence;
 }
@@ -1079,9 +1804,142 @@ function statusFromSignals(clients, presence, usageClients) {
   return status;
 }
 
-function deriveClientStatus(clientsCsv, allTimePeriod) {
+function deriveClientStatus(clientsCsv, allTimePeriod, options = {}) {
   const clients = String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
-  return statusFromSignals(clients, clientDataDirPresence(clientsCsv), allTimePeriod?.clients || {});
+  return statusFromSignals(clients, clientDataDirPresence(clientsCsv, options), allTimePeriod?.clients || {});
+}
+
+// The most recent day each client has recorded usage on, read out of the daily
+// history buckets this scan already produced. Deliberately not called "last
+// used": it is the newest day the collector *holds data for*, which is the
+// honest answer to "is this tool quiet, or are we failing to read it". Per-turn
+// timestamps would be the stronger signal and tokscale does not expose them.
+function clientActivityDaysFromHistory(history) {
+  const days = {};
+  for (const bucket of history?.daily || []) {
+    const key = String(bucket?.date || '').slice(0, 10);
+    if (!key) continue;
+    for (const [rawClient, usage] of Object.entries(bucket?.perClient || {})) {
+      if (Number(usage?.tokens || 0) <= 0) continue;
+      // Folds tokscale's aliases onto the umbrella id, so an antigravity-cli day
+      // counts as an antigravity day — the same id the health record is keyed on.
+      const client = normalizeClientName(rawClient);
+      if (!client) continue;
+      if (!days[client] || key > days[client]) days[client] = key;
+    }
+  }
+  return days;
+}
+
+// A history refresh runs on its own slower cadence than a usage tick, so a tick
+// that skipped it keeps the caller's previous map rather than blanking the
+// field. Merged per client rather than swapped wholesale: collectHistoryOnce()
+// deliberately survives one source failing while another succeeds, so a refresh
+// that returns only Proma's days must not erase what the last one knew about
+// Codex. Today's already-collected period is also authoritative for the date: it
+// closes the cadence gap without another graph scan. A day only ever moves
+// forward, so the newest value wins where sources overlap.
+function mergeClientActivityDays(previous, history, todayPeriod, todayKey) {
+  const merged = { ...(previous || {}) };
+  const candidates = clientActivityDaysFromHistory(history);
+  const currentDay = String(todayKey || '').slice(0, 10);
+  if (currentDay) {
+    for (const [rawClient, tokens] of Object.entries(todayPeriod?.clients || {})) {
+      if (Number(tokens || 0) <= 0) continue;
+      const client = normalizeClientName(rawClient);
+      if (client && (!candidates[client] || currentDay > candidates[client])) {
+        candidates[client] = currentDay;
+      }
+    }
+  }
+  for (const [client, day] of Object.entries(candidates)) {
+    // Per client, newest wins. A plain spread would let a fresh-but-older value
+    // push a known day backwards — history is a rolling window and a refresh can
+    // legitimately return a shorter one, so "fresh" does not imply "later".
+    if (!merged[client] || day > merged[client]) merged[client] = day;
+  }
+  return merged;
+}
+
+// Per-client diagnostics. Every input is a filesystem or subprocess observation
+// that only this process can make, which is why the record is built here;
+// clientHealth.js owns the shape, the enums and the validation the hub re-runs.
+//
+// Detail is attached only to clients that are not healthy. A working client is
+// fully described by the fixed core, and this record is per client per device on
+// a document the hub keeps — so "which of Copilot's two roots is missing" is
+// worth its bytes exactly when something is wrong.
+function deriveClientHealth(clientsCsv, allTimePeriod, options = {}) {
+  const clients = String(clientsCsv || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
+  if (clients.length === 0) return null;
+  // Injectable so a test can state the filesystem instead of depending on one:
+  // every `overall` below turns on whether a directory exists, which makes the
+  // developer's machine and a CI runner disagree about the same input.
+  const checksByClient = options.sourceChecks || clientSourceChecks(clientsCsv);
+  const usageClients = allTimePeriod?.clients || {};
+  const wslDetected = new Set(options.wslStatus?.detected || []);
+  const wslWithData = new Set(options.wslStatus?.withData || []);
+  const activityDays = options.lastActivityDays || {};
+  const throttle = options.selfSyncThrottle || selfSyncThrottle;
+  const result = {};
+  for (const client of clients) {
+    const checks = checksByClient[client] || [];
+    const detected = checks.filter((check) => check.exists);
+    const liveTokens = Number(usageClients[client] || 0);
+    const sync = SELF_SYNCED_CLIENTS.has(client) ? throttle.syncStatus(client) : null;
+    const entry = {
+      source: {
+        state: checks.length === 0 ? 'unknown' : (detected.length > 0 ? 'detected' : 'missing'),
+        detectedCount: detected.length,
+        checkedCount: checks.length
+      },
+      collection: { state: sync ? sync.state : 'direct' },
+      data: { liveTokens: liveTokens > 0 ? liveTokens : 0 }
+    };
+    // Kept even for a healthy self-synced client: "last synced two minutes ago"
+    // is the answer to "why is today still 0", not a fault report.
+    if (sync?.lastAttemptAt) entry.collection.lastAttemptAt = new Date(sync.lastAttemptAt).toISOString();
+    if (sync?.lastSuccessAt) entry.collection.lastSuccessAt = new Date(sync.lastSuccessAt).toISOString();
+    if (sync?.state === 'failed') {
+      if (sync.failureStage) entry.collection.syncFailureStage = sync.failureStage;
+      if (sync.detailCode) entry.collection.syncDetailCode = sync.detailCode;
+      if (sync.exitCode !== null && sync.exitCode !== undefined) entry.collection.syncExitCode = sync.exitCode;
+    }
+    const activityDay = activityDays[client];
+    if (activityDay) entry.data.lastActivityDay = activityDay;
+    const overall = deriveClientOverall(entry);
+    if (overall !== 'healthy') {
+      if (checks.length > 0 && detected.length < checks.length) {
+        entry.source.checks = checks.map(({ id, exists }) => ({ id, exists }));
+      }
+      const codes = [];
+      // Only "nothing at all" is a fault. A client's roots are alternatives, not
+      // dependencies — Antigravity's IDE cache, native sources and CLI data are
+      // three ways to have it installed, and so are Kiro's three — so a partial
+      // set is the normal shape of a normal install. `checks` still ships as
+      // neutral evidence of which ones were found.
+      if (checks.length > 0 && detected.length === 0) codes.push('source-missing');
+      if (sync?.failureCode) codes.push(sync.failureCode);
+      if (detected.length > 0 && liveTokens <= 0) codes.push('no-usage-observed');
+      // States a fact, not a cause: a marker without usage can equally mean the
+      // tool is installed in that distro and simply unused.
+      if (wslDetected.has(client) && !wslWithData.has(client)) codes.push('wsl-detected-no-data');
+      // An object per diagnostic even though `code` is the only field today: the
+      // extension point is inside the entry, and every diagnostics format worth
+      // copying (LSP, ESLint, SARIF, RFC 9457) is shaped this way. Growing an
+      // object stays compatible; turning `string[]` into `object[]` would not.
+      // Severity is deliberately absent — it depends on which client the code
+      // lands on, which only the renderer knows.
+      if (codes.length > 0) {
+        entry.diagnostics = codes.slice(0, MAX_DIAGNOSTICS_PER_CLIENT).map((code) => ({ code }));
+      }
+    }
+    entry.overall = overall;
+    result[client] = entry;
+  }
+  const health = { version: CLIENT_HEALTH_VERSION, clients: result };
+  if (options.observedAt) health.observedAt = new Date(options.observedAt).toISOString();
+  return health;
 }
 
 // The frozen wslAnchor is only valid to merge into a preview period when it was
@@ -1098,108 +1956,188 @@ function wslPeriodsForPreview(wslAnchor, anchorDateKey, todayKey) {
   };
 }
 
+function completeTodayPartitions(partitions, clientsCsv) {
+  const completed = { ...(partitions || {}) };
+  for (const client of normalizeClientsCsv(clientsCsv).split(',').filter(Boolean)) {
+    if (!Object.prototype.hasOwnProperty.call(completed, client)) completed[client] = emptyPeriod();
+  }
+  return completed;
+}
+
+function replaceTodayPartitions(current, fresh, targetClients) {
+  const next = { ...(current || {}) };
+  for (const client of targetClients || []) next[client] = emptyPeriod();
+  for (const [client, period] of Object.entries(fresh || {})) next[client] = period;
+  return next;
+}
+
+function mergeTodayPartitions(partitions) {
+  return mergePeriods(...Object.values(partitions || {}));
+}
+
+function periodHasUsage(period) {
+  if (!period) return false;
+  return Number(period.totalTokens || 0) > 0
+    || Number(period.costUsd || 0) > 0
+    || Object.keys(period.sessions || {}).length > 0;
+}
+
+function canTargetTodayPartitions(anchor, targetClients) {
+  if (!targetClients?.length) return true;
+  return Boolean(
+    anchor?.todayPartitions
+    && !periodHasUsage(anchor.todayPartitions[UNATTRIBUTED_USAGE_CLIENT])
+    && targetClients.every((client) => Object.prototype.hasOwnProperty.call(anchor.todayPartitions, client))
+  );
+}
+
 function configFingerprint(clientsCsv, allTimeSince, projectsEnabled = true) {
   // Deterministic string that captures the config inputs anchor correctness
   // depends on. When this changes, the persisted anchor is invalidated.
   return `${normalizeClientsCsv(clientsCsv)}|${allTimeSince}|projects:${projectsEnabled !== false ? 'on' : 'off'}`;
 }
 
+// The one place that decides whether a persisted anchor may be reused, shared by
+// startCollector and by the widget's cold-start seed. Two consumers with two
+// copies of these rules is how they drift, and a drifted copy shows the previous
+// configuration's totals as if they were current.
+//
+// Returns null when the anchor is unusable at all. Otherwise `capturedAtMs` is
+// the moment it was written, or null when that moment cannot be trusted: the
+// collector still reuses the periods then and simply forces a full scan, while
+// a seed has nothing to stand on and declines.
+function collectorAnchorTrust(saved, options = {}) {
+  const { clients = '', allTimeSince = '', projectsEnabled = true, now = new Date() } = options;
+  if (!saved || saved.dateKey !== localTodayKey(now)) return null;
+  if (!saved.today || !saved.month || !saved.allTime) return null;
+  if (saved.configFingerprint !== configFingerprint(clients, allTimeSince, projectsEnabled)) return null;
+  const parsed = Date.parse(saved.fullScanAt || '');
+  const capturedAtMs = Number.isFinite(parsed) && parsed <= now.getTime() ? parsed : null;
+  return { capturedAtMs };
+}
+
 // Force a full scan at least this often even when the anchor is otherwise
 // valid, so a long-running session periodically rescans month/allTime
 // and picks up any changes that the delta-derivation might miss.
 const FULL_SCAN_INTERVAL_MS = 60 * 60 * 1000;
-const LIMITS_RESET_BOUNDARY_DELAY_MS = 30 * 1000;
-const LIMITS_RESET_BOUNDARY_MIN_TIMER_MS = 5 * 1000;
-const LIMITS_RESET_BOUNDARY_MAX_TIMER_MS = 2_147_483_647;
 
-function limitResetBoundaryEntries(limits) {
-  const entries = [];
-  for (const provider of limits?.providers || []) {
-    const providerKey = [
-      provider?.provider,
-      provider?.accountKey,
-      provider?.accountEmail,
-      provider?.accountLabel
-    ].map((value) => String(value || '').trim()).join(':');
-    const scope = {
-      provider: String(provider?.provider || '').trim(),
-      accountKey: String(provider?.accountKey || '').trim(),
-      accountEmail: String(provider?.accountEmail || '').trim().toLowerCase(),
-      accountName: String(provider?.accountName || '').trim(),
-      accountLabel: String(provider?.accountLabel || '').trim(),
-      sourceDetail: String(provider?.sourceDetail || '').trim()
-    };
-    for (const window of provider?.windows || []) {
-      const resetAt = Date.parse(window?.resetsAt || '');
-      if (!Number.isFinite(resetAt)) continue;
-      entries.push({
-        resetAt,
-        key: `${providerKey}:${String(window?.kind || '').trim()}:${new Date(resetAt).toISOString()}`,
-        scope
-      });
-    }
-  }
-  return entries;
+// Escape hatch for filesystems that never deliver native events — network
+// mounts, some FUSE drivers, container bind mounts. chokidar has its own
+// CHOKIDAR_USEPOLLING override, but that is chokidar's surface, not ours: it
+// is undocumented for our users and can change with a dependency bump, so
+// support asks would have no stable answer. Resolved here rather than in each
+// entry point so the widget and the headless agent cannot drift apart.
+// Tri-state on purpose: unset must fall through to the caller's value, which
+// is why parseBoolean's fallback semantics don't fit. The default is native on
+// every platform — chokidar 4 has no per-platform backend left to differ on,
+// and the failure cases it cannot cover are handled by the watch-descriptor
+// fallback below rather than by pre-emptively polling everywhere.
+//
+// Returns undefined when unset, which is what keeps that tri-state readable to
+// callers that need to tell "no opinion" from an explicit "never poll".
+function watchPollingEnvOverride(env = process.env) {
+  const raw = String(env.TOKEN_MONITOR_WATCH_POLLING ?? '').trim().toLowerCase();
+  if (!raw) return undefined;
+  return !['0', 'false', 'no', 'off'].includes(raw);
 }
 
-function nextLimitsResetBoundary(limits, nowMs = Date.now(), attempted = new Set()) {
-  let refreshAt = Infinity;
-  let keys = [];
-  let scopes = new Map();
-  for (const entry of limitResetBoundaryEntries(limits)) {
-    if (attempted.has(entry.key)) continue;
-    const candidate = entry.resetAt + LIMITS_RESET_BOUNDARY_DELAY_MS;
-    if (candidate < refreshAt) {
-      refreshAt = candidate;
-      keys = [entry.key];
-      scopes = new Map([[JSON.stringify(entry.scope), entry.scope]]);
-    } else if (candidate === refreshAt) {
-      keys.push(entry.key);
-      scopes.set(JSON.stringify(entry.scope), entry.scope);
-    }
-  }
-  if (!Number.isFinite(refreshAt)) return null;
+function resolveWatchUsePolling(preferred, env = process.env) {
+  const override = watchPollingEnvOverride(env);
+  if (override !== undefined) return override;
+  if (typeof preferred === 'boolean') return preferred;
+  return false;
+}
+
+// Kernel watch descriptors are a per-user budget shared with every other
+// watcher on the machine (inotify on Linux, file descriptors on macOS/BSD), and
+// editors are the usual heavy consumer — a busy Linux desktop can hand us
+// ENOSPC on startup through no fault of ours. chokidar reports that
+// asynchronously on the watcher, so without this the watch would just stop
+// delivering events and live mode would silently decay to hourly
+// reconciliation. Polling needs no descriptors at all, which makes it the
+// correct degraded mode rather than merely a slower one. An explicit
+// TOKEN_MONITOR_WATCH_POLLING=0 opts out: with native events now the default
+// everywhere, suppressing this fallback is the only thing that direction of the
+// override still does.
+const WATCH_DESCRIPTOR_ERROR_CODES = new Set(['ENOSPC', 'EMFILE', 'ENFILE']);
+
+// Windows only: libuv asserts that the filename ReadDirectoryChangesW hands
+// back starts with the directory string it was given, and calls abort() when it
+// does not (src/win/fs-event.c). An 8.3 short path such as C:\Users\RUNNER~1\…
+// is reported back in its long form and trips exactly that assert, taking the
+// whole process down. That is a native abort, so handleWatchError can never see
+// it and the polling fallback cannot save us — the only guard is to hand
+// chokidar the canonical long path in the first place. Junctions reach the same
+// assert by the same route. Identity off Windows, so watch roots elsewhere stay
+// byte-identical to the paths tokscale reads.
+function canonicalWatchPath(dir) {
+  if (process.platform !== 'win32') return dir;
+  try { return fs.realpathSync.native(dir); }
+  catch (_) { return dir; }
+}
+
+// The exporter file may not exist when the watcher starts, so canonicalise its
+// existing parent and append the original basename instead of realpathing the
+// file itself. This keeps exact-file matching in the same path space as the
+// canonical directory root handed to chokidar on Windows.
+function canonicalWatchFilePath(file) {
+  return path.join(path.resolve(canonicalWatchPath(path.dirname(file))), path.basename(file));
+}
+
+function watcherOptions(usePolling, ignored) {
   return {
-    refreshAt,
-    delayMs: Math.min(
-      LIMITS_RESET_BOUNDARY_MAX_TIMER_MS,
-      Math.max(LIMITS_RESET_BOUNDARY_MIN_TIMER_MS, refreshAt - nowMs)
-    ),
-    keys,
-    scopes: [...scopes.values()]
+    ignoreInitial: true,
+    persistent: true,
+    ...(usePolling
+      ? { usePolling: true, interval: 2000, binaryInterval: 5000 }
+      : { usePolling: false }),
+    ...(ignored ? { ignored } : {}),
+    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 200 }
   };
-}
-
-function pruneAttemptedResetBoundaries(limits, attempted) {
-  const currentKeys = new Set(limitResetBoundaryEntries(limits).map((entry) => entry.key));
-  for (const key of attempted) {
-    if (!currentKeys.has(key)) attempted.delete(key);
-  }
 }
 
 function startCollector(options) {
   const {
     clients, allTimeSince, commandTimeoutMs, deviceId, agentVersion, agentRuntime,
-    intervalMs, historyIntervalMs = 15 * 60 * 1000, historyEnabled = true, watchEnabled, watchDebounceMs, limitsEnabled,
-    onUpdate, onPreview, onError, logger
+    historyIntervalMs = 15 * 60 * 1000, historyEnabled = true, watchEnabled,
+    watchTriggersCollection = true, intervalRequiresActivity = false,
+    onUpdate, onPreview, onError, onDiagnosticEvent, logger
   } = options;
+  // Normalized once, at the edge. These arrive straight from CLI flags and env
+  // vars (TOKEN_MONITOR_WATCH_DEBOUNCE_MS, TOKEN_MONITOR_INTERVAL_MS) by way of
+  // a bare Number(), so Infinity and past-32-bit values reach us intact — and
+  // setTimeout rewrites those to 1ms, turning the debounce's mid-tick re-arm and
+  // the interval loop into spins. Clamping here means no timer below can
+  // reintroduce that by forgetting.
+  const watchDebounceMs = clampTimerDelayMs(options.watchDebounceMs, 1500);
+  const intervalMs = clampTimerDelayMs(options.intervalMs, 5 * 60 * 1000);
+  const watchUsePolling = resolveWatchUsePolling(options.watchUsePolling);
+  const watchNativeForced = watchPollingEnvOverride() === false;
+  const trackedClients = new Set(normalizeClientsCsv(clients).split(',').filter(Boolean));
   const deviceOsInfo = options.osInfo === undefined
     ? hostOsInfo()
     : normalizeOsInfo(options.osInfo);
   const log = logger || (() => {});
-  const limitsCollector = limitsEnabled !== false ? createLimitsCollector(options) : null;
-  const resetBoundaryNow = typeof options.resetBoundaryNow === 'function' ? options.resetBoundaryNow : Date.now;
-  const setResetBoundaryTimer = typeof options.resetBoundarySetTimeout === 'function'
-    ? options.resetBoundarySetTimeout
-    : setTimeout;
-  const clearResetBoundaryTimer = typeof options.resetBoundaryClearTimeout === 'function'
-    ? options.resetBoundaryClearTimeout
-    : clearTimeout;
   let tickInFlight = false;
   let tickPending = false;
-  let pendingForceLimits = false;
   let pendingForceHistory = false;
+  let pendingForceSelfSync = null;
+  let pendingSourceSelfSync = null;
+  // null until something is actually pending. Tracked separately from the
+  // force-sync flags on purpose: a coalesced replay must stay a full scan
+  // unless *every* tick folded into it asked for today-only, and deriving that
+  // from a force flag would let a manual refresh quietly become a warm scan.
+  let pendingTodayOnly = null;
+  // null means no pending scope yet; true means an all-client replay; otherwise
+  // this Set is the union of targeted today-only requests waiting behind the
+  // active tick. A broader request can upgrade this scope but never narrow it.
+  let pendingTargetClients = null;
+  let pendingActivityRevision = null;
   let lastHistoryAt = 0;
+  let lastHistoryAttemptAt = 0;
+  let lastHistorySuccessAt = 0;
+  let lastHistoryFailureCode = null;
+  let lastHistoryScanDurationMs = null;
   // Last full-scan snapshot; lets watch ticks scan only --today and derive
   // month/allTime exactly (applyPeriodDelta). Reset by every full tick.
   // anchor holds Windows-only periods; wslAnchor is the WSL contribution frozen
@@ -1207,108 +2145,155 @@ function startCollector(options) {
   let anchor = null;
   let wslAnchor = null;
   let wslStatusAnchor = null;
+  // The last-activity days a history refresh produced, carried across the ticks
+  // that skip history. Read back out of the record this collector just published
+  // rather than kept as a second copy, so the two cannot drift; a restart simply
+  // relearns them from the first tick, which always includes history.
+  let activityDaysAnchor = {};
+  // Keep the highest complete live day in this collector even when another
+  // process owns the shared archive. A watch tick can then hand its value to a
+  // later full/history tick instead of losing it at the tick boundary.
+  let liveDailyHistoryDays = {};
   let lastFullScanAt = 0;
   let pendingWaiters = [];
   let debounceTimer = null;
   let intervalTimer = null;
-  let resetBoundaryTimer = null;
-  let lastSummary = null;
   let stopped = false;
-  const attemptedResetBoundaries = new Set();
+  let lastTickAttemptAt = 0;
+  let lastTickSuccessAt = 0;
+  let lastTickFailureAt = 0;
+  let lastTickDurationMs = null;
+  let lastTickScope = 'full';
+  let lastTickReasonCode = null;
+  let lastTickFailureCode = null;
+  let watchFallbackCode = null;
+  let lastWatchFailureCode = null;
+  let tickHadFailure = false;
+  const scheduledWatchClients = new Set();
+  let scheduledWatchNeedsFullScan = false;
+  // Source events waiting on the shared throttle, and the timer that comes back
+  // for them. Built here rather than at module scope because its timer has to
+  // die with this collector; the throttle it reads deadlines from is shared, so
+  // a rebuild inherits the floors it must not reset. `retryMs` mirrors the watch
+  // debounce so a catch-up displaced by an in-flight tick lands just after it.
+  const sourceSyncQueue = createSourceSyncQueue({
+    throttle: selfSyncThrottle,
+    retryMs: watchDebounceMs,
+    isBusy: () => tickInFlight,
+    // The tick that carried this event already scanned against the stale cache,
+    // so the catch-up has to rescan the same clients behind the sync.
+    onDue: (sourceSelfSync) => runTick('source-sync', {
+      todayOnly: true,
+      targetClients: sourceSelfSync,
+      sourceSelfSync
+    })
+  });
+  const selfSyncedClients = normalizeClientsCsv(clients).split(',').filter((client) => SELF_SYNCED_CLIENTS.has(client));
+  let activityRevision = 0;
+  let collectedActivityRevision = 0;
+  let initialCollectionComplete = false;
   const watchers = [];
+  let watchedDirectoryKey = null;
+  // Sticky: once the kernel has refused us watch descriptors, every later
+  // rebuild (a client gaining or losing a data directory) stays on polling for
+  // the rest of the process. Retrying native events on each rebuild would just
+  // rediscover the same exhausted budget.
+  let watchDescriptorFallback = false;
+
+  function emitDiagnosticEvent(event) {
+    try {
+      onDiagnosticEvent?.(event);
+    } catch (_) {
+      // Diagnostics observers must never affect collection or watcher state.
+    }
+  }
+
+  function tickReasonCode(reason) {
+    const value = String(reason || '').trim().toLowerCase();
+    if (value.startsWith('watch:')) return 'watch-event';
+    if (value.startsWith('client:')) return 'targeted-client';
+    if (value === 'source-sync') return 'source-sync';
+    if (value === 'coalesced') return 'coalesced';
+    if (value === 'interval') return 'interval';
+    if (value === 'manual') return 'manual';
+    return 'other';
+  }
+
+  function tickScopeCode(tickOptions = {}) {
+    if (tickOptions.todayOnly === true && Array.isArray(tickOptions.targetClients) && tickOptions.targetClients.length > 0) {
+      return 'targeted';
+    }
+    return tickOptions.todayOnly === true ? 'today' : 'full';
+  }
+
+  function timestampOrNull(value) {
+    return Number.isFinite(Number(value)) && Number(value) > 0
+      ? new Date(Number(value)).toISOString()
+      : null;
+  }
+
+  function cloneDiagnosticValue(value) {
+    if (value === null || value === undefined) return value ?? null;
+    try { return JSON.parse(JSON.stringify(value)); } catch (_) { return null; }
+  }
 
   // On-disk anchor: persist full-scan snapshots so the collector can reuse
   // month/allTime across restarts. On the first interval tick the anchor is
   // valid for today and configFingerprint matches, only --today is scanned
   // and month/allTime are derived via applyPeriodDelta.
   const anchorPath = path.join(sharedDataDir(), 'collector-anchor.json');
-  try {
-    const saved = readJson(anchorPath, null);
-    if (saved && saved.dateKey === localTodayKey()) {
-      const fp = configFingerprint(clients, allTimeSince, options.projectsEnabled);
-      if (saved.configFingerprint === fp) {
-        anchor = { dateKey: saved.dateKey, today: saved.today, month: saved.month, allTime: saved.allTime };
+  if (options.anchorPersistenceEnabled !== false) {
+    try {
+      const saved = readJson(anchorPath, null);
+      const trust = collectorAnchorTrust(saved, {
+        clients,
+        allTimeSince,
+        projectsEnabled: options.projectsEnabled
+      });
+      if (trust) {
+        anchor = {
+          dateKey: saved.dateKey,
+          today: saved.today,
+          month: saved.month,
+          allTime: saved.allTime,
+          // Per-client partitions are deliberately rebuilt by the first
+          // anchored all-client tick after restart. Persisted partitions
+          // could be stale for clients that changed while the app was down.
+          todayPartitions: null
+        };
         // Don't restore a persisted WSL snapshot when WSL scanning is now off —
         // the configFingerprint intentionally ignores the toggle (host periods
         // stay valid), so without this gate a warm-scan preview would briefly
         // re-merge the old WSL totals before the first full tick clears them.
         wslAnchor = options.wslScanEnabled !== false ? (saved.wslBundle || null) : null;
         wslStatusAnchor = options.wslScanEnabled !== false ? (saved.wslStatus || null) : null;
-        if (saved.fullScanAt) {
-          const parsed = Date.parse(saved.fullScanAt);
-          // Only trust timestamps that are valid and not in the future.
-          // Invalid, future, or missing timestamps leave lastFullScanAt at 0,
-          // which forces a full scan on the first interval tick (see loop()).
-          if (Number.isFinite(parsed) && parsed <= Date.now()) {
-            lastFullScanAt = parsed;
-          }
-        }
+        // An untrustworthy capture time leaves lastFullScanAt at 0, which forces
+        // a full scan on the first interval tick (see loop()).
+        if (trust.capturedAtMs !== null) lastFullScanAt = trust.capturedAtMs;
       }
-    }
-  } catch (_) {}
-
-  function resolvePendingWaiters() {
-    const waiters = pendingWaiters;
-    pendingWaiters = [];
-    for (const resolve of waiters) resolve();
+    } catch (_) {}
   }
 
-  function clearScheduledResetBoundary() {
-    if (!resetBoundaryTimer) return;
-    clearResetBoundaryTimer(resetBoundaryTimer);
-    resetBoundaryTimer = null;
-  }
-
-  function scheduleLimitsResetBoundary(limits) {
-    clearScheduledResetBoundary();
-    if (stopped || !limitsCollector) return;
-    // Keep stale keys that are still present so a failed/source-stale refresh
-    // cannot loop, but discard historical windows once a fresh snapshot no
-    // longer contains them. This bounds the set to the current limits shape.
-    pruneAttemptedResetBoundaries(limits, attemptedResetBoundaries);
-    const next = nextLimitsResetBoundary(limits, resetBoundaryNow(), attemptedResetBoundaries);
-    if (!next) return;
-    resetBoundaryTimer = setResetBoundaryTimer(() => {
-      resetBoundaryTimer = null;
-      if (resetBoundaryNow() < next.refreshAt) {
-        scheduleLimitsResetBoundary(lastSummary?.limits);
-        return;
-      }
-      for (const key of next.keys) attemptedResetBoundaries.add(key);
-      refreshLimitsAtResetBoundary(next.scopes);
-    }, next.delayMs);
-  }
-
-  async function refreshLimitsAtResetBoundary(scopes) {
-    if (stopped || !limitsCollector || !lastSummary) return;
-    try {
-      let limits = lastSummary.limits;
-      for (const scope of scopes || []) {
-        limits = await limitsCollector.refreshScope(scope);
-      }
-      if (stopped) return;
-      const summary = {
-        ...lastSummary,
-        updatedAt: new Date(resetBoundaryNow()).toISOString(),
-        limits,
-        limitsOnly: true
-      };
-      lastSummary = summary;
-      scheduleLimitsResetBoundary(limits);
-      await onUpdate?.(summary, 'limits-reset-boundary');
-    } catch (error) {
-      if (stopped) return;
-      if (onError) onError(error, 'limits-reset-boundary');
-      else log(`collector tick failed (limits-reset-boundary): ${error.message}`);
-    }
+  function resolveWaiters(waiters, result) {
+    for (const resolve of waiters) resolve(result);
   }
 
   async function performTick(reason, tickOptions = {}) {
+    const tickStartedAt = Date.now();
     const includeHistory = shouldIncludeHistory(Date.now(), lastHistoryAt, historyIntervalMs, Boolean(tickOptions.forceHistory), historyEnabled);
-    if (includeHistory) lastHistoryAt = Date.now();
+    if (includeHistory) {
+      lastHistoryAt = Date.now();
+      lastHistoryAttemptAt = tickStartedAt;
+    }
     const todayKey = localTodayKey();
+    const requestedTargetClients = [...new Set(normalizeClientsCsv(tickOptions.targetClients).split(',').filter(Boolean))];
+    const targetAnchorReady = canTargetTodayPartitions(anchor, requestedTargetClients);
     const anchored = Boolean(tickOptions.todayOnly && anchor && anchor.dateKey === todayKey);
     const refreshWsl = Boolean(tickOptions.refreshWsl);
+    const hadPreviousFailure = tickHadFailure;
+    lastTickAttemptAt = tickStartedAt;
+    lastTickReasonCode = tickReasonCode(reason);
+    lastTickScope = tickScopeCode(tickOptions);
     try {
       let captured = null;
       const summary = await collectUsageOnce({
@@ -1320,12 +2305,33 @@ function startCollector(options) {
         agentVersion,
         agentRuntime,
         osInfo: deviceOsInfo,
-        limitsCollector,
         includeHistory,
-        forceLimits: Boolean(tickOptions.forceLimits),
+        // Capture after the runtime's transformUsage hook so the archive uses
+        // the same today period that the user actually sees. The process-local
+        // liveDays overlay is passed into any graph scan that happens first.
+        deferLiveHistoryCapture: true,
+        dailyHistoryLiveDays: liveDailyHistoryDays,
+        onHistoryStatus: includeHistory ? (status) => {
+          lastHistoryAttemptAt = Date.parse(status.attemptedAt) || lastHistoryAttemptAt;
+          const successAt = Date.parse(status.successAt);
+          if (Number.isFinite(successAt)) lastHistorySuccessAt = successAt;
+          lastHistoryFailureCode = status.failureCode || null;
+          lastHistoryScanDurationMs = status.durationMs;
+        } : null,
+        forceSelfSync: tickOptions.forceSelfSync ?? null,
+        sourceSelfSync: tickOptions.sourceSelfSync ?? null,
+        // Both selections name clients whose pending source event this tick has
+        // already consumed — the queue's drain for one, its acknowledgement for
+        // the other — so either is a legitimate restore.
+        onSelfSyncFailed: (kind) => sourceSyncQueue.restore(
+          mergeSelfSyncSelection(tickOptions.sourceSelfSync, tickOptions.acknowledgedSourceSync) || [],
+          kind
+        ),
+        targetClients: anchored && targetAnchorReady ? requestedTargetClients : [],
         todayOnlyAnchor: anchored ? anchor : null,
         wslAnchor: anchored ? wslAnchor : null,
         wslStatus: anchored ? wslStatusAnchor : null,
+        lastActivityDays: activityDaysAnchor,
         refreshWsl: anchored ? refreshWsl : false,
         onAnchorComputed: (x) => { captured = x; },
         onProgress: (partial) => {
@@ -1361,11 +2367,6 @@ function startCollector(options) {
                   ? mergePeriods(partial.allTime, wslAnchor.allTime)
                   : partial.allTime;
               }
-              // Only derive clientStatus when allTime is available; warm
-              // scans carry the previous status forward in main.js.
-              if (partial.allTime) {
-                preview.clientStatus = deriveClientStatus(clients, partial.allTime);
-              }
               onPreview(preview);
             }
           } catch (_) {
@@ -1375,132 +2376,452 @@ function startCollector(options) {
         }
       });
       if (stopped) return;
+      for (const [client, entry] of Object.entries(summary.clientHealth?.clients || {})) {
+        if (entry.data?.lastActivityDay) activityDaysAnchor[client] = entry.data.lastActivityDay;
+      }
       if (!anchored && captured) {
-        anchor = { dateKey: todayKey, today: captured.windowsPeriods.today, month: captured.windowsPeriods.month, allTime: captured.windowsPeriods.allTime };
+        anchor = {
+          dateKey: todayKey,
+          today: captured.windowsPeriods.today,
+          month: captured.windowsPeriods.month,
+          allTime: captured.windowsPeriods.allTime,
+          todayPartitions: captured.todayPartitions
+        };
         wslAnchor = captured.wslBundle;
         wslStatusAnchor = captured.wslStatus || null;
         lastFullScanAt = Date.now();
-        try {
-          fs.mkdirSync(path.dirname(anchorPath), { recursive: true });
-          fs.writeFileSync(anchorPath, JSON.stringify({
-            dateKey: anchor.dateKey,
-            today: anchor.today,
-            month: anchor.month,
-            allTime: anchor.allTime,
-            wslBundle: wslAnchor,
-            wslStatus: wslStatusAnchor,
-            configFingerprint: configFingerprint(clients, allTimeSince, options.projectsEnabled),
-            fullScanAt: new Date().toISOString()
-          }));
-        } catch (_) {}
-      } else if (anchored && refreshWsl && captured) {
-        // Interval anchored ticks refresh WSL independently; update the
-        // frozen snapshot so subsequent watch ticks see the fresh data.
-        wslAnchor = captured.wslBundle;
-        wslStatusAnchor = captured.wslStatus || null;
+        if (options.anchorPersistenceEnabled !== false) {
+          try {
+            fs.mkdirSync(path.dirname(anchorPath), { recursive: true });
+            fs.writeFileSync(anchorPath, JSON.stringify({
+              dateKey: anchor.dateKey,
+              today: anchor.today,
+              month: anchor.month,
+              allTime: anchor.allTime,
+              wslBundle: wslAnchor,
+              wslStatus: wslStatusAnchor,
+              configFingerprint: configFingerprint(clients, allTimeSince, options.projectsEnabled),
+              fullScanAt: new Date().toISOString()
+            }));
+          } catch (_) {}
+        }
+      } else if (anchored && captured) {
+        // Keep the rolling per-client today partitions fresh for targeted
+        // watch ticks. WSL stays independently frozen between interval ticks.
+        if (captured.todayPartitions) anchor.todayPartitions = captured.todayPartitions;
+        if (refreshWsl) {
+          wslAnchor = captured.wslBundle;
+          wslStatusAnchor = captured.wslStatus || null;
+        }
       }
-      lastSummary = summary;
-      scheduleLimitsResetBoundary(summary.limits);
-      await onUpdate?.(summary, reason);
+      const transformedSummary = await onUpdate?.(summary, reason);
+      const visibleSummary = transformedSummary && typeof transformedSummary === 'object'
+        ? transformedSummary
+        : summary;
+      if (historyEnabled !== false && options.dailyHistoryArchiveEnabled) {
+        try {
+          const visibleAt = visibleSummary.updatedAt || summary.updatedAt;
+          const visibleDate = visibleAt ? new Date(visibleAt) : new Date();
+          const visibleDateKey = Number.isFinite(visibleDate.getTime())
+            ? localTodayKey(visibleDate)
+            : todayKey;
+          const retainedLive = retainLiveDailyHistory(visibleSummary.today, {
+            ...(options.dailyHistoryArchiveOptions || {}),
+            liveDays: liveDailyHistoryDays,
+            todayKey: visibleDateKey,
+            // Watch ticks update the in-memory maximum on every refresh, but
+            // only full/history ticks write it. This avoids a disk write for
+            // every few-second watch event without dropping the value before
+            // the next tick or local-day rollover.
+            writeEnabled: !anchored || includeHistory
+              || anchor?.dateKey !== visibleDateKey
+              ? options.dailyHistoryArchiveWriteEnabled
+              : false
+          });
+          liveDailyHistoryDays = retainedLive.liveDays || {};
+        } catch (error) {
+          log(`daily live history archive failed: ${error.message}`);
+        }
+      }
+      const tickFinishedAt = Date.now();
+      lastTickSuccessAt = tickFinishedAt;
+      lastTickDurationMs = Math.max(0, tickFinishedAt - tickStartedAt);
+      lastTickFailureCode = null;
+      tickHadFailure = false;
+      if (hadPreviousFailure) {
+        emitDiagnosticEvent({
+          subsystem: 'collector',
+          code: 'collector-recovered',
+          durationMs: lastTickDurationMs
+        });
+      }
+      if (!anchored) setupWatchers();
+      if (Number.isFinite(tickOptions.activityRevision)) {
+        collectedActivityRevision = Math.max(collectedActivityRevision, tickOptions.activityRevision);
+        initialCollectionComplete = true;
+      }
+      return true;
     } catch (error) {
       if (stopped) return;
+      const tickFinishedAt = Date.now();
+      lastTickFailureAt = tickFinishedAt;
+      lastTickDurationMs = Math.max(0, tickFinishedAt - tickStartedAt);
+      lastTickFailureCode = 'tick-failed';
+      tickHadFailure = true;
+      emitDiagnosticEvent({
+        subsystem: 'collector',
+        code: 'collector-tick-failed',
+        scope: lastTickScope,
+        durationMs: lastTickDurationMs
+      });
+      // takeWatchClients() already drained the pending set, so the clients this
+      // tick was meant to cover are gone. Force the next tick to scan all of
+      // them in every mode: in live mode the next watch event would otherwise
+      // target only its own client and leave the failed one serving the stale
+      // anchor partition until the 5–30 minute interval reconciles it, which
+      // breaks the seconds-level freshness live mode promises.
+      scheduledWatchNeedsFullScan = true;
       if (onError) onError(error, reason); else log(`collector tick failed (${reason}): ${error.message}`);
+      return false;
     }
   }
 
+  function mergePendingTargetScope(tickOptions) {
+    const todayOnly = tickOptions.todayOnly === true;
+    const targets = [...new Set(normalizeClientsCsv(tickOptions.targetClients).split(',').filter(Boolean))];
+    if (!todayOnly || targets.length === 0) {
+      pendingTargetClients = true;
+      return;
+    }
+    if (pendingTargetClients === true) return;
+    if (!(pendingTargetClients instanceof Set)) pendingTargetClients = new Set();
+    for (const client of targets) pendingTargetClients.add(client);
+  }
+
   async function runTick(reason, tickOptions = {}) {
+    const tickActivityRevision = Number.isFinite(tickOptions.activityRevision)
+      ? tickOptions.activityRevision
+      : activityRevision;
+    const effectiveTickOptions = { ...tickOptions, activityRevision: tickActivityRevision };
     if (tickInFlight) {
       tickPending = true;
-      pendingForceLimits = pendingForceLimits || Boolean(tickOptions.forceLimits);
       pendingForceHistory = pendingForceHistory || Boolean(tickOptions.forceHistory);
+      pendingForceSelfSync = mergeSelfSyncSelection(pendingForceSelfSync, tickOptions.forceSelfSync);
+      pendingSourceSelfSync = mergeSelfSyncSelection(pendingSourceSelfSync, tickOptions.sourceSelfSync);
+      pendingTodayOnly = pendingTodayOnly === null
+        ? Boolean(tickOptions.todayOnly)
+        : pendingTodayOnly && Boolean(tickOptions.todayOnly);
+      mergePendingTargetScope(tickOptions);
+      pendingActivityRevision = pendingActivityRevision === null
+        ? tickActivityRevision
+        : Math.max(pendingActivityRevision, tickActivityRevision);
       return new Promise((resolve) => pendingWaiters.push(resolve));
     }
     tickInFlight = true;
     try {
-      await performTick(reason, tickOptions);
+      const initialResult = await performTick(reason, {
+        ...effectiveTickOptions,
+        acknowledgedSourceSync: sourceSyncQueue.acknowledge(effectiveTickOptions.forceSelfSync)
+      });
       while (tickPending && !stopped) {
-        const forceLimits = pendingForceLimits;
         const forceHistory = pendingForceHistory;
+        const forceSelfSync = pendingForceSelfSync;
+        const sourceSelfSync = pendingSourceSelfSync;
+        const todayOnly = pendingTodayOnly === true;
+        const targetClients = todayOnly && pendingTargetClients instanceof Set
+          ? [...pendingTargetClients]
+          : [];
+        const activityRevision = pendingActivityRevision;
+        const waiters = pendingWaiters;
+        pendingWaiters = [];
         tickPending = false;
-        pendingForceLimits = false;
         pendingForceHistory = false;
-        await performTick('coalesced', { forceLimits, forceHistory });
+        pendingForceSelfSync = null;
+        pendingSourceSelfSync = null;
+        pendingTodayOnly = null;
+        pendingTargetClients = null;
+        pendingActivityRevision = null;
+        const acknowledgedSourceSync = sourceSyncQueue.acknowledge(forceSelfSync);
+        const result = await performTick('coalesced', {
+          forceHistory,
+          forceSelfSync,
+          sourceSelfSync,
+          acknowledgedSourceSync,
+          todayOnly,
+          targetClients,
+          ...(activityRevision === null ? {} : { activityRevision })
+        });
+        resolveWaiters(waiters, result === true);
       }
+      return initialResult === true;
     } finally {
       tickInFlight = false;
-      if (stopped || !tickPending) resolvePendingWaiters();
+      if (stopped && pendingWaiters.length > 0) {
+        const waiters = pendingWaiters;
+        pendingWaiters = [];
+        resolveWaiters(waiters, false);
+      }
     }
   }
 
-  function scheduleTick(reason) {
+  function recordWatchClients(eventClients) {
+    if (Array.isArray(eventClients)) {
+      if (eventClients.length === 0) scheduledWatchNeedsFullScan = true;
+      else for (const client of eventClients) scheduledWatchClients.add(client);
+    }
+  }
+
+  function takeWatchClients(additionalClients = []) {
+    const targetClients = scheduledWatchNeedsFullScan
+      ? []
+      : [...new Set([...scheduledWatchClients, ...additionalClients])];
+    scheduledWatchClients.clear();
+    scheduledWatchNeedsFullScan = false;
+    return targetClients;
+  }
+
+  function scheduleTick(reason, eventClients) {
     if (stopped) return;
+    recordWatchClients(eventClients);
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
       // Re-arm instead of queueing onto the in-flight tick: the coalesce path
       // would re-run immediately on completion, stacking scans back-to-back.
       if (tickInFlight) { scheduleTick(reason); return; }
-      runTick(reason, { todayOnly: true });
+      // A raw source event means that client's synced cache may now be stale, so
+      // its sync drops to the short floor instead of waiting out the idle
+      // cadence. Its cache is deliberately outside the watcher, so a sync here
+      // cannot create the issue #15 self-trigger loop.
+      runTick(reason, {
+        todayOnly: true,
+        targetClients: takeWatchClients(),
+        sourceSelfSync: sourceSyncQueue.takeDue()
+      });
     }, watchDebounceMs);
   }
 
-  function setupWatchers() {
-    if (!watchEnabled) return;
-    const dirs = watchPathsForClients(clients);
-    if (dirs.length === 0) {
-      log('No watchable client data directories found; relying on fallback interval only.');
-      return;
-    }
-    try {
-      const ignored = watchIgnoreMatcher(clients);
-      const watcher = chokidar.watch(dirs, {
-        ignoreInitial: true,
-        persistent: true,
-        usePolling: true,
-        interval: 2000,
-        binaryInterval: 5000,
-        ...(ignored ? { ignored } : {}),
-        awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 200 }
-      });
-      watcher.on('all', (event, filePath) => scheduleTick(`watch:${event}:${path.basename(filePath || '')}`));
-      watcher.on('error', (error) => log(`chokidar error: ${error.message}`));
-      watchers.push(watcher);
-      for (const dir of dirs) log(`Watching ${dir} (polling 2s)`);
-    } catch (error) {
-      log(`Cannot watch ${dirs.join(', ')}: ${error.message}`);
-    }
-  }
-
-  function loop() {
-    if (stopped) return;
-    // Full scan at least once per FULL_SCAN_INTERVAL_MS so the anchor
-    // does not drift from reality over a long-running session.
-    // lastFullScanAt === 0 means no valid timestamp exists (cold start,
-    // unparseable, or future timestamp) — force a full scan immediately.
-    const fullScanDue = lastFullScanAt === 0 || Date.now() - lastFullScanAt >= FULL_SCAN_INTERVAL_MS;
-    const anchorToday = Boolean(!fullScanDue && anchor && anchor.dateKey === localTodayKey());
-    runTick('interval', anchorToday ? { todayOnly: true, refreshWsl: true } : {}).finally(() => {
-      if (stopped) return;
-      intervalTimer = setTimeout(loop, intervalMs);
-    });
-  }
-
-  function stop() {
-    if (stopped) return;
-    stopped = true;
-    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
-    if (intervalTimer) { clearTimeout(intervalTimer); intervalTimer = null; }
-    clearScheduledResetBoundary();
+  // chokidar's close() returns a promise, but only after an O(N) synchronous
+  // pass that walks every watched entry and closes every fs.watch handle inline,
+  // so on a tree the size of ~/.claude/projects it blocks the caller for as long
+  // as that takes. Callers that must not overlap an old watcher with a new one
+  // (mode switches) pay that cost; the quit path skips it via
+  // stop({ skipCloseWatchers }) and lets the descriptors go with the process.
+  function closeWatchers() {
     for (const watcher of watchers) {
       try { watcher.close(); } catch (_) {}
     }
     watchers.length = 0;
   }
 
+  function handleWatchError(error) {
+    log(`chokidar error: ${error.message}`);
+    if (stopped || watchUsePolling || watchNativeForced || watchDescriptorFallback) return;
+    if (!WATCH_DESCRIPTOR_ERROR_CODES.has(error?.code)) return;
+    watchDescriptorFallback = true;
+    watchFallbackCode = error.code;
+    emitDiagnosticEvent({
+      subsystem: 'watcher',
+      code: 'watcher-polling-fallback',
+      detailCode: error.code
+    });
+    log(`Native file events unavailable (${error.code}); falling back to 2s polling.`);
+    // Rebuilding from inside chokidar's own error emit would close the watcher
+    // mid-dispatch, so hand it to the next tick of the loop instead.
+    setImmediate(() => {
+      if (stopped) return;
+      watchedDirectoryKey = null;
+      setupWatchers();
+    });
+  }
+
+  function setupWatchers() {
+    if (!watchEnabled) return;
+    // Canonicalise before anything derives from these roots, so the paths handed
+    // to chokidar and the paths clientsForWatchPath matches against are the same
+    // strings. Resolving only one of the two would silently break attribution.
+    // One dirExists sweep feeds both maps: probing twice would let a directory
+    // created between the sweeps land in the watch list and not the attribution
+    // list, or the reverse.
+    const watchRoots = watchClientRootsForClients(clients);
+    const rootsByClient = Object.fromEntries(
+      Object.entries(watchRoots)
+        .map(([client, dirs]) => [client, dirs.map(canonicalWatchPath)])
+    );
+    // Watch targets and attribution prefixes are the same list everywhere except
+    // a custom Copilot exporter, whose parent must be watched without becoming a
+    // copilot prefix. Canonicalised through the same function so both still
+    // compare equal to the paths chokidar reports.
+    const attributionRootsByClient = Object.fromEntries(
+      Object.entries(watchAttributionRootsForClients(clients, watchRoots))
+        .map(([client, dirs]) => [client, dirs.map(canonicalWatchPath)])
+    );
+    // A subset of the same roots, matched separately so a write to a client's
+    // parse-local data cannot pass for a write to its self-sync source.
+    const sourceSyncRootsByClient = Object.fromEntries(
+      Object.entries(selfSyncSourceRootsForClients(clients))
+        .map(([client, dirs]) => [client, dirs.map(canonicalWatchPath)])
+    );
+    const dirs = [...new Set(Object.values(rootsByClient).flat())];
+    const directoryKey = dirs.join('\0');
+    if (directoryKey === watchedDirectoryKey) return;
+    closeWatchers();
+    if (dirs.length === 0) {
+      watchedDirectoryKey = directoryKey;
+      lastWatchFailureCode = null;
+      log('No watchable client data directories found; relying on fallback interval only.');
+      return;
+    }
+    const usePolling = watchUsePolling || watchDescriptorFallback;
+    try {
+      const ignored = watchIgnoreMatcher(clients);
+      const watcher = chokidar.watch(dirs, watcherOptions(usePolling, ignored));
+      watcher.on('all', (event, filePath) => {
+        // The quit path leaves the watcher open (see stop), so events can still
+        // arrive after the collector is done with them.
+        if (stopped) return;
+        activityRevision += 1;
+        if (tickPending) {
+          pendingActivityRevision = pendingActivityRevision === null
+            ? activityRevision
+            : Math.max(pendingActivityRevision, activityRevision);
+        }
+        const eventClients = clientsForWatchPath(filePath, attributionRootsByClient);
+        for (const client of clientsForWatchPath(filePath, sourceSyncRootsByClient)) {
+          sourceSyncQueue.record(client);
+        }
+        if (watchTriggersCollection) {
+          scheduleTick(
+            `watch:${event}:${path.basename(filePath || '')}`,
+            eventClients
+          );
+        } else recordWatchClients(eventClients);
+      });
+      watcher.on('error', handleWatchError);
+      watchers.push(watcher);
+      watchedDirectoryKey = directoryKey;
+      lastWatchFailureCode = null;
+      for (const dir of dirs) log(`Watching ${dir} (${usePolling ? 'polling 2s' : 'native events'})`);
+    } catch (error) {
+      watchedDirectoryKey = null;
+      lastWatchFailureCode = 'watcher-rebuild-failed';
+      emitDiagnosticEvent({ subsystem: 'watcher', code: 'watcher-rebuild-failed' });
+      log(`Cannot watch ${dirs.join(', ')}: ${error.message}`);
+    }
+  }
+
+  function loop() {
+    if (stopped) return;
+    const activityRevisionAtStart = activityRevision;
+    // Native watchers are an optimization, not the source of truth. Always
+    // retain the hourly reconciliation path for missed events, newly created
+    // client directories, WSL-only activity, and cross-day metadata refreshes.
+    const fullScanDue = lastFullScanAt === 0 || Date.now() - lastFullScanAt >= FULL_SCAN_INTERVAL_MS;
+    if (
+      intervalRequiresActivity &&
+      initialCollectionComplete &&
+      !fullScanDue &&
+      activityRevisionAtStart <= collectedActivityRevision
+    ) {
+      intervalTimer = setTimeout(loop, intervalMs);
+      return;
+    }
+    // Full scan at least once per FULL_SCAN_INTERVAL_MS so the anchor
+    // does not drift from reality over a long-running session.
+    // lastFullScanAt === 0 means no valid timestamp exists (cold start,
+    // unparseable, or future timestamp) — force a full scan immediately.
+    const anchorToday = Boolean(!fullScanDue && anchor && anchor.dateKey === localTodayKey());
+    const sourceSelfSync = intervalRequiresActivity ? sourceSyncQueue.takeDue() : null;
+    const targetClients = intervalRequiresActivity ? takeWatchClients(selfSyncedClients) : [];
+    runTick('interval', {
+      ...(anchorToday ? { todayOnly: true, refreshWsl: true, targetClients } : {}),
+      ...(sourceSelfSync ? { sourceSelfSync } : {}),
+      activityRevision: activityRevisionAtStart
+    }).finally(() => {
+      if (stopped) return;
+      intervalTimer = setTimeout(loop, intervalMs);
+    });
+  }
+
+  // Stays synchronous and never returns a promise: startMode() and friends rely
+  // on stop() having severed the old collector by the time it returns. Setting
+  // `stopped` is what does the severing, so a watcher left alive by
+  // skipCloseWatchers still cannot drive a tick.
+  function stop(options = {}) {
+    if (stopped) return;
+    stopped = true;
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+    if (intervalTimer) { clearTimeout(intervalTimer); intervalTimer = null; }
+    sourceSyncQueue.stop();
+    if (!options.skipCloseWatchers) closeWatchers();
+    watchedDirectoryKey = null;
+  }
+
+  function getDiagnostics() {
+    const watchMode = !watchEnabled
+      ? 'disabled'
+      : (watchUsePolling || watchDescriptorFallback ? 'polling' : 'native');
+    const state = stopped
+      ? 'stopped'
+      : tickInFlight
+        ? 'running'
+        : lastTickFailureCode
+          ? 'failed'
+          : 'idle';
+    return {
+      state,
+      collectionMode: watchTriggersCollection ? 'live' : intervalRequiresActivity ? 'smart' : 'interval',
+      intervalMs,
+      watchDebounceMs,
+      watchEnabled,
+      watchMode,
+      watchFallbackCode,
+      lastWatchFailureCode,
+      tickInFlight,
+      tickPending,
+      lastTickReasonCode,
+      lastTickScope,
+      lastTickAttemptAt: timestampOrNull(lastTickAttemptAt),
+      lastTickSuccessAt: timestampOrNull(lastTickSuccessAt),
+      lastTickFailureAt: timestampOrNull(lastTickFailureAt),
+      lastTickDurationMs,
+      lastFullScanAt: timestampOrNull(lastFullScanAt),
+      lastHistoryAttemptAt: timestampOrNull(lastHistoryAttemptAt),
+      lastHistorySuccessAt: timestampOrNull(lastHistorySuccessAt),
+      lastHistoryFailureCode,
+      lastHistoryScanDurationMs,
+      lastFailureCode: lastTickFailureCode,
+      wslStatus: cloneDiagnosticValue(wslStatusAnchor)
+    };
+  }
+
   setupWatchers();
   loop();
 
-  return { stop, tick: (reason = 'manual', tickOptions = {}) => runTick(reason, tickOptions) };
+  // A rescan of one tool. Was cursor-only because a Cursor sign-in was the only
+  // caller; the machinery underneath was always per-client, so the guard was a
+  // narrower contract than the implementation. `targetClients` keeps the scan to
+  // the partition being asked about instead of every client's today.
+  function refreshClient(clientId, refreshOptions = {}) {
+    const normalized = String(clientId || '').trim().toLowerCase();
+    if (!normalized || !trackedClients.has(normalized)) {
+      throw new TypeError(`Unsupported targeted usage client: ${normalized || '(empty)'}`);
+    }
+    return runTick(`client:${normalized}`, {
+      todayOnly: true,
+      targetClients: [normalized],
+      // Only the self-synced clients have a sync to force; naming any other here
+      // would be read by nothing.
+      forceSelfSync: refreshOptions.forceSync === true && SELF_SYNCED_CLIENTS.has(normalized) ? [normalized] : null
+    });
+  }
+
+  return {
+    getDiagnostics,
+    refreshClient,
+    stop,
+    tick: (reason = 'manual', tickOptions = {}) => runTick(reason, tickOptions)
+  };
 }
 
 module.exports = {
@@ -1509,10 +2830,20 @@ module.exports = {
   projectPathFromJsonl,
   collectHistoryOnce,
   collectUsageOnce,
+  clientActivityDaysFromHistory,
   clientDataDirPresence,
+  clientDiagnosticRoots,
+  visibleDiagnosticRoots,
+  clientSourceChecks,
+  clientSourceRoots,
+  clientsForWatchPath,
+  clientWatchCandidates,
   computePeriodWindows,
+  collectorAnchorTrust,
   configFingerprint,
+  deriveClientHealth,
   deriveClientStatus,
+  mergeClientActivityDays,
   wslPeriodsForPreview,
   statusFromSignals,
   decideResolver,
@@ -1531,9 +2862,19 @@ module.exports = {
   resolvePlatformBinary,
   resolvePromaPricing,
   resetPromaPricingCache,
+  resolveWatchUsePolling,
+  selfSyncSourceRootsForClients,
+  // The process-wide sync throttle this module drives. Exported so a test can
+  // read or pin a client's floor directly instead of inferring it from tick
+  // timings; the collector never takes a second instance.
+  selfSyncThrottle,
   shouldIncludeHistory,
   startCollector,
   tokscaleCommand,
+  tokscaleClientFilter,
+  TOKSCALE_CLIENT_ALIASES,
+  watchAttributionRootsForClients,
+  watcherOptions,
   watchIgnoreMatcher,
   watchPathsForClients
 };

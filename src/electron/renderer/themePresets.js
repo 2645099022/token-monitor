@@ -61,9 +61,9 @@
   // listed here but present in clientColors are appended after these, then the
   // synthetic "default" fallback is shown last.
   const VENDOR_ORDER = [
-    'claude', 'codex', 'hermes', 'opencode', 'openclaw', 'cline', 'cursor',
+    'claude', 'codex', 'hermes', 'opencode', 'openrouter', 'openclaw', 'cline', 'cursor',
     'gemini', 'antigravity', 'kimi', 'qwen', 'grok', 'copilot', 'pi', 'zed', 'kilocode', 'micode', 'zcode', 'kiro', 'codebuddy', 'workbuddy', 'proma', 'deepseek', 'xai', 'meta', 'mistral',
-    'moonshot', 'zai', 'zaiteam', 'cohere', 'xiaomi', 'minimax', 'doubao', 'volcengine', 'qoder', 'ollama'
+    'moonshot', 'zai', 'zaiteam', 'cohere', 'xiaomi', 'minimax', 'doubao', 'hunyuan', 'volcengine', 'qoder', 'ollama', 'thirdparty'
   ];
 
   // Display labels for every vendor in the clientColors map. The widget also
@@ -72,8 +72,9 @@
   const VENDOR_LABELS = {
     claude: 'Claude Code',
     codex: 'Codex',
-    hermes: 'Hermes',
+    hermes: 'Hermes Agent',
     opencode: 'OpenCode',
+    openrouter: 'OpenRouter',
     openclaw: 'OpenClaw',
     cline: 'Cline',
     cursor: 'Cursor',
@@ -103,9 +104,11 @@
     xiaomi: 'Xiaomi',
     minimax: 'MiniMax',
     doubao: 'Doubao',
+    hunyuan: 'Hunyuan',
     volcengine: 'Volcengine',
     qoder: 'Qoder',
     ollama: 'Ollama',
+    thirdparty: 'Third-party APIs',
     default: 'Default'
   };
 

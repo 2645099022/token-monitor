@@ -2,6 +2,9 @@
 
 const { normalizeLimitProvider } = require('./limits');
 const { hashKey } = require('./hashKey');
+const { runWithProbeDeadline } = require('./probeDeadline');
+
+const ZAI_FETCH_TIMEOUT_MS = 12_000;
 
 const ZAI_REGIONS = {
   global: {
@@ -218,7 +221,13 @@ function parseZaiUsage(quotaBody, subscriptionBody = null) {
   for (const limit of limits) {
     if (!limit || typeof limit !== 'object') continue;
     const type = String(limit.type || limit.limit_type || '').trim().toUpperCase();
+    // GLM coding-plan windows can arrive as CREDIT_LIMIT in addition to the
+    // legacy TOKENS_LIMIT; both share the same fields and unit/number window
+    // encodings, so CREDIT_LIMIT is treated as a token-window type. MCP stays
+    // on the TIME_LIMIT path below.
     if (type === 'TOKENS_LIMIT' && zaiUsedPercent(limit) !== null) {
+      tokenLimits.push(limit);
+    } else if (type === 'CREDIT_LIMIT' && zaiUsedPercent(limit) !== null) {
       tokenLimits.push(limit);
     } else if (type === 'TIME_LIMIT' && zaiUsedPercent(limit) !== null) {
       timeLimit = limit;
@@ -264,20 +273,24 @@ function parseZaiUsage(quotaBody, subscriptionBody = null) {
 }
 
 async function fetchJson(url, key, deps = {}) {
-  const response = await (deps.fetch || fetch)(url, {
-    headers: {
-      Authorization: `Bearer ${key}`,
-      Accept: 'application/json'
+  const deadlineMs = Number(deps.zaiFetchTimeoutMs || deps.fetchTimeoutMs || ZAI_FETCH_TIMEOUT_MS);
+  return runWithProbeDeadline(async ({ signal }) => {
+    const response = await (deps.fetch || fetch)(url, {
+      headers: {
+        Authorization: `Bearer ${key}`,
+        Accept: 'application/json'
+      },
+      signal
+    });
+    if (!response.ok) {
+      const error = new Error(`${url} returned ${response.status}`);
+      error.status = response.status === 401 || response.status === 403
+        ? 'unauthorized'
+        : response.status === 429 ? 'sourceRateLimited' : 'unavailable';
+      throw error;
     }
-  });
-  if (!response.ok) {
-    const error = new Error(`${url} returned ${response.status}`);
-    error.status = response.status === 401 || response.status === 403
-      ? 'unauthorized'
-      : response.status === 429 ? 'sourceRateLimited' : 'unavailable';
-    throw error;
-  }
-  return response.json();
+    return response.json();
+  }, { signal: deps.signal, deadlineMs });
 }
 
 async function fetchZaiLimits(options = {}, deps = {}) {
@@ -318,7 +331,7 @@ async function fetchZaiLimits(options = {}, deps = {}) {
     return normalizeLimitProvider({
       provider: 'zai',
       source: 'api',
-      status: error?.status || 'unavailable',
+      status: error?.status === 'timeout' ? 'unavailable' : error?.status || 'unavailable',
       updatedAt,
       windows: [],
       region
@@ -327,6 +340,7 @@ async function fetchZaiLimits(options = {}, deps = {}) {
 }
 
 module.exports = {
+  ZAI_FETCH_TIMEOUT_MS,
   ZAI_QUOTA_URL,
   ZAI_SUBSCRIPTION_URL,
   zaiToken,

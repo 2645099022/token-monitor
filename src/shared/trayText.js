@@ -4,10 +4,16 @@
   const currency = (typeof require === 'function')
     ? require('./currency')
     : (root && root.TokenMonitorCurrency);
-  const api = factory(currency);
+  const balanceDisplay = (typeof require === 'function')
+    ? require('./limitBalanceDisplay')
+    : (root && root.TokenMonitorLimitBalanceDisplay);
+  const compactTokens = (typeof require === 'function')
+    ? require('./compactTokens')
+    : (root && root.TokenMonitorCompactTokens);
+  const api = factory(currency, balanceDisplay, compactTokens);
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.TokenMonitorTrayText = api;
-})(typeof window !== 'undefined' ? window : null, function createTrayText(currency) {
+})(typeof window !== 'undefined' ? window : null, function createTrayText(currency, balanceDisplay, compactTokens) {
   const { formatCurrencyFromUsd } = currency;
   const BARS_TRAY_ICON_MODES = new Set(['bars', 'barsSession', 'barsWeekly', 'barsAllSessions']);
 
@@ -16,15 +22,53 @@
   }
 
   function isGeneratedTrayIconMode(contentMode) {
-    return contentMode === 'limitsAllSessions' || isBarsTrayIconMode(contentMode);
+    return contentMode === 'limitsAllSessions' || contentMode === 'custom' || isBarsTrayIconMode(contentMode);
   }
 
-  function formatCompactNumber(value) {
+  // Only macOS renders a title next to the tray icon; elsewhere the text lives
+  // in the tooltip. Both the tray itself and the settings preview read this so
+  // the preview cannot promise text the platform will never draw.
+  function trayShowsTitle(platform) {
+    return platform === 'darwin';
+  }
+
+  function formatCompactNumber(value, options = {}) {
+    if (compactTokens?.formatCompactTokens) {
+      return compactTokens.formatCompactTokens(
+        value,
+        options.compactTokenUnits,
+        options.locale || options.language || 'en',
+        { style: 'tray' }
+      );
+    }
     const n = Math.round(Number(value) || 0);
     if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
     return String(n);
+  }
+
+  function topClientFromMetric(values) {
+    let top = null;
+    let topValue = 0;
+    for (const [client, rawValue] of Object.entries(values || {})) {
+      const value = Number(rawValue);
+      if (!Number.isFinite(value) || value <= 0) continue;
+      if (!top || value > topValue) {
+        top = client;
+        topValue = value;
+      }
+    }
+    return top;
+  }
+
+  function pickUsageProviderId(stats, metric = 'tokens', period = 'today', availableIconIds) {
+    const values = stats?.periods?.[period] || {};
+    const costClient = metric === 'cost' ? topClientFromMetric(values.clientCosts) : null;
+    const client = costClient || topClientFromMetric(values.clients);
+    if (!client) return null;
+    if (!Array.isArray(availableIconIds)) return client;
+    return new Set(availableIconIds).has(client) ? client : null;
   }
 
   function csvValues(value) {
@@ -56,14 +100,18 @@
     return Number.isFinite(number) ? `${Math.round(Math.max(0, Math.min(100, number)))}%` : '';
   }
 
-  function remainingPercent(window) {
-    return limitFillPercent(window?.remainingPercent, window?.usedPercent, false);
+  // Credits windows carry money, not a wire percentage; derive one so a
+  // balance-only provider can still be picked and metered.
+  function remainingPercent(window, provider = null) {
+    return balanceDisplay.isCreditsWindow(window)
+      ? balanceDisplay.creditsMeterPercent(provider, window)
+      : limitFillPercent(window?.remainingPercent, window?.usedPercent, false);
   }
 
   function meteredWindows(provider, kind = '') {
     return (provider?.windows || []).filter((window) => {
       if (!window || window.showMeter === false || (kind && window.kind !== kind)) return false;
-      return remainingPercent(window) !== null;
+      return remainingPercent(window, provider) !== null;
     });
   }
 
@@ -80,7 +128,7 @@
     const canonical = windows.find((window) => canonicalLabels.has(String(window.label || '').trim().toLowerCase()));
     if (canonical) return canonical;
     return windows.reduce((pick, window) => (
-      !pick || remainingPercent(window) < remainingPercent(pick) ? window : pick
+      !pick || remainingPercent(window, provider) < remainingPercent(pick, provider) ? window : pick
     ), null);
   }
 
@@ -91,11 +139,17 @@
     const billing = preferredWindow(provider, 'billing');
     const primaryWindow = session || weekly || billing;
     if (!primaryWindow) return null;
+    const secondaryWindow = session ? weekly : null;
     return {
       provider: normalizedProviderId(provider.provider),
       providerRecord: provider,
       primaryWindow,
-      secondaryWindow: session ? weekly : null
+      secondaryWindow,
+      // Resolved remaining percentages. Credits windows carry no wire
+      // percentage, so consumers must read these instead of re-deriving from
+      // the raw window — doing so yields a fabricated 0%.
+      primaryPercent: remainingPercent(primaryWindow, provider),
+      secondaryPercent: secondaryWindow ? remainingPercent(secondaryWindow, provider) : null
     };
   }
 
@@ -109,10 +163,10 @@
       const selectedWindow = requestedKind
         ? preferredWindow(selection.providerRecord, requestedKind)
         : candidates.reduce((pick, window) => (
-            !pick || remainingPercent(window) < remainingPercent(pick) ? window : pick
+            !pick || remainingPercent(window, provider) < remainingPercent(pick, provider) ? window : pick
           ), null);
       if (!selectedWindow) continue;
-      const remaining = remainingPercent(selectedWindow);
+      const remaining = remainingPercent(selectedWindow, provider);
       if (!worst || remaining < worst.remaining) worst = { ...selection, selectedWindow, remaining };
     }
     return worst;
@@ -180,17 +234,18 @@
       for (const provider of byId.get(id) || []) {
         const selection = compactLimitSelection(provider);
         if (!selection) continue;
-        const remaining = remainingPercent(selection.primaryWindow);
-        const percent = limitFillPercent(
-          selection.primaryWindow.remainingPercent,
-          selection.primaryWindow.usedPercent,
-          Boolean(options.showLimitUsed)
-        );
-        const secondaryPercent = limitFillPercent(
-          selection.secondaryWindow?.remainingPercent,
-          selection.secondaryWindow?.usedPercent,
-          Boolean(options.showLimitUsed)
-        );
+        const showUsed = Boolean(options.showLimitUsed);
+        const remaining = remainingPercent(selection.primaryWindow, provider);
+        const modePercent = (window) => {
+          if (!balanceDisplay.isCreditsWindow(window)) {
+            return limitFillPercent(window?.remainingPercent, window?.usedPercent, showUsed);
+          }
+          const left = remainingPercent(window, provider);
+          if (left === null) return null;
+          return showUsed ? 100 - left : left;
+        };
+        const percent = modePercent(selection.primaryWindow);
+        const secondaryPercent = modePercent(selection.secondaryWindow);
         const candidate = {
           ...selection,
           selectedWindow: selection.primaryWindow,
@@ -228,7 +283,7 @@
   }
 
   function formatTrayText(stats, contentMode = 'tokens', currencyCode = 'USD', options = {}) {
-    if (contentMode === 'icon') return '';
+    if (contentMode === 'icon' || contentMode === 'custom') return '';
     if (contentMode === 'limitsAllSessions') return formatConfiguredSessionLimits(stats, options);
     if (isBarsTrayIconMode(contentMode)) {
       // Icon carries all the info; only show text if we have no limit data at all.
@@ -238,10 +293,10 @@
     const allTime = stats?.periods?.allTime || {};
     if (contentMode === 'cost') return formatCurrencyFromUsd(today.costUsd, currencyCode);
     if (contentMode === 'costAll') return formatCurrencyFromUsd(allTime.costUsd, currencyCode);
-    if (contentMode === 'tokensAll') return formatCompactNumber(allTime.totalTokens);
-    if (contentMode === 'bothAll') return `${formatCompactNumber(allTime.totalTokens)} · ${formatCurrencyFromUsd(allTime.costUsd, currencyCode)}`;
-    if (contentMode === 'both') return `${formatCompactNumber(today.totalTokens)} · ${formatCurrencyFromUsd(today.costUsd, currencyCode)}`;
-    return formatCompactNumber(today.totalTokens);
+    if (contentMode === 'tokensAll') return formatCompactNumber(allTime.totalTokens, options);
+    if (contentMode === 'bothAll') return `${formatCompactNumber(allTime.totalTokens, options)} · ${formatCurrencyFromUsd(allTime.costUsd, currencyCode)}`;
+    if (contentMode === 'both') return `${formatCompactNumber(today.totalTokens, options)} · ${formatCurrencyFromUsd(today.costUsd, currencyCode)}`;
+    return formatCompactNumber(today.totalTokens, options);
   }
 
   return {
@@ -254,7 +309,9 @@
     pickConfiguredLimitProviders,
     pickConfiguredSessionLimits,
     pickLimitProviderByKindPriority,
+    pickUsageProviderId,
     pickWorstLimit,
-    pickWorstLimitProvider
+    pickWorstLimitProvider,
+    trayShowsTitle
   };
 });

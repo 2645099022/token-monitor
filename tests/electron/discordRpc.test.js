@@ -15,6 +15,7 @@ function loadBuildPayload() {
     require(name) {
       if (name === '@xhayper/discord-rpc') return { Client: class {} };
       if (name === '../shared/currency') return require('../../src/shared/currency');
+      if (name === '../shared/compactTokens') return require('../../src/shared/compactTokens');
       return require(name);
     },
     setTimeout,
@@ -60,9 +61,24 @@ test('Discord Rich Presence uses Cline label and uploaded asset key', () => {
   assert.equal(payload.smallImageText, 'Cline');
 });
 
-test('Discord Rich Presence uses labels and asset keys for new tokscale clients', () => {
+test('Discord Rich Presence follows localized compact token units', () => {
   const buildPayload = loadBuildPayload();
-  for (const [client, label] of [['kimi', 'Kimi'], ['qwen', 'Qwen'], ['grok', 'Grok Build'], ['copilot', 'GitHub Copilot']]) {
+  const payload = buildPayload({
+    periods: {
+      today: {
+        totalTokens: 15_000,
+        costUsd: 0.125,
+        clients: { claude: 15_000 }
+      }
+    }
+  }, 'USD', 'localized', 'zh-TW');
+
+  assert.equal(payload.details, 'Claude · 1.5萬 tokens');
+});
+
+test('Discord Rich Presence uses labels and asset keys for tracked clients', () => {
+  const buildPayload = loadBuildPayload();
+  for (const [client, label] of [['hermes', 'Hermes Agent'], ['kimi', 'Kimi'], ['qwen', 'Qwen'], ['grok', 'Grok Build'], ['copilot', 'GitHub Copilot']]) {
     const payload = buildPayload({
       periods: {
         today: {

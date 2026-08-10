@@ -16,6 +16,132 @@
     return `${first}***${last}@${domain}`;
   }
 
+  function accountEmailOf(account) {
+    return String(account?.email || account?.accountEmail || '').trim();
+  }
+
+  // The account email as a limits surface may show it: masked when the display
+  // setting is on, and disambiguated when the visible form is not unique. Masking
+  // collapses distinct addresses (javis@example.com / jonas@example.com both read
+  // j***s@example.com), and one address can also hold several workspaces, so peers
+  // decide whether the caller's `suffix` has to be appended.
+  function accountEmailLabel(account, peers = [account], options = {}) {
+    const email = accountEmailOf(account);
+    if (!email) return '';
+    const maskEmail = options.maskEmail === true;
+    const visible = maskEmail ? maskEmailAddress(email) : email;
+    const normalized = visible.toLowerCase();
+    const collisions = (peers || []).filter((peer) => {
+      const peerEmail = accountEmailOf(peer);
+      if (!peerEmail) return false;
+      const peerVisible = maskEmail ? maskEmailAddress(peerEmail) : peerEmail;
+      return peerVisible.toLowerCase() === normalized;
+    }).length;
+    if (collisions <= 1) return visible;
+    const suffix = String(options.suffix || '').trim();
+    return suffix ? `${visible} · ${suffix}` : visible;
+  }
+
+  function codexAccountWorkspace(account, personalWorkspaceLabel = 'Personal') {
+    const workspace = String(account?.workspaceLabel || account?.accountName || '').trim();
+    if (workspace) return workspace;
+    return account?.workspaceKind === 'personal'
+      ? String(personalWorkspaceLabel || '').trim()
+      : '';
+  }
+
+  function accountStableSeed(account) {
+    return String(
+      account?.accountKey
+      || account?.workspaceAccountId
+      || account?.providerAccountId
+      || account?.id
+      || ''
+    ).trim();
+  }
+
+  // A short opaque fingerprint, used only to keep otherwise identical rows apart.
+  // Keys the collector already hashed are shown as-is; any other key may embed the
+  // address itself (Claude's CLI rows key on `email|organization`), so it is hashed
+  // here — a disambiguator must never echo the characters masking hides.
+  function accountStableFingerprint(account) {
+    const seed = accountStableSeed(account);
+    if (!seed) return '';
+    if (/^sha256:/i.test(seed)) return seed.slice(7).replace(/[^a-z0-9]/gi, '').toLowerCase();
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < seed.length; index += 1) {
+      hash = Math.imul(hash ^ seed.charCodeAt(index), 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, '0');
+  }
+
+  function codexAccountBaseDisplayLabel(account, peers, options) {
+    const workspace = codexAccountWorkspace(account, options.personalWorkspaceLabel);
+    const emailLabel = accountEmailLabel(account, peers, {
+      maskEmail: options.maskEmail === true,
+      suffix: workspace
+    });
+    return emailLabel || workspace;
+  }
+
+  function accountUniqueStableSuffix(account, peers) {
+    const fingerprint = accountStableFingerprint(account);
+    if (!fingerprint) return '';
+    const peerPrints = peers.map(accountStableFingerprint);
+    for (let length = Math.min(6, fingerprint.length); length <= fingerprint.length; length += 1) {
+      const prefix = fingerprint.slice(0, length);
+      if (peerPrints.filter((candidate) => candidate.slice(0, length) === prefix).length === 1) {
+        return prefix;
+      }
+    }
+    // Peers that fingerprint alike (the same key, or a hash collision) cannot be
+    // told apart by the key at all, so report no suffix and let the caller fall
+    // back to the row index rather than repeat an identical label.
+    return '';
+  }
+
+  // Two-stage disambiguation, shared by every provider: the descriptive label
+  // first, then an opaque fingerprint once descriptions repeat. A workspace or
+  // account name is not unique on its own — two masked addresses in the same
+  // workspace produce the same descriptive label.
+  function uniqueAccountLabel(account, peers, baseLabelFor, options = {}) {
+    const label = baseLabelFor(account);
+    if (!label) return '';
+
+    const collidingPeers = peers.filter(
+      (peer) => baseLabelFor(peer).toLowerCase() === label.toLowerCase()
+    );
+    if (collidingPeers.length <= 1) return label;
+    const stableSuffix = accountUniqueStableSuffix(account, collidingPeers);
+    if (stableSuffix) return `${label} · #${stableSuffix}`;
+    // Nothing stable to key on. The row index moves when providers reorder, so it
+    // is the last resort rather than the default.
+    return Number.isInteger(options.index) ? `${label} · #${options.index + 1}` : label;
+  }
+
+  function codexAccountDisplayLabel(account, accounts = [], options = {}) {
+    const peers = Array.isArray(accounts) && accounts.length > 0 ? accounts : [account];
+    return uniqueAccountLabel(
+      account,
+      peers,
+      (peer) => codexAccountBaseDisplayLabel(peer, peers, options),
+      { index: options.index }
+    );
+  }
+
+  // Default account title for providers that identify accounts by email or name.
+  function accountTitleLabel(account, peers = [account], options = {}) {
+    const resolvedPeers = Array.isArray(peers) && peers.length > 0 ? peers : [account];
+    const baseLabelFor = (peer) => {
+      const name = String(peer?.accountName || '').trim();
+      return accountEmailLabel(peer, resolvedPeers, {
+        maskEmail: options.maskEmail === true,
+        suffix: name
+      }) || name;
+    };
+    return uniqueAccountLabel(account, resolvedPeers, baseLabelFor, { index: options.index });
+  }
+
   function codexAccountMatchesProvider(account, provider) {
     if (!account || !provider || provider.provider !== 'codex') return false;
     const accountKey = String(account.accountKey || '').trim();
@@ -52,6 +178,9 @@
   }
 
   return {
+    accountEmailLabel,
+    accountTitleLabel,
+    codexAccountDisplayLabel,
     codexAccountIdForProvider,
     codexAccountMatchesProvider,
     isCodexLiveAccount,
