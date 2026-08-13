@@ -5,6 +5,7 @@
 
 // Portable (Node-free) usage-history core. Mirrors usage.js conventions so the
 // Cloudflare Worker can import it. Pure functions only — no I/O.
+const { REASONIX_CLIENT } = require('./reasonixPaths');
 
 function num(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -25,12 +26,13 @@ function normalizeTimeMetrics(value) {
   };
 }
 
-// Additive token components. `reasoning` is excluded on purpose: tokscale already
-// folds reasoning into `output`, so adding it would double-count (same rule as usage.js).
-function sumTokens(breakdown) {
+// Additive token components. Existing clients expose reasoning inside `output`,
+// but Reasonix emits it as a disjoint component.
+function sumTokens(breakdown, client = '') {
   if (!breakdown || typeof breakdown !== 'object') return 0;
   return num(breakdown.input) + num(breakdown.output)
-    + num(breakdown.cacheRead) + num(breakdown.cacheWrite);
+    + num(breakdown.cacheRead) + num(breakdown.cacheWrite)
+    + (String(client).trim().toLowerCase() === REASONIX_CLIENT ? num(breakdown.reasoning) : 0);
 }
 
 // Folds tokscale `graph` output (contributions[].clients[]) into a per-day shape where a
@@ -52,9 +54,12 @@ function parseGraphResult(raw) {
       if (!c || typeof c !== 'object') continue;
       const client = String(c.client || 'unknown');
       const model = String(c.modelId || c.model || c.model_id || 'unknown');
-      const t = sumTokens(c.tokens);
+      const t = sumTokens(c.tokens, client);
       const cst = num(c.cost);
-      const msg = num(c.messages);
+      // Reasonix's `messages` field is a provider request count, not user turns.
+      // Keep it out of Token Monitor's message/activity semantics; its tokens and
+      // cost still contribute normally to the history totals.
+      const msg = String(client).trim().toLowerCase() === REASONIX_CLIENT ? 0 : num(c.messages);
       tokens += t;
       cost += cst;
       messages += msg;
@@ -327,8 +332,8 @@ function stableJson(value) {
 // Compact, deterministic invalidation token for the full history payload. This
 // includes daily/monthly breakdowns (not just headline totals), stays portable
 // to the Worker runtime, and keeps /api/stats small.
-function historyRevision(history) {
-  const source = stableJson(coerceHistory(history));
+function stableRevision(value) {
+  const source = stableJson(value);
   let first = 0x811c9dc5;
   let second = 0x9e3779b9;
   for (let i = 0; i < source.length; i += 1) {
@@ -339,8 +344,38 @@ function historyRevision(history) {
   return `${(first >>> 0).toString(16).padStart(8, '0')}${(second >>> 0).toString(16).padStart(8, '0')}`;
 }
 
+function historyRevision(history) {
+  return stableRevision(coerceHistory(history));
+}
+
+// The aggregate History hash cannot detect attribution-only changes such as two
+// devices exchanging otherwise identical daily rows. Keep the public stats
+// payload small while ensuring renderer caches follow the per-device source of
+// each History record, including explicit missing/unavailable states.
+function deviceHistoryRevision(devices) {
+  const entries = (Array.isArray(devices) ? devices : [])
+    .map((record) => {
+      const deviceId = String(record?.deviceId || record?.id || '').trim();
+      if (!deviceId) return null;
+      const hasHistory = Object.prototype.hasOwnProperty.call(record || {}, 'history');
+      const hasAvailability = Object.prototype.hasOwnProperty.call(record || {}, 'historyAvailable');
+      return {
+        deviceId,
+        historyAvailable: hasAvailability ? record.historyAvailable === true : 'missing',
+        history: !hasHistory
+          ? 'missing'
+          : record.history === null
+            ? 'unavailable'
+            : historyRevision(record.history)
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.deviceId.localeCompare(right.deviceId));
+  return stableRevision(entries);
+}
+
 module.exports = {
   num, sumTokens, parseGraphResult, computeIntensities,
   computeStreaks, monthlyRollup, normalizeHistory, mergeHistories,
-  coerceHistory, historyPreview, historyRevision
+  coerceHistory, historyPreview, historyRevision, deviceHistoryRevision
 };
