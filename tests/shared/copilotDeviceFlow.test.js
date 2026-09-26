@@ -11,7 +11,7 @@ const {
   runCopilotDeviceFlowLogin,
   copilotLoginErrorMessage,
   isAllowedVerificationUrl
-} = require('../../src/shared/copilotDeviceFlow');
+} = require('../../src/shared/providers/copilot/deviceFlow');
 
 test('isAllowedVerificationUrl accepts GitHub device-flow URLs only', () => {
   assert.equal(isAllowedVerificationUrl('https://github.com/login/device?user_code=ABCD-1234'), true);
@@ -252,4 +252,26 @@ test('main process Copilot sign-in owns controller cleanup per flow', () => {
   assert.match(cancelHandler, /if \(flowId && copilotLoginFlowId && flowId !== copilotLoginFlowId\) return \{ ok: true \};/);
   assert.match(cancelHandler, /const controller = copilotLoginController;/);
   assert.match(cancelHandler, /if \(copilotLoginController === controller\) \{/);
+});
+
+// Same bound applies once the head has arrived. Without it a stalled body leaves the
+// sign-in hanging with no way back to the timedOut/cancelled mapping below.
+test('requestDeviceCode bounds a body that stalls after the headers', { timeout: 5000 }, async () => {
+  await assert.rejects(
+    () => requestDeviceCode('', {
+      fetchTimeoutMs: 1,
+      fetch: async (_url, init) => ({
+        ok: true,
+        status: 200,
+        json: () => new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            reject(error);
+          }, { once: true });
+        })
+      })
+    }),
+    (error) => error?.status === 'timedOut'
+  );
 });

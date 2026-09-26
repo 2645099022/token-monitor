@@ -7,7 +7,7 @@ const test = require('node:test');
 
 const charts = require('../../src/electron/renderer/usageCharts');
 const {
-  clientColors, modelVendorFor, modelColor, clampDaily,
+  clientColors, fallbackModelColors, modelVendorFor, modelColor, clampDaily,
   dailyBarsChart, candleChart, contribHeatmap, statsCards,
   barsChartSvg, candleChartSvg, heatmapSvg, statsCardsHtml, statCardColumnWidths
 } = charts;
@@ -26,7 +26,9 @@ test('usageCharts exports every symbol app.js destructures from it', () => {
 test('clientColors carries the known palette and a default', () => {
   assert.equal(clientColors.claude, '#cc7c5e');
   assert.equal(clientColors.codex, '#49a3b0');
-  assert.equal(clientColors.cline, '#323B43');
+  assert.equal(clientColors.cline, '#9D4EDD');
+  assert.equal(clientColors.cherrystudio, '#EA5E5D');
+  assert.equal(clientColors.commandcode, '#8C4EDD');
   assert.equal(clientColors.volcengine, '#006EFF');
   assert.equal(clientColors.qoder, '#2ADB5C');
   assert.equal(clientColors.ollama, '#888888');
@@ -34,13 +36,55 @@ test('clientColors carries the known palette and a default', () => {
   assert.equal(typeof clientColors.default, 'string');
 });
 
+test('fallbackModelColors never collides with a named provider color', () => {
+  const providerColors = new Set(
+    Object.entries(clientColors)
+      .filter(([key]) => key !== 'default')
+      .map(([, color]) => color.toLowerCase())
+  );
+  for (const color of fallbackModelColors) {
+    assert.ok(!providerColors.has(color.toLowerCase()), `${color} collides with a named provider color`);
+  }
+});
+
 test('modelVendorFor maps families and modelColor falls back deterministically', () => {
   assert.equal(modelVendorFor('claude-sonnet-4'), 'claude');
   assert.equal(modelVendorFor('gpt-5'), 'codex');
+  assert.equal(modelVendorFor('muse-spark-1.2-contributor-free'), 'meta');
+  assert.equal(modelVendorFor('muse-spark-1.3-contributor-free'), 'meta');
+  assert.equal(modelVendorFor('opencode/muse-spark-1.3-contributor-free'), 'meta');
   assert.equal(modelVendorFor('kimi-k2'), 'kimi');
   assert.equal(modelVendorFor('moonshot-v1'), 'kimi');
+  assert.equal(modelVendorFor('k2d6-agent'), 'kimi');
+  assert.equal(modelVendorFor('k3-agent'), 'kimi');
+  assert.equal(modelVendorFor('k3-agent-swarm'), 'kimi');
+  assert.equal(modelVendorFor('qmodel-38max'), 'qwen');
+  assert.equal(modelVendorFor('qmodel_latest'), 'qwen');
+  assert.equal(modelVendorFor('dashscope_qmodel'), 'qwen'); // via qmodel, not a dashscope alias
+  assert.equal(modelVendorFor('dashscope_qwen3_coder'), 'qwen');
+  assert.equal(modelVendorFor('dashscope_qwen_max_latest'), 'qwen');
+  assert.equal(modelVendorFor('dashscope/kimi-k2'), 'kimi'); // must not be swallowed by a dashscope alias
+  assert.equal(modelVendorFor('qwen3-max'), 'qwen');
+  assert.equal(modelVendorFor('nemotron-70b-instruct'), 'nvidia');
+  assert.equal(modelVendorFor('nvidia/nemotron-nano-9b-v2'), 'nvidia');
+  assert.equal(modelColor('qmodel-38max'), clientColors.qwen);
+  assert.equal(modelColor('nemotron-70b-instruct'), clientColors.nvidia);
+  assert.equal(modelVendorFor('stepfun'), 'stepfun');
+  assert.equal(modelVendorFor('step-2'), 'stepfun');
+  assert.equal(modelVendorFor('step-1-flash'), 'stepfun');
+  assert.equal(modelColor('step-2'), clientColors.stepfun);
+  // Kimi's coding-plan catalog serves bare `k2`/`k3` ids with no `kimi` prefix,
+  // and the token has to stay delimited so a name that merely contains one is
+  // left unclassified.
+  assert.equal(modelVendorFor('k3'), 'kimi');
+  assert.equal(modelVendorFor('k3-256k'), 'kimi');
+  assert.equal(modelVendorFor('kimi/k3-256k'), 'kimi');
+  assert.equal(modelVendorFor('kimi-for-coding'), 'kimi');
+  assert.equal(modelVendorFor('sk3-256k'), null);
+  assert.equal(modelVendorFor('k3flash'), null);
   assert.equal(modelVendorFor('doubao-seed-1.6'), 'doubao');
   assert.equal(modelVendorFor('hy3'), 'hunyuan');
+  assert.equal(modelVendorFor('hy4-preview'), 'hunyuan');
   assert.equal(modelVendorFor('hunyuan-t1'), 'hunyuan');
   assert.equal(modelColor('claude-opus'), clientColors.claude);
   assert.equal(modelColor('hy3'), clientColors.hunyuan);

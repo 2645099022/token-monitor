@@ -11,7 +11,8 @@ const {
   clientPeriodUsage,
   exactDevice,
   friendlyPath,
-  hasClientHealth
+  hasClientHealth,
+  clientHealthPlaceholderDetail
 } = require('../../src/electron/renderer/clientHealthPresentation');
 
 const entry = (overrides = {}) => ({
@@ -44,11 +45,39 @@ test('health summary falls back rather than hiding incomplete or unknown clients
   });
 });
 
-test('a client the device never reported gets no panel and no disclosure', () => {
+test('clientHealthDetail requires an actual health entry', () => {
   assert.equal(clientHealthDetail(health({ codex: entry() }), 'claude'), null);
   assert.equal(clientHealthDetail(null, 'codex'), null);
   assert.equal(hasClientHealth(health({ codex: entry() }), 'CODEX'), true);
   assert.equal(hasClientHealth(health({ codex: entry() }), 'claude'), false);
+});
+
+test('a client without health data can show on-demand source details', () => {
+  const detail = clientHealthPlaceholderDetail({
+    sources: [{ id: 'codebuddy-data', dir: '/Users/x/.codebuddy', exists: true }],
+    usage: {
+      today: { tokens: 0, cost: 0 },
+      month: { tokens: 0, cost: 0 },
+      allTime: { tokens: 0, cost: 0 }
+    }
+  });
+  assert.equal(detail.tone, 'muted');
+  assert.equal(detail.groups[0].state, 'detected');
+  assert.deepEqual(detail.groups[0].checks, [{
+    id: 'codebuddy-data',
+    exists: true,
+    paths: [{ dir: '/Users/x/.codebuddy', exists: true, pending: false }]
+  }]);
+  assert.equal(detail.groups[1].state, 'notTracked');
+  assert.deepEqual(detail.groups[2].periods.map(({ period, tokens }) => ({ period, tokens })), [
+    { period: 'today', tokens: 0 },
+    { period: 'month', tokens: 0 },
+    { period: 'allTime', tokens: 0 }
+  ]);
+  assert.equal(
+    clientHealthPlaceholderDetail({ collectionState: 'waiting' }).groups[1].state,
+    'waiting'
+  );
 });
 
 test('detail always has source, collection, and data groups with raw values', () => {
@@ -112,6 +141,18 @@ test('pending local paths stay neutral without changing canonical truth', () => 
   ]);
 });
 
+test('custom source identity survives the canonical source merge', () => {
+  const source = clientHealthGroups(entry({
+    source: { state: 'missing', detectedCount: 0, checkedCount: 1, checks: [{ id: 'custom-scan-path', exists: false }] }
+  }), {
+    sources: [{ id: 'custom-scan-path', dir: '/Volumes/archive/codex', exists: false, custom: true }]
+  })[0];
+
+  assert.deepEqual(source.checks[0].paths, [
+    { dir: '/Volumes/archive/codex', exists: false, pending: false, custom: true }
+  ]);
+});
+
 test('pathless and probe-only checks survive the source merge', () => {
   const source = clientHealthGroups(entry({
     source: { state: 'detected', detectedCount: 1, checkedCount: 2, checks: [{ id: 'wsl-home', exists: true }] }
@@ -124,10 +165,10 @@ test('pathless and probe-only checks survive the source merge', () => {
 test('diagnostics are assigned to semantic groups and unavailable noise stays quiet', () => {
   assert.deepEqual(clientHealthNotes(entry({
     collection: { state: 'failed' },
-    diagnostics: [{ code: 'sync-timeout' }, { code: 'no-usage-observed' }, { code: 'invented' }],
+    diagnostics: [{ code: 'sync-lock-present' }, { code: 'no-usage-observed' }, { code: 'invented' }],
     overall: 'attention'
   })), [
-    { code: 'sync-timeout', group: 'collection', tone: 'warn' },
+    { code: 'sync-lock-present', group: 'collection', tone: 'warn' },
     { code: 'no-usage-observed', group: 'data', tone: 'muted' }
   ]);
   assert.deepEqual(clientHealthNotes(entry({

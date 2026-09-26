@@ -13,15 +13,18 @@ const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 
 const { emptyPeriod } = require('../../src/shared/usage');
+const { localDayKey } = require('../../src/shared/history');
 const {
   clampTimerDelayMs, SYNC_MIN_INTERVAL_MS, SYNC_SOURCE_EVENT_MIN_INTERVAL_MS
 } = require('../../src/shared/selfSyncThrottle');
 
 const { installSourceEnvGuard } = require('../helpers/sourceEnv');
+const { installInProcessWatchHost } = require('../helpers/watchHost');
 
 const collectorPath = require.resolve('../../src/shared/collector');
 
 installSourceEnvGuard(test);
+installInProcessWatchHost(test);
 
 function freshCollector() {
   delete require.cache[collectorPath];
@@ -84,7 +87,7 @@ test('watchPathsForClients excludes the tokscale cache dirs our own syncs write'
   }
 });
 
-test('watchPathsForClients watches both MiMo Code roots tokscale scans', () => {
+test('watchPathsForClients watches both MiMo roots tokscale scans', () => {
   // Tokscale unions the XDG data dir with orca's hook-sandbox copy, and
   // that copy can hold sessions the XDG one is missing. Watching only XDG would
   // leave an orca-driven install without the seconds-level refresh.
@@ -94,9 +97,40 @@ test('watchPathsForClients watches both MiMo Code roots tokscale scans', () => {
   os.homedir = () => tmp;
   try {
     const { watchPathsForClients } = freshCollector();
-    const dirs = watchPathsForClients('micode');
+    const dirs = watchPathsForClients('mimo');
     assert.ok(dirs.includes(path.join(tmp, '.local', 'share', 'mimocode')));
     assert.ok(dirs.includes(path.join(tmp, orcaRoot)));
+  } finally {
+    os.homedir = originalHomedir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Command Code watches its transcript tree and prunes non-transcript events', () => {
+  const workspace = path.join('.commandcode', 'projects', 'workspace');
+  const tmp = withTmpHome([workspace]);
+  const originalHomedir = os.homedir;
+  os.homedir = () => tmp;
+  try {
+    const { watchPathsForClients, watchIgnoreMatcher } = freshCollector();
+    const projects = path.join(tmp, '.commandcode', 'projects');
+    const workspaceDir = path.join(tmp, workspace);
+    const transcript = path.join(workspaceDir, 'session.jsonl');
+    const checkpoint = path.join(workspaceDir, 'session.checkpoints.jsonl');
+    const metadata = path.join(workspaceDir, 'metadata.json');
+    fs.writeFileSync(transcript, '');
+    fs.writeFileSync(checkpoint, '');
+    fs.writeFileSync(metadata, '');
+
+    assert.deepEqual(watchPathsForClients('commandcode'), [projects]);
+    const ignored = watchIgnoreMatcher('commandcode');
+    assert.equal(ignored(projects), false);
+    assert.equal(ignored(workspaceDir), false);
+    assert.equal(ignored(transcript), false);
+    assert.equal(ignored(checkpoint), true);
+    assert.equal(ignored(metadata), true);
+    assert.equal(ignored(path.join(workspaceDir, 'removed.jsonl')), false);
   } finally {
     os.homedir = originalHomedir;
     delete require.cache[collectorPath];
@@ -111,7 +145,7 @@ test('watchIgnoreMatcher keeps every direct Tokscale MiMo database variant but p
   os.homedir = () => tmp;
   try {
     const { watchIgnoreMatcher } = freshCollector();
-    const ignored = watchIgnoreMatcher('micode');
+    const ignored = watchIgnoreMatcher('mimo');
     const roots = [
       path.join(tmp, '.local', 'share', 'mimocode'),
       path.join(tmp, orcaRoot)
@@ -131,6 +165,94 @@ test('watchIgnoreMatcher keeps every direct Tokscale MiMo database variant but p
       assert.equal(ignored(path.join(root, 'log', 'mimocode-nightly.db')), true);
       assert.equal(ignored(path.join(root, 'other.txt')), true);
     }
+  } finally {
+    os.homedir = originalHomedir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watchIgnoreMatcher bounds OpenClaw to its per-agent usage sources', () => {
+  const root = path.join('.openclaw', 'agents');
+  const tmp = withTmpHome([
+    path.join(root, 'main', 'sessions'),
+    path.join(root, 'main', 'session-sqlite-import-archive'),
+    path.join(root, 'main', 'agent', 'codex-home', 'sessions', '2026', '09', '07'),
+    path.join(root, 'main', 'agent', 'codex-home', 'archived_sessions'),
+    path.join(root, 'main', 'agent', 'cli-auth', 'codex', 'default', 'sessions', '2026', '08', '30'),
+    path.join(root, 'main', 'agent', 'cli-auth', 'codex', 'default', 'archived_sessions'),
+    path.join(root, 'main', 'agent', 'cli-auth', 'other', 'default', 'sessions'),
+    path.join(root, 'main', 'workspace', 'node_modules', 'package', 'cache'),
+    path.join(root, 'main', 'logs')
+  ]);
+  const originalHomedir = os.homedir;
+  os.homedir = () => tmp;
+  try {
+    const { watchIgnoreMatcher, watchPathsForClients } = freshCollector();
+    const agents = path.join(tmp, root);
+    const ignored = watchIgnoreMatcher('openclaw');
+
+    assert.deepEqual(watchPathsForClients('openclaw'), [agents]);
+    assert.equal(typeof ignored, 'function');
+
+    const kept = [
+      agents,
+      path.join(agents, 'main'),
+      path.join(agents, 'main', 'sessions'),
+      path.join(agents, 'main', 'sessions', 'session.jsonl'),
+      path.join(agents, 'main', 'sessions', 'session.jsonl.deleted.123'),
+      path.join(agents, 'main', 'session-sqlite-import-archive'),
+      path.join(agents, 'main', 'session-sqlite-import-archive', 'archive-tier.session.jsonl.imported-123'),
+      path.join(agents, 'main', 'agent'),
+      path.join(agents, 'main', 'agent', 'openclaw-agent.sqlite'),
+      path.join(agents, 'main', 'agent', 'openclaw-agent.sqlite-wal'),
+      path.join(agents, 'main', 'agent', 'openclaw-agent.sqlite-shm'),
+      path.join(agents, 'main', 'agent', 'codex-home'),
+      path.join(agents, 'main', 'agent', 'codex-home', 'sessions'),
+      path.join(agents, 'main', 'agent', 'codex-home', 'sessions', '2026', '09', '07', 'rollout.jsonl'),
+      path.join(agents, 'main', 'agent', 'codex-home', 'archived_sessions'),
+      path.join(agents, 'main', 'agent', 'codex-home', 'archived_sessions', 'rollout.jsonl'),
+      // Legacy per-profile CLI homes hold Codex rollouts OpenClaw owns too. The
+      // `codex` and `<profile>` levels are kept so a login added after startup
+      // still reports.
+      path.join(agents, 'main', 'agent', 'cli-auth'),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'codex'),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'codex', 'default'),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'codex', 'default', 'sessions'),
+      path.join(
+        agents, 'main', 'agent', 'cli-auth', 'codex', 'default',
+        'sessions', '2026', '08', '30', 'rollout.jsonl'
+      ),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'codex', 'default', 'archived_sessions'),
+      path.join(
+        agents, 'main', 'agent', 'cli-auth', 'codex', 'default',
+        'archived_sessions', 'rollout.jsonl'
+      )
+    ];
+    for (const target of kept) assert.equal(ignored(target), false, target);
+
+    const pruned = [
+      path.join(agents, 'main', 'workspace'),
+      path.join(agents, 'main', 'workspace', 'node_modules'),
+      path.join(agents, 'main', 'workspace', 'node_modules', 'package', 'cache'),
+      path.join(agents, 'main', 'logs'),
+      path.join(agents, 'main', 'logs', 'runtime.log'),
+      path.join(agents, 'main', 'agent', 'runtime'),
+      path.join(agents, 'main', 'agent', 'runtime', 'session.jsonl'),
+      path.join(agents, 'main', 'agent', 'incognito-openclaw-agent.sqlite'),
+      path.join(agents, 'main', 'agent', 'codex-home', 'history.jsonl'),
+      path.join(agents, 'main', 'agent', 'codex-home', 'tmp'),
+      path.join(agents, 'main', 'agent', 'codex-home', 'tmp', 'rollout.jsonl'),
+      // `cli-auth/<other>` is an authentication profile, not a Codex home, and
+      // `history.jsonl` beside the session dirs is not a rollout.
+      path.join(agents, 'main', 'agent', 'cli-auth', 'other'),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'other', 'default'),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'other', 'default', 'sessions'),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'codex', 'default', 'history.jsonl'),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'codex', 'default', 'tmp'),
+      path.join(agents, 'main', 'agent', 'cli-auth', 'codex', 'default', 'tmp', 'rollout.jsonl')
+    ];
+    for (const target of pruned) assert.equal(ignored(target), true, target);
   } finally {
     os.homedir = originalHomedir;
     delete require.cache[collectorPath];
@@ -1292,13 +1414,22 @@ test('watchPathsForClients watches only Proma data that is currently parsed', ()
   }
 });
 
+// Cursor's cache is a home-relative literal upstream and Antigravity's follows
+// TOKSCALE_CONFIG_DIR, so the two are seeded from different roots on purpose:
+// pointing the override at the Cursor dir must not be what makes Cursor detect.
 test('clientDataDirPresence still detects cursor/antigravity via their cache dirs', () => {
-  const tmp = withTmpHome([
-    path.join('.config', 'tokscale', 'cursor-cache'),
-    path.join('.config', 'tokscale', 'antigravity-cache')
-  ]);
+  const tmp = withTmpHome([path.join('.config', 'tokscale', 'cursor-cache')]);
+  const configDir = path.join(tmp, 'tokscale-config');
+  fs.mkdirSync(path.join(configDir, 'antigravity-cache'), { recursive: true });
   const originalHomedir = os.homedir;
+  const previousConfigDir = process.env.TOKSCALE_CONFIG_DIR;
+  // The Windows runner exports an absolute HOME, which tokscale's home_dir()
+  // prefers over the profile — point it at the fixture too, or the Cursor probe
+  // would look outside the temp home on that leg only.
+  const previousHome = process.env.HOME;
   os.homedir = () => tmp;
+  process.env.TOKSCALE_CONFIG_DIR = configDir;
+  process.env.HOME = tmp;
   try {
     const { clientDataDirPresence } = freshCollector();
     const presence = clientDataDirPresence('cursor,antigravity');
@@ -1306,6 +1437,10 @@ test('clientDataDirPresence still detects cursor/antigravity via their cache dir
     assert.equal(presence.antigravity, true);
   } finally {
     os.homedir = originalHomedir;
+    if (previousConfigDir === undefined) delete process.env.TOKSCALE_CONFIG_DIR;
+    else process.env.TOKSCALE_CONFIG_DIR = previousConfigDir;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     delete require.cache[collectorPath];
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1320,6 +1455,348 @@ test('clientDataDirPresence detects Antigravity native source roots', () => {
     assert.deepEqual(clientDataDirPresence('antigravity'), { antigravity: true });
   } finally {
     os.homedir = originalHomedir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Kimi Work roots are shared by source checks and watcher attribution', () => {
+  if (!['darwin', 'win32'].includes(process.platform)) return;
+  const originalHomedir = os.homedir;
+  const previousAppData = process.env.APPDATA;
+  const tmp = withTmpHome([]);
+  os.homedir = () => tmp;
+  try {
+    if (process.platform === 'win32') {
+      process.env.APPDATA = path.join(tmp, 'host-appdata');
+      const configPath = path.join(process.env.APPDATA, 'kimi-desktop', 'daimon-storage.json');
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({ shareDir: path.join(tmp, 'relocated-share') }));
+    }
+    const { clientSourceRoots, clientSourceChecks, clientsForWatchPath, kimiWorkSessionsRoots, watchPathsForClients } = freshCollector();
+    const kimiWorkRoots = kimiWorkSessionsRoots(tmp, process.platform);
+    for (const root of kimiWorkRoots) fs.mkdirSync(root, { recursive: true });
+    const kimiRoots = clientSourceRoots('kimi').kimi;
+    assert.deepEqual(kimiRoots.filter((root) => root.id === 'kimi-code-sessions').map((root) => root.dir), [
+      path.join(tmp, '.kimi-code', 'sessions'),
+      ...kimiWorkRoots
+    ]);
+    assert.equal(kimiRoots.at(-1).optional, true);
+    for (const root of kimiWorkRoots) assert.ok(watchPathsForClients('kimi').includes(root));
+    assert.deepEqual(clientsForWatchPath(path.join(kimiWorkRoots[0], 'wd_workspace', 'conv-1', 'agents', 'main', 'wire.jsonl'), { kimi: kimiWorkRoots }), ['kimi']);
+    assert.deepEqual(clientSourceChecks('kimi').kimi, [{ id: 'kimi-sessions', exists: false }, { id: 'kimi-code-sessions', exists: true }]);
+  } finally {
+    os.homedir = originalHomedir;
+    if (previousAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = previousAppData;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Kimi sessions gain project identity from sibling state.json', () => {
+  const originalHomedir = os.homedir;
+  const tmp = withTmpHome([]);
+  os.homedir = () => tmp;
+  const previousKimiCodeHome = process.env.KIMI_CODE_HOME;
+  try {
+    delete process.env.KIMI_CODE_HOME;
+    const { applySessionTimestamps } = freshCollector();
+    const { TITLE_MAX_CODE_POINTS } = require('../../src/shared/providers/kimi/sessionMetadata');
+    const period = { sessions: {} };
+    // Kimi Code CLI: ~/.kimi-code/sessions/<workspace>/<session_*>/state.json
+    const cliSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_xyz');
+    fs.mkdirSync(cliSess, { recursive: true });
+    fs.writeFileSync(path.join(cliSess, 'state.json'), JSON.stringify({ workDir: path.join(tmp, 'CliProj') }));
+    period.sessions['kimi:session_xyz'] = { client: 'kimi', sessionId: 'session_xyz', totalTokens: 200 };
+    const fallbackSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_fallback');
+    fs.mkdirSync(fallbackSess, { recursive: true });
+    fs.writeFileSync(path.join(fallbackSess, 'state.json'), JSON.stringify({
+      workDir: '   ',
+      custom: { workspacePath: path.join(tmp, 'FallbackProj') },
+      createdAt: { malformed: true },
+      updatedAt: []
+    }));
+    period.sessions['kimi:session_fallback'] = { client: 'kimi', sessionId: 'session_fallback', totalTokens: 100 };
+    const malformedSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_malformed');
+    fs.mkdirSync(malformedSess, { recursive: true });
+    fs.writeFileSync(path.join(malformedSess, 'state.json'), JSON.stringify({ workDir: { malformed: true } }));
+    period.sessions['kimi:session_malformed'] = { client: 'kimi', sessionId: 'session_malformed', totalTokens: 100 };
+    // Kimi Code (CLI and desktop alike) writes the current `version: 2`
+    // document: `cwd` plus epoch-millisecond timestamps, with no `workDir`.
+    const v2Sess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_v2');
+    fs.mkdirSync(v2Sess, { recursive: true });
+    fs.writeFileSync(path.join(v2Sess, 'state.json'), JSON.stringify({
+      id: 'session_v2',
+      version: 2,
+      cwd: path.join(tmp, 'V2Proj'),
+      createdAt: Date.parse('2000-01-01T07:20:51.201Z'),
+      updatedAt: Date.parse('2000-01-01T07:21:09.024Z')
+    }));
+    period.sessions['kimi:session_v2'] = { client: 'kimi', sessionId: 'session_v2', totalTokens: 100 };
+    // A document migrated from the legacy shape keeps both spellings until its
+    // next write; the runtime prefers `cwd`, so this reader has to as well.
+    const migratedSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_migrated');
+    fs.mkdirSync(migratedSess, { recursive: true });
+    fs.writeFileSync(path.join(migratedSess, 'state.json'), JSON.stringify({
+      version: 2,
+      workDir: path.join(tmp, 'LegacyWorkDir'),
+      cwd: path.join(tmp, 'V2Cwd'),
+      createdAt: '2000-01-01T00:00:00.000Z',
+      updatedAt: '2000-01-01T01:00:00.000Z'
+    }));
+    period.sessions['kimi:session_migrated'] = { client: 'kimi', sessionId: 'session_migrated', totalTokens: 100 };
+    // The runtime's own session name, in all three kinds. Only `generated` (its
+    // `chat_title` summary) and `custom` (a user rename) are names; `replaceable`
+    // holds whatever the caller called a prompt, so that one — and the
+    // placeholder further down — must stay title-less.
+    const titledSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_titled');
+    fs.mkdirSync(titledSess, { recursive: true });
+    fs.writeFileSync(path.join(titledSess, 'state.json'), JSON.stringify({
+      version: 2,
+      cwd: path.join(tmp, 'TitledProj'),
+      title: '  explain the collector pipeline  ',
+      titleKind: 'replaceable',
+      createdAt: Date.parse('2000-01-01T02:00:00.000Z'),
+      updatedAt: Date.parse('2000-01-01T02:00:00.000Z')
+    }));
+    period.sessions['kimi:session_titled'] = { client: 'kimi', sessionId: 'session_titled', totalTokens: 100 };
+    const generatedSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_generated');
+    fs.mkdirSync(generatedSess, { recursive: true });
+    fs.writeFileSync(path.join(generatedSess, 'state.json'), JSON.stringify({
+      version: 2,
+      cwd: path.join(tmp, 'TitledProj'),
+      title: '  Collector pipeline walkthrough  ',
+      titleKind: 'generated',
+      createdAt: Date.parse('2000-01-01T03:00:00.000Z'),
+      updatedAt: Date.parse('2000-01-01T03:00:00.000Z')
+    }));
+    period.sessions['kimi:session_generated'] = { client: 'kimi', sessionId: 'session_generated', totalTokens: 100 };
+    const customTitleSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_custom_title');
+    fs.mkdirSync(customTitleSess, { recursive: true });
+    fs.writeFileSync(path.join(customTitleSess, 'state.json'), JSON.stringify({
+      workDir: path.join(tmp, 'CliProj'),
+      title: 'renamed by hand',
+      isCustomTitle: true,
+      createdAt: '2000-01-01T04:00:00.000Z',
+      updatedAt: '2000-01-01T04:00:00.000Z'
+    }));
+    period.sessions['kimi:session_custom_title'] = { client: 'kimi', sessionId: 'session_custom_title', totalTokens: 100 };
+    // The v2 spelling of a user rename — the path a rename in the Kimi app takes
+    // today, and the one that carries dirty text if the value was ever edited by
+    // hand: the persistence layer stores it verbatim, so the reader owns the
+    // display cleaning (collapse to one line, cap the length).
+    const customV2Sess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_custom_v2');
+    fs.mkdirSync(customV2Sess, { recursive: true });
+    fs.writeFileSync(path.join(customV2Sess, 'state.json'), JSON.stringify({
+      version: 2,
+      cwd: path.join(tmp, 'TitledProj'),
+      titleKind: 'custom',
+      title: `  renamed\n\tby   hand ${'x'.repeat(200)}  `,
+      createdAt: Date.parse('2000-01-01T04:30:00.000Z'),
+      updatedAt: Date.parse('2000-01-01T04:30:00.000Z')
+    }));
+    period.sessions['kimi:session_custom_v2'] = { client: 'kimi', sessionId: 'session_custom_v2', totalTokens: 100 };
+    const badTypeSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_title_type');
+    fs.mkdirSync(badTypeSess, { recursive: true });
+    fs.writeFileSync(path.join(badTypeSess, 'state.json'), JSON.stringify({
+      version: 2,
+      cwd: path.join(tmp, 'TitledProj'),
+      titleKind: 'custom',
+      title: { malformed: true },
+      createdAt: Date.parse('2000-01-01T04:45:00.000Z'),
+      updatedAt: Date.parse('2000-01-01T04:45:00.000Z')
+    }));
+    period.sessions['kimi:session_title_type'] = { client: 'kimi', sessionId: 'session_title_type', totalTokens: 100 };
+    // `Number.MAX_VALUE` is finite and positive, so it passes the numeric guard
+    // while landing outside the Date range; converting it must leave the field
+    // unset rather than throw, or one corrupt document takes the pass down.
+    const outOfRangeSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_out_of_range');
+    fs.mkdirSync(outOfRangeSess, { recursive: true });
+    fs.writeFileSync(path.join(outOfRangeSess, 'state.json'), JSON.stringify({
+      version: 2,
+      cwd: path.join(tmp, 'OutOfRangeProj'),
+      createdAt: Number.MAX_VALUE,
+      updatedAt: 1e16,
+      title: 'still resolved',
+      titleKind: 'generated'
+    }));
+    period.sessions['kimi:session_out_of_range'] = { client: 'kimi', sessionId: 'session_out_of_range', totalTokens: 100 };
+    // The pre-prompt placeholder is what an unnamed session holds, and must not
+    // become a row label even when it is marked custom-proof (it is not custom).
+    const placeholderSess = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'session_placeholder');
+    fs.mkdirSync(placeholderSess, { recursive: true });
+    fs.writeFileSync(path.join(placeholderSess, 'state.json'), JSON.stringify({
+      version: 2,
+      cwd: path.join(tmp, 'TitledProj'),
+      title: 'New Session',
+      titleKind: 'replaceable',
+      createdAt: Date.parse('2000-01-01T05:00:00.000Z'),
+      updatedAt: Date.parse('2000-01-01T05:00:00.000Z')
+    }));
+    period.sessions['kimi:session_placeholder'] = { client: 'kimi', sessionId: 'session_placeholder', totalTokens: 100 };
+    // Kimi Work: the envelope shape and the generator prompt are taken from a
+    // live install (the timestamps are synthesised). A conversation's
+    // `replaceable` title is the daimon kernel's prompt envelope, and the
+    // `ctitle-*` sessions the runtime spawns to name it carry the title
+    // generator's system prompt. Neither is a session name, so neither may
+    // reach a row.
+    const workConv = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'conv-envelope');
+    fs.mkdirSync(workConv, { recursive: true });
+    fs.writeFileSync(path.join(workConv, 'state.json'), JSON.stringify({
+      workDir: path.join(tmp, 'WorkConvProj'),
+      title: '<meta awareness="low" timestamp="2000-01-01 00:00" /> hi',
+      isCustomTitle: false,
+      createdAt: '2000-01-01T00:00:00.000Z',
+      updatedAt: '2000-01-01T00:00:00.000Z'
+    }));
+    period.sessions['kimi:conv-envelope'] = { client: 'kimi', sessionId: 'conv-envelope', totalTokens: 100 };
+    const workTitleJob = path.join(tmp, '.kimi-code', 'sessions', 'wd_cli_b', 'ctitle-generator');
+    fs.mkdirSync(workTitleJob, { recursive: true });
+    fs.writeFileSync(path.join(workTitleJob, 'state.json'), JSON.stringify({
+      workDir: path.join(tmp, 'WorkConvProj'),
+      title: 'Generate a concise title for the conversation below in the user\'s primary language.',
+      isCustomTitle: false,
+      createdAt: '2000-01-01T00:01:00.000Z',
+      updatedAt: '2000-01-01T00:01:00.000Z'
+    }));
+    period.sessions['kimi:ctitle-generator'] = { client: 'kimi', sessionId: 'ctitle-generator', totalTokens: 100 };
+    // Kimi Work: <desktop runtime>/sessions/<workspace>/<conv-*>/state.json,
+    // only reachable on darwin because kimiWorkSessionsRoots follows process.platform.
+    if (process.platform === 'darwin') {
+      const workConv = path.join(tmp, 'Library', 'Application Support', 'kimi-desktop', 'daimon-share', 'daimon', 'runtime', 'kimi-code', 'home', 'sessions', 'wd_work_a', 'conv-abc');
+      fs.mkdirSync(workConv, { recursive: true });
+      fs.writeFileSync(path.join(workConv, 'state.json'), JSON.stringify({
+        workDir: path.join(tmp, 'WorkProj'),
+        custom: { workspacePath: path.join(tmp, 'WorkProj') },
+        createdAt: '2026-08-18T00:00:00.000Z',
+        updatedAt: '2026-08-18T01:00:00.000Z'
+      }));
+      period.sessions['kimi:conv-abc'] = { client: 'kimi', sessionId: 'conv-abc', totalTokens: 100 };
+    }
+    period.sessions['kimi:conv-missing'] = { client: 'kimi', sessionId: 'conv-missing', totalTokens: 50 };
+
+    applySessionTimestamps({ today: period }, tmp, { resolveProjects: true });
+    assert.equal(period.sessions['kimi:session_xyz'].projectLabel, 'CliProj');
+    assert.ok(period.sessions['kimi:session_xyz'].projectId, 'CLI session_* session should resolve a projectId');
+    assert.equal(period.sessions['kimi:session_fallback'].projectLabel, 'FallbackProj');
+    assert.equal(period.sessions['kimi:session_fallback'].startedAt || '', '', 'malformed timestamps must stay unset');
+    assert.equal(period.sessions['kimi:session_fallback'].lastUsedAt || '', '', 'malformed timestamps must stay unset');
+    assert.equal(period.sessions['kimi:session_malformed'].projectId || '', '', 'non-string project metadata must stay unset');
+    assert.equal(period.sessions['kimi:session_v2'].projectLabel, 'V2Proj');
+    assert.ok(period.sessions['kimi:session_v2'].projectId, 'v2 session should resolve a projectId');
+    assert.equal(period.sessions['kimi:session_v2'].startedAt, '2000-01-01T07:20:51.201Z', 'epoch-millisecond timestamps must be read');
+    assert.equal(period.sessions['kimi:session_v2'].lastUsedAt, '2000-01-01T07:21:09.024Z', 'epoch-millisecond timestamps must be read');
+    assert.equal(period.sessions['kimi:session_migrated'].projectLabel, 'V2Cwd', 'cwd must outrank the legacy workDir');
+    assert.equal(period.sessions['kimi:session_migrated'].startedAt, '2000-01-01T00:00:00.000Z');
+    assert.equal(period.sessions['kimi:session_generated'].title, 'Collector pipeline walkthrough', 'a generated name must be read and trimmed');
+    assert.equal(period.sessions['kimi:session_custom_title'].title, 'renamed by hand', 'a v1 isCustomTitle rename must be read');
+    const customV2Title = period.sessions['kimi:session_custom_v2'].title;
+    assert.ok(customV2Title.startsWith('renamed by hand xxx'), `a v2 custom rename must be read and collapsed: ${customV2Title}`);
+    assert.ok(!/\s\s|\n|\t/.test(customV2Title), 'a dirty title must be collapsed to one line');
+    assert.equal(
+      Array.from(customV2Title).length,
+      TITLE_MAX_CODE_POINTS,
+      'a title must be capped at the resolver family’s code-point limit'
+    );
+    assert.ok(customV2Title.endsWith('…'), 'a capped title must be marked as truncated');
+    assert.equal(period.sessions['kimi:session_title_type'].title || '', '', 'a non-string title must stay unset');
+    assert.equal(period.sessions['kimi:session_out_of_range'].startedAt || '', '', 'an out-of-range timestamp must stay unset');
+    assert.equal(period.sessions['kimi:session_out_of_range'].lastUsedAt || '', '', 'an out-of-range timestamp must stay unset');
+    assert.equal(period.sessions['kimi:session_out_of_range'].projectLabel, 'OutOfRangeProj', 'one bad timestamp must not abort the rest of the document');
+    assert.equal(period.sessions['kimi:session_out_of_range'].title, 'still resolved', 'one bad timestamp must not abort the rest of the document');
+    assert.equal(period.sessions['kimi:session_titled'].title || '', '', 'a replaceable prompt copy must stay unset');
+    assert.equal(period.sessions['kimi:session_placeholder'].title || '', '', 'the "New Session" placeholder must stay unset');
+    assert.equal(period.sessions['kimi:conv-envelope'].title || '', '', 'the Work prompt envelope must stay unset');
+    assert.equal(period.sessions['kimi:ctitle-generator'].title || '', '', 'the title generator system prompt must stay unset');
+    assert.equal(period.sessions['kimi:session_xyz'].title || '', '', 'sessions without a title must stay title-less');
+    assert.equal(period.sessions['kimi:conv-missing'].projectId || '', '', 'sessions without state.json must stay project-less');
+    if (process.platform === 'darwin') {
+      assert.equal(period.sessions['kimi:conv-abc'].projectLabel, 'WorkProj');
+      assert.ok(period.sessions['kimi:conv-abc'].projectId, 'Kimi Work conv-* session should resolve a projectId');
+    }
+
+    // Projects opt-out must strip identity, not just skip it (issue #182) — and
+    // must keep the session name, which is not identity.
+    const disabled = {
+      sessions: {
+        'kimi:session_xyz': { client: 'kimi', sessionId: 'session_xyz', totalTokens: 100 },
+        'kimi:session_generated': { client: 'kimi', sessionId: 'session_generated', totalTokens: 100 }
+      }
+    };
+    applySessionTimestamps({ today: disabled }, tmp, { resolveProjects: false });
+    assert.equal(disabled.sessions['kimi:session_xyz'].projectId || '', '', 'resolveProjects=false must not attach a projectId');
+    assert.equal(disabled.sessions['kimi:session_generated'].title, 'Collector pipeline walkthrough', 'resolveProjects=false must keep the session name');
+  } finally {
+    os.homedir = originalHomedir;
+    if (previousKimiCodeHome === undefined) delete process.env.KIMI_CODE_HOME;
+    else process.env.KIMI_CODE_HOME = previousKimiCodeHome;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Kimi metadata discovery indexes session directories instead of probing every requested id', () => {
+  const originalHomedir = os.homedir;
+  const originalStatSync = fs.statSync;
+  const tmp = withTmpHome([]);
+  os.homedir = () => tmp;
+  try {
+    const sessionsRoot = path.join(tmp, '.kimi-code', 'sessions');
+    for (let index = 0; index < 20; index += 1) {
+      fs.mkdirSync(path.join(sessionsRoot, `workspace-${index}`), { recursive: true });
+    }
+    const period = { sessions: {} };
+    for (let index = 0; index < 100; index += 1) {
+      period.sessions[`kimi:missing-${index}`] = { client: 'kimi', sessionId: `missing-${index}`, totalTokens: 1 };
+    }
+    let statCalls = 0;
+    fs.statSync = (...args) => {
+      statCalls += 1;
+      return originalStatSync(...args);
+    };
+    const { applySessionTimestamps } = freshCollector();
+    applySessionTimestamps({ allTime: period }, tmp, { resolveProjects: true });
+    assert.equal(statCalls, 0, 'missing ids should not trigger workspace x session state.json probes');
+  } finally {
+    fs.statSync = originalStatSync;
+    os.homedir = originalHomedir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('scoped Kimi metadata ignores host Work and KIMI_CODE_HOME roots', () => {
+  const tmp = withTmpHome([]);
+  const scopedHome = path.join(tmp, 'wsl-home');
+  const hostKimiHome = path.join(tmp, 'host-kimi-code');
+  const hostAppData = path.join(tmp, 'host-appdata');
+  const writeState = (root, workspace, sessionId, project) => {
+    const sessionDir = path.join(root, workspace, sessionId);
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionDir, 'state.json'), JSON.stringify({
+      workDir: path.join(tmp, project),
+      createdAt: '2026-08-18T00:00:00.000Z'
+    }));
+  };
+  writeState(path.join(hostKimiHome, 'sessions'), 'host-workspace', 'host-only', 'HostOnlyProject');
+  writeState(path.join(hostKimiHome, 'sessions'), 'host-workspace', 'shared-session', 'HostProject');
+  writeState(path.join(scopedHome, '.kimi-code', 'sessions'), 'wsl-workspace', 'shared-session', 'WslProject');
+  const period = { sessions: {
+    'kimi:host-only': { client: 'kimi', sessionId: 'host-only', totalTokens: 1 },
+    'kimi:shared-session': { client: 'kimi', sessionId: 'shared-session', totalTokens: 1 }
+  } };
+  try {
+    const { applySessionTimestamps } = freshCollector();
+    applySessionTimestamps({ allTime: period }, scopedHome, {
+      scopedHome: true,
+      resolveProjects: true,
+      platform: 'win32',
+      env: { APPDATA: hostAppData, KIMI_CODE_HOME: hostKimiHome }
+    });
+    assert.equal(period.sessions['kimi:host-only'].projectId || '', '', 'host-only metadata must stay outside the scoped home');
+    assert.equal(period.sessions['kimi:shared-session'].projectLabel, 'WslProject');
+  } finally {
     delete require.cache[collectorPath];
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1463,6 +1940,12 @@ test('watchIgnoreMatcher bounds Copilot data, Grok unified, ZCode, and exporter 
     assert.equal(ignored(path.join(copilotRoot, 'data.db')), false);
     assert.equal(ignored(path.join(copilotRoot, 'data.db-wal')), false);
     assert.equal(ignored(path.join(copilotRoot, 'data.db-shm')), false);
+    // The CLI database sits beside the desktop one under the same watch root.
+    // Pruning it here would leave tokscale parsing session-store.db while the
+    // widget only noticed on a full tick.
+    assert.equal(ignored(path.join(copilotRoot, 'session-store.db')), false);
+    assert.equal(ignored(path.join(copilotRoot, 'session-store.db-wal')), false);
+    assert.equal(ignored(path.join(copilotRoot, 'session-store.db-shm')), false);
     assert.equal(ignored(path.join(copilotRoot, 'otel', 'trace.jsonl')), false);
     assert.equal(ignored(path.join(copilotRoot, 'cache')), true);
 
@@ -1687,13 +2170,13 @@ test('watchPathsForClients follows XDG_DATA_HOME for OpenCode, MiMo, and Zed', (
   try {
     process.env.XDG_DATA_HOME = path.join(tmp, xdgRoot);
     const { clientDataDirPresence, watchPathsForClients } = freshCollector();
-    const dirs = watchPathsForClients('opencode,micode,zed');
+    const dirs = watchPathsForClients('opencode,mimo,zed');
     assert.ok(dirs.includes(path.join(tmp, xdgRoot, 'opencode')));
     assert.ok(dirs.includes(path.join(tmp, xdgRoot, 'mimocode')));
     assert.ok(dirs.includes(path.join(tmp, xdgRoot, 'zed', 'threads')));
     assert.ok(!dirs.includes(path.join(tmp, '.local', 'share', 'opencode')));
-    assert.deepEqual(clientDataDirPresence('opencode,micode,zed'), {
-      opencode: true, micode: true, zed: true
+    assert.deepEqual(clientDataDirPresence('opencode,mimo,zed'), {
+      opencode: true, mimo: true, zed: true
     });
   } finally {
     os.homedir = originalHomedir;
@@ -1752,6 +2235,7 @@ test('watchPathsForClients keeps bounded tool roots but leaves Kiro IDE globalSt
     path.join('.omp', 'agent', 'sessions'),
     path.join('.local', 'share', 'zed', 'threads'),
     path.join('Library', 'Application Support', 'Zed', 'threads'),
+    path.join('.local', 'share', 'kilo'),
     path.join('.config', 'Code', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks'),
     path.join('.vscode-server', 'data', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks'),
     path.join('Library', 'Application Support', 'Code', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks'),
@@ -1761,20 +2245,23 @@ test('watchPathsForClients keeps bounded tool roots but leaves Kiro IDE globalSt
     path.join('Library', 'Application Support', 'Kiro', 'User', 'globalStorage', 'kiro.kiroagent'),
     path.join('.local', 'share', 'kiro-cli'),
     path.join('.codebuddy', 'projects'),
-    path.join('.workbuddy', 'projects')
+    path.join('.workbuddy', 'projects'),
+    path.join('.workbuddy-ai', 'projects')
   ]);
+  fs.writeFileSync(path.join(tmp, '.local', 'share', 'kilo', 'kilo.db'), '');
   const originalHomedir = os.homedir;
   os.homedir = () => tmp;
   try {
     const { clientDataDirPresence, watchPathsForClients } = freshCollector();
-    const dirs = watchPathsForClients('pi,zed,kilocode,micode,zcode,kiro,codebuddy,workbuddy');
+    const dirs = watchPathsForClients('pi,omp,zed,kilo,mimo,zcode,kiro,codebuddy,workbuddy');
     assert.ok(dirs.includes(path.join(tmp, '.pi', 'agent', 'sessions')));
     assert.ok(dirs.includes(path.join(tmp, '.omp', 'agent', 'sessions')));
     assert.ok(dirs.includes(path.join(tmp, '.local', 'share', 'zed', 'threads')));
     assert.ok(dirs.includes(path.join(tmp, 'Library', 'Application Support', 'Zed', 'threads')));
+    assert.ok(dirs.includes(path.join(tmp, '.local', 'share', 'kilo')));
     assert.ok(dirs.includes(path.join(tmp, '.config', 'Code', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks')));
     assert.ok(dirs.includes(path.join(tmp, '.vscode-server', 'data', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks')));
-    // tokscale 3.1.3 does not scan KiloCode's native macOS/Windows globalStorage,
+    // Tokscale does not scan Kilo's native macOS/Windows VS Code globalStorage,
     // so we must not watch it (would be a dead watch + a false "active" status).
     assert.ok(!dirs.includes(path.join(tmp, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'kilocode.kilo-code', 'tasks')));
     assert.ok(dirs.includes(path.join(tmp, '.local', 'share', 'mimocode')));
@@ -1790,8 +2277,9 @@ test('watchPathsForClients keeps bounded tool roots but leaves Kiro IDE globalSt
     // collector code, not this cross-platform test.
     assert.ok(dirs.includes(path.join(tmp, '.codebuddy', 'projects')));
     assert.ok(dirs.includes(path.join(tmp, '.workbuddy', 'projects')));
-    assert.deepEqual(clientDataDirPresence('pi,zed,kilocode,micode,zcode,kiro,codebuddy,workbuddy'), {
-      pi: true, zed: true, kilocode: true, micode: true, zcode: true, kiro: true, codebuddy: true, workbuddy: true
+    assert.ok(dirs.includes(path.join(tmp, '.workbuddy-ai', 'projects')));
+    assert.deepEqual(clientDataDirPresence('pi,omp,zed,kilo,mimo,zcode,kiro,codebuddy,workbuddy'), {
+      pi: true, omp: true, zed: true, kilo: true, mimo: true, zcode: true, kiro: true, codebuddy: true, workbuddy: true
     });
   } finally {
     os.homedir = originalHomedir;
@@ -2054,7 +2542,7 @@ test('cursor sync runs at most once per throttle window across ticks', async () 
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
   childProcess.spawn = recordingSpawn([]);
-  const cursorAuth = require('../../src/shared/cursorAuth');
+  const cursorAuth = require('../../src/shared/providers/cursor/auth');
   const originalReadActiveAccount = cursorAuth.readActiveAccount;
   const originalRunCursorSync = cursorAuth.runCursorSync;
   let syncCalls = 0;
@@ -2081,11 +2569,82 @@ test('cursor sync runs at most once per throttle window across ticks', async () 
   }
 });
 
+test('forced Cursor sync bypasses signed-out throttling without saved credentials', async () => {
+  const childProcess = require('node:child_process');
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = recordingSpawn([]);
+  const cursorAuth = require('../../src/shared/providers/cursor/auth');
+  const originalReadActiveAccount = cursorAuth.readActiveAccount;
+  const originalRunCursorSync = cursorAuth.runCursorSync;
+  let syncCalls = 0;
+  cursorAuth.readActiveAccount = () => null;
+  cursorAuth.runCursorSync = async () => {
+    syncCalls += 1;
+    return { synced: false, notAuthenticated: true };
+  };
+  try {
+    const { collectUsageOnce } = freshCollector();
+    const options = {
+      clients: 'cursor',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 1000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      forceSelfSync: true,
+      limitsEnabled: false
+    };
+    await collectUsageOnce(options);
+    await collectUsageOnce(options);
+    assert.equal(syncCalls, 2);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    cursorAuth.readActiveAccount = originalReadActiveAccount;
+    cursorAuth.runCursorSync = originalRunCursorSync;
+    delete require.cache[collectorPath];
+  }
+});
+
+test('cursor discovery retries after a transient sync failure', async () => {
+  const childProcess = require('node:child_process');
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = recordingSpawn([]);
+  const cursorAuth = require('../../src/shared/providers/cursor/auth');
+  const originalReadActiveAccount = cursorAuth.readActiveAccount;
+  const originalRunCursorSync = cursorAuth.runCursorSync;
+  let syncCalls = 0;
+  cursorAuth.readActiveAccount = () => null;
+  cursorAuth.runCursorSync = async () => {
+    syncCalls += 1;
+    if (syncCalls === 1) throw new Error('temporary network failure');
+    return { synced: false, notAuthenticated: true };
+  };
+  try {
+    const { collectUsageOnce } = freshCollector();
+    const options = {
+      clients: 'cursor',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 1000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      forceSelfSync: true,
+      limitsEnabled: false
+    };
+    await collectUsageOnce(options);
+    await collectUsageOnce(options);
+    assert.equal(syncCalls, 2);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    cursorAuth.readActiveAccount = originalReadActiveAccount;
+    cursorAuth.runCursorSync = originalRunCursorSync;
+    delete require.cache[collectorPath];
+  }
+});
+
 test('cursor sync failure metadata reaches client health without stderr or paths', async () => {
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
   childProcess.spawn = recordingSpawn([]);
-  const cursorAuth = require('../../src/shared/cursorAuth');
+  const cursorAuth = require('../../src/shared/providers/cursor/auth');
   const originalReadActiveAccount = cursorAuth.readActiveAccount;
   const originalRunCursorSync = cursorAuth.runCursorSync;
   cursorAuth.readActiveAccount = () => ({ accessToken: 'token' });
@@ -2121,11 +2680,78 @@ test('cursor sync failure metadata reaches client health without stderr or paths
   }
 });
 
+test('a Cursor report with implicit sync blocks logout until the report closes', async () => {
+  const childProcess = require('node:child_process');
+  const originalSpawn = childProcess.spawn;
+  const cursorAuth = require('../../src/shared/providers/cursor/auth');
+  const originalReadActiveAccount = cursorAuth.readActiveAccount;
+  const originalRunCursorSync = cursorAuth.runCursorSync;
+  let reportChild;
+  let reportStarted;
+  const reportStart = new Promise((resolve) => { reportStarted = resolve; });
+  let reportCalls = 0;
+  let logoutStarted = false;
+
+  childProcess.spawn = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { end: () => {} };
+    child.kill = () => {};
+    reportCalls += 1;
+    if (reportCalls === 1) {
+      reportChild = child;
+      reportStarted();
+    } else {
+      setImmediate(() => {
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ entries: [] })));
+        child.emit('close', 0);
+      });
+    }
+    return child;
+  };
+  cursorAuth.readActiveAccount = () => ({ accessToken: 'token' });
+  cursorAuth.runCursorSync = async () => { throw new Error('explicit sync failed'); };
+
+  try {
+    const { collectUsageOnce } = freshCollector();
+    const collection = collectUsageOnce({
+      clients: 'cursor',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 60_000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      forceSelfSync: true,
+      historyEnabled: false,
+      limitsEnabled: false
+    });
+    await reportStart;
+
+    const logout = cursorAuth.runCursorLogout({
+      accountId: 'user_b',
+      runSubcommand: async () => { logoutStarted = true; }
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(logoutStarted, false);
+
+    reportChild.stdout.emit('data', Buffer.from(JSON.stringify({ entries: [] })));
+    reportChild.emit('close', 0);
+    await logout;
+    assert.equal(logoutStarted, true);
+    await collection;
+  } finally {
+    childProcess.spawn = originalSpawn;
+    cursorAuth.readActiveAccount = originalReadActiveAccount;
+    cursorAuth.runCursorSync = originalRunCursorSync;
+    delete require.cache[collectorPath];
+  }
+});
+
 test('a targeted tick does not sync an unrelated self-synced client', async () => {
   const childProcess = require('node:child_process');
   const originalSpawn = childProcess.spawn;
   childProcess.spawn = recordingSpawn([]);
-  const cursorAuth = require('../../src/shared/cursorAuth');
+  const cursorAuth = require('../../src/shared/providers/cursor/auth');
   const originalReadActiveAccount = cursorAuth.readActiveAccount;
   const originalRunCursorSync = cursorAuth.runCursorSync;
   let syncCalls = 0;
@@ -2328,6 +2954,7 @@ test('live watch events scan only changed clients and preserve the other client 
   const calls = [];
   let codexDeleted = false;
   let codexUnattributed = false;
+  let codexUnexpectedClient = false;
   childProcess.spawn = (_bin, args) => {
     calls.push(args);
     const selected = String(args[args.indexOf('--client') + 1] || '').split(',').filter(Boolean);
@@ -2339,6 +2966,8 @@ test('live watch events scan only changed clients and preserve the other client 
     setImmediate(() => {
       const entries = codexUnattributed && selected.length === 1 && selected[0] === 'codex'
         ? [{ model: 'unknown', totalTokens: 99 }]
+        : codexUnexpectedClient && selected.length === 1 && selected[0] === 'codex'
+          ? [{ client: 'claude', model: 'unexpected-model', totalTokens: 99 }]
         : selected.filter((client) => !(codexDeleted && client === 'codex')).map((client) => {
             const tokens = client === 'codex' && selected.length === 1 ? 30 : (client === 'codex' ? 20 : 10);
             return {
@@ -2420,19 +3049,32 @@ test('live watch events scan only changed clients and preserve the other client 
     assert.equal(calls[7][calls[7].indexOf('--client') + 1], 'claude,codex');
     assert.equal(updates[4].summary.today.totalTokens, 30);
 
+    // An attributed row outside the requested client set is just as unsafe as
+    // an unattributed row: applying it would clear codex and replace claude with
+    // a partial targeted result. Rebuild today from an all-client scan instead.
+    codexUnattributed = false;
+    codexUnexpectedClient = true;
+    watchHandler('change', path.join(tmp, '.codex', 'sessions', 'unexpected.jsonl'));
+    await waitForCondition(() => updates.length === 6);
+    assert.equal(calls[8][calls[8].indexOf('--client') + 1], 'codex');
+    assert.equal(calls[9][calls[9].indexOf('--client') + 1], 'claude,codex');
+    assert.equal(updates[5].summary.today.totalTokens, 30);
+    assert.equal(updates[5].summary.today.clients.claude, 10);
+    assert.equal(updates[5].summary.today.clients.codex, 20);
+
     // A targeted scan that returns no rows replaces that client's partition
     // with empty usage, so deletes do not leave stale totals behind.
-    codexUnattributed = false;
+    codexUnexpectedClient = false;
     codexDeleted = true;
     watchHandler('unlink', path.join(tmp, '.codex', 'sessions', 'active.jsonl'));
-    await waitForCondition(() => updates.length === 6);
-    const deletion = calls[8];
+    await waitForCondition(() => updates.length === 7);
+    const deletion = calls[10];
     assert.equal(deletion[deletion.indexOf('--client') + 1], 'codex');
-    assert.equal(updates[5].summary.today.totalTokens, 10);
-    assert.equal(updates[5].summary.today.clients.claude, 10);
-    assert.equal(updates[5].summary.today.clients.codex, undefined);
-    assert.equal(updates[5].summary.month.totalTokens, 10);
-    assert.equal(updates[5].summary.allTime.totalTokens, 10);
+    assert.equal(updates[6].summary.today.totalTokens, 10);
+    assert.equal(updates[6].summary.today.clients.claude, 10);
+    assert.equal(updates[6].summary.today.clients.codex, undefined);
+    assert.equal(updates[6].summary.month.totalTokens, 10);
+    assert.equal(updates[6].summary.allTime.totalTokens, 10);
   } finally {
     if (handle) handle.stop();
     childProcess.spawn = originalSpawn;
@@ -2506,7 +3148,401 @@ test('smart collection uses native watching and skips idle intervals after start
   }
 });
 
-test('smart collection coalesces watch events into one targeted interval scan', async () => {
+// Our own read-only SQLite scan recreates the wal-index, and that write reaches
+// the watcher as a normal change. If the sidecar is watched, the collector
+// re-triggers itself: measured 20/20 scans rewrote zcode's db.sqlite-shm while
+// idle time rewrote it 0 times in 40s.
+test('self-watch db-shm events are ignored for every client whose scan recreates the sidecar', () => {
+  const { isSelfWatchSqliteSidecarEvent } = freshCollector();
+  const qoderRoot = path.join(os.tmpdir(), 'QoderCN', 'db');
+  const zcodeRoot = path.join(os.tmpdir(), 'zcode', 'cli', 'db');
+  const roots = { qodercn: [qoderRoot], zcode: [zcodeRoot] };
+
+  // Each client keeps its own database basename: Qoder CN names it local.db,
+  // ZCode names it db.sqlite.
+  for (const [root, base] of [[qoderRoot, 'local.db'], [zcodeRoot, 'db.sqlite']]) {
+    assert.equal(isSelfWatchSqliteSidecarEvent(path.join(root, base + '-shm'), roots), true);
+    assert.equal(isSelfWatchSqliteSidecarEvent(path.join(root, base + '-wal'), roots), false,
+      'the -wal carries real data and must still trigger a scan');
+    assert.equal(isSelfWatchSqliteSidecarEvent(path.join(root, base), roots), false,
+      'the database itself must still trigger a scan');
+  }
+  assert.equal(isSelfWatchSqliteSidecarEvent(path.join(os.tmpdir(), 'Other', 'db.sqlite-shm'), roots), false);
+
+  // The wal-index suffix has to be recognised by its SQLite shape rather than
+  // one client's database basename (ZCode's db.sqlite-shm contains no '.db-'),
+  // and matching it must not widen into unrelated sidecars.
+  const zcodeOnly = { zcode: [zcodeRoot] };
+  for (const name of ['db.sqlite-shm', 'local.db-shm', 'state.db-shm', 'data.sqlite3-shm']) {
+    assert.equal(isSelfWatchSqliteSidecarEvent(path.join(zcodeRoot, name), zcodeOnly), true, name);
+  }
+  for (const name of ['db.sqlite-shm-journal', 'db.sqlite-wal', 'db.sqlite', 'notes-shm', 'db.sqlite-shm.bak']) {
+    assert.equal(isSelfWatchSqliteSidecarEvent(path.join(zcodeRoot, name), zcodeOnly), false, name);
+  }
+});
+
+// A client is added to that list only on measured evidence, so a scan that does
+// not rewrite its sidecar must keep waking the collector on shm events.
+test('a SQLite client whose scan does not recreate its sidecar still watches db-shm', () => {
+  const { isSelfWatchSqliteSidecarEvent } = freshCollector();
+  const mimoRoot = path.join(os.tmpdir(), 'mimocode');
+  const roots = { mimo: [mimoRoot] };
+
+  assert.equal(isSelfWatchSqliteSidecarEvent(path.join(mimoRoot, 'mimocode.db-shm'), roots), false);
+});
+
+// The unit test above proves the predicate; this proves the consequence the bug
+// was actually about. A suppressed shm event must not spawn a scan, while a real
+// -wal change from the same directory still must — otherwise the fix would have
+// traded a runaway loop for silent staleness.
+test('a zcode shm event does not spawn a scan while a -wal change still does', async () => {
+  const tmp = withTmpHome([path.join('.zcode', 'cli', 'db')]);
+  const originalHomedir = os.homedir;
+  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+  os.homedir = () => tmp;
+  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+
+  const chokidar = require('chokidar');
+  const originalWatch = chokidar.watch;
+  let watchHandler = null;
+  chokidar.watch = () => {
+    const watcher = {
+      on(event, handler) {
+        if (event === 'all') watchHandler = handler;
+        return watcher;
+      },
+      close() {}
+    };
+    return watcher;
+  };
+
+  const childProcess = require('node:child_process');
+  const originalSpawn = childProcess.spawn;
+  const calls = [];
+  childProcess.spawn = recordingSpawn(calls);
+
+  const dbDir = path.join(tmp, '.zcode', 'cli', 'db');
+  let handle = null;
+  try {
+    const { startCollector } = freshCollector();
+    const updates = [];
+    handle = startCollector({
+      clients: 'zcode',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 5000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      intervalMs: 60 * 60 * 1000,
+      watchEnabled: true,
+      watchUsePolling: false,
+      watchTriggersCollection: true,
+      watchDebounceMs: 10,
+      limitsEnabled: false,
+      historyEnabled: false,
+      anchorPersistenceEnabled: false,
+      onUpdate: (summary, reason) => updates.push({ summary, reason })
+    });
+
+    await waitForCondition(() => updates.length === 1);
+    const afterInitialTick = calls.length;
+
+    // Our own scan recreates this sidecar, so it must not schedule another scan.
+    watchHandler('change', path.join(dbDir, 'db.sqlite-shm'));
+    await new Promise((resolve) => { setTimeout(resolve, 120); });
+    assert.equal(calls.length, afterInitialTick,
+      'a self-watch shm event must not spawn another scan');
+
+    // The same directory, but the write that carries real data.
+    watchHandler('change', path.join(dbDir, 'db.sqlite-wal'));
+    await waitForCondition(() => calls.length > afterInitialTick, 4000);
+    assert.ok(calls.length > afterInitialTick, 'a -wal change must still spawn a scan');
+  } finally {
+    if (handle) handle.stop();
+    childProcess.spawn = originalSpawn;
+    chokidar.watch = originalWatch;
+    os.homedir = originalHomedir;
+    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('collector preserves Qoder CN while publishing other clients after a bounded SQLite read fails', async () => {
+  const tmp = withTmpHome([]);
+  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+
+  const qoderCnUsagePath = require.resolve('../../src/shared/providers/qodercn/usage');
+  const qoderCnUsage = require(qoderCnUsagePath);
+  const originalRows = qoderCnUsage.collectQoderCnRows;
+  const originalPeriods = qoderCnUsage.buildQoderCnPeriods;
+  let failReads = false;
+  let claudeTokens = 3;
+  const qoderCnReadOptions = [];
+  qoderCnUsage.collectQoderCnRows = async (options) => {
+    qoderCnReadOptions.push(options);
+    if (failReads) {
+      const error = new Error('qodercn sqlite read budget exceeded (rows limit 100000)');
+      error.code = 'QODER_CN_READ_BUDGET_EXCEEDED';
+      throw error;
+    }
+    return [];
+  };
+  qoderCnUsage.buildQoderCnPeriods = () => ({
+    today: { entries: [{ client: 'qodercn', model: 'qmodel', input: 7 }] },
+    month: { entries: [{ client: 'qodercn', model: 'qmodel', input: 7 }] },
+    allTime: { entries: [{ client: 'qodercn', model: 'qmodel', input: 7 }] }
+  });
+  delete require.cache[collectorPath];
+
+  let handle = null;
+  try {
+    const { startCollector } = freshCollector();
+    const previews = [];
+    const updates = [];
+    const collectorOptions = {
+      clients: 'claude,qodercn',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 1000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      intervalMs: 60 * 60 * 1000,
+      watchEnabled: false,
+      limitsEnabled: false,
+      historyEnabled: false,
+      runTokscale: async () => ({ entries: [{ client: 'claude', model: 'm', input: claudeTokens }] })
+    };
+    handle = startCollector({
+      ...collectorOptions,
+      onPreview: (summary) => previews.push(summary),
+      onUpdate: (summary) => updates.push(summary)
+    });
+
+    await waitForCondition(() => updates.length === 1);
+    assert.equal(qoderCnReadOptions[0].includeJsonl, true, 'production collection includes current JSONL transcripts');
+    const anchorPath = path.join(tmp, 'collector-anchor.json');
+    const firstAnchor = JSON.parse(fs.readFileSync(anchorPath, 'utf8'));
+    assert.equal(firstAnchor.qoderCnPeriods.today.clients.qodercn, 7);
+    const initialPreviewCount = previews.length;
+    failReads = true;
+    claudeTokens = 5;
+    await handle.tick('manual');
+
+    assert.equal(updates.length, 2, 'a Qoder CN failure must not suppress fresh data from other clients');
+    assert.equal(updates.at(-1).today.clients.qodercn, 7, 'final update keeps the last Qoder CN period');
+    assert.equal(updates.at(-1).today.clients.claude, 5, 'final update publishes the fresh Claude period');
+    const fallbackAnchor = JSON.parse(fs.readFileSync(anchorPath, 'utf8'));
+    assert.equal(fallbackAnchor.fullScanAt, firstAnchor.fullScanAt, 'a fallback is not recorded as a successful full scan');
+    const failedPreviews = previews.slice(initialPreviewCount);
+    assert.equal(failedPreviews.length, 2, 'the failed full scan still emits its two host previews');
+    assert.equal(Object.prototype.hasOwnProperty.call(failedPreviews.at(-1), 'qoderCnStatus'), false);
+    assert.equal(failedPreviews.at(-1).today.clients.qodercn, 7, 'preview keeps the anchored Qoder CN today partition');
+    assert.equal('month' in failedPreviews.at(-1), false, 'preview keeps the last complete month while Qoder CN is unavailable');
+
+    handle.stop();
+    handle = startCollector({
+      ...collectorOptions,
+      onUpdate: (summary) => updates.push(summary)
+    });
+    await waitForCondition(() => updates.length === 3);
+    assert.equal(updates.at(-1).today.clients.qodercn, 7, 'a persisted anchor keeps Qoder CN data after restart');
+  } finally {
+    if (handle) handle.stop();
+    qoderCnUsage.collectQoderCnRows = originalRows;
+    qoderCnUsage.buildQoderCnPeriods = originalPeriods;
+    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('collector does not reuse persisted Qoder CN periods after the DB path changes', async () => {
+  const tmp = withTmpHome([]);
+  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+  const originalQoderCnDbPath = process.env.TOKEN_MONITOR_QODER_CN_DB_PATH;
+  const oldDbPath = path.join(tmp, 'old', 'local.db');
+  const newDbPath = path.join(tmp, 'new', 'local.db');
+  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+  process.env.TOKEN_MONITOR_QODER_CN_DB_PATH = newDbPath;
+
+  const initialCollector = freshCollector();
+  const oldQoderCnPeriod = emptyPeriod();
+  oldQoderCnPeriod.totalTokens = 9;
+  oldQoderCnPeriod.clients = { qodercn: 9 };
+  fs.writeFileSync(path.join(tmp, 'collector-anchor.json'), JSON.stringify({
+    dateKey: initialCollector.localTodayKey(),
+    today: emptyPeriod(),
+    month: emptyPeriod(),
+    allTime: emptyPeriod(),
+    qoderCnPeriods: { today: oldQoderCnPeriod, month: oldQoderCnPeriod, allTime: oldQoderCnPeriod },
+    configFingerprint: initialCollector.configFingerprint('claude,qodercn', '2024-01-01', true, oldDbPath),
+    fullScanAt: new Date(Date.now() - 5 * 60 * 1000).toISOString()
+  }));
+
+  const qoderCnUsagePath = require.resolve('../../src/shared/providers/qodercn/usage');
+  const qoderCnUsage = require(qoderCnUsagePath);
+  const originalRows = qoderCnUsage.collectQoderCnRows;
+  qoderCnUsage.collectQoderCnRows = async () => {
+    throw new Error('new Qoder CN database is temporarily unavailable');
+  };
+  delete require.cache[collectorPath];
+
+  let handle = null;
+  try {
+    const { startCollector } = freshCollector();
+    const updates = [];
+    handle = startCollector({
+      clients: 'claude,qodercn',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 1000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      intervalMs: 60 * 60 * 1000,
+      watchEnabled: false,
+      limitsEnabled: false,
+      historyEnabled: false,
+      runTokscale: async () => ({ entries: [{ client: 'claude', model: 'm', input: 3 }] }),
+      onUpdate: (summary) => updates.push(summary)
+    });
+
+    await waitForCondition(() => updates.length === 1);
+    assert.equal(updates.at(-1).today.clients.claude, 3);
+    assert.equal(updates.at(-1).today.clients.qodercn || 0, 0, 'old-path Qoder CN fallback must not leak into the new path');
+  } finally {
+    if (handle) handle.stop();
+    qoderCnUsage.collectQoderCnRows = originalRows;
+    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+    if (originalQoderCnDbPath === undefined) delete process.env.TOKEN_MONITOR_QODER_CN_DB_PATH;
+    else process.env.TOKEN_MONITOR_QODER_CN_DB_PATH = originalQoderCnDbPath;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('collector publishes other clients when Qoder CN fails before the first complete snapshot', async () => {
+  const tmp = withTmpHome([]);
+  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+
+  const qoderCnUsagePath = require.resolve('../../src/shared/providers/qodercn/usage');
+  const qoderCnUsage = require(qoderCnUsagePath);
+  const originalRows = qoderCnUsage.collectQoderCnRows;
+  let qoderCnReads = 0;
+  let claudeTokens = 3;
+  qoderCnUsage.collectQoderCnRows = async () => {
+    qoderCnReads += 1;
+    throw new Error('Qoder CN unavailable before first complete snapshot');
+  };
+  delete require.cache[collectorPath];
+
+  let handle = null;
+  try {
+    const { startCollector } = freshCollector();
+    const updates = [];
+    handle = startCollector({
+      clients: 'claude,qodercn',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 1000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      intervalMs: 60 * 60 * 1000,
+      watchEnabled: false,
+      anchorPersistenceEnabled: false,
+      limitsEnabled: false,
+      historyEnabled: false,
+      runTokscale: async () => ({ entries: [{ client: 'claude', model: 'm', input: claudeTokens }] }),
+      onUpdate: (summary) => updates.push(summary)
+    });
+
+    await waitForCondition(() => updates.length === 1);
+    claudeTokens = 5;
+    await handle.tick('incremental', { todayOnly: true });
+
+    assert.equal(qoderCnReads, 2, 'Qoder CN is retried on the incremental read');
+    assert.equal(updates.length, 2, 'a first-read Qoder CN failure must not suppress other clients');
+    assert.equal(updates.at(-1).today.clients.claude, 5, 'the incremental Claude period is published');
+  } finally {
+    if (handle) handle.stop();
+    qoderCnUsage.collectQoderCnRows = originalRows;
+    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('collector publishes live periods when only Qoder CN history read fails', async () => {
+  const tmp = withTmpHome([]);
+  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+
+  const qoderCnUsagePath = require.resolve('../../src/shared/providers/qodercn/usage');
+  const qoderCnUsage = require(qoderCnUsagePath);
+  const originalRows = qoderCnUsage.collectQoderCnRows;
+  const originalHistory = qoderCnUsage.buildQoderCnHistoryGraph;
+  let failHistory = false;
+  const todayKey = localDayKey();
+  qoderCnUsage.collectQoderCnRows = async () => [];
+  qoderCnUsage.buildQoderCnHistoryGraph = () => {
+    if (failHistory) throw new Error('temporary Qoder CN history read failure');
+    return {
+      contributions: [{
+        date: todayKey,
+        clients: [{ client: 'qodercn', modelId: 'qmodel', tokens: { input: 2 }, cost: 0, messages: 1 }]
+      }]
+    };
+  };
+  delete require.cache[collectorPath];
+
+  let handle = null;
+  try {
+    const { startCollector } = freshCollector();
+    const updates = [];
+    handle = startCollector({
+      clients: 'claude,qodercn',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 1000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      intervalMs: 60 * 60 * 1000,
+      watchEnabled: false,
+      anchorPersistenceEnabled: false,
+      limitsEnabled: false,
+      historyEnabled: true,
+      runTokscale: async () => ({ entries: [{ client: 'claude', model: 'm', input: 3 }] }),
+      runGraph: async () => ({
+        contributions: [{
+          date: todayKey,
+          clients: [{ client: 'claude', modelId: 'm', tokens: { input: 3 }, cost: 0, messages: 1 }]
+        }]
+      }),
+      onUpdate: (summary) => updates.push(summary)
+    });
+
+    await waitForCondition(() => updates.length === 1);
+    failHistory = true;
+    await handle.tick('manual', { forceHistory: true });
+
+    assert.equal(updates.length, 2, 'history-only failure must not suppress fresh live periods');
+    assert.equal(Object.prototype.hasOwnProperty.call(updates.at(-1), 'qoderCnStatus'), false);
+    assert.equal(updates.at(-1).history.daily[0].perClient.claude.tokens, 3);
+    assert.equal(updates.at(-1).history.daily[0].perClient.qodercn.tokens, 2);
+    assert.equal(updates.at(-1).today.clients.claude, 3);
+  } finally {
+    if (handle) handle.stop();
+    qoderCnUsage.collectQoderCnRows = originalRows;
+    qoderCnUsage.buildQoderCnHistoryGraph = originalHistory;
+    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('smart collection coalesces watch events into one targeted interval tick', async () => {
   const tmp = withTmpHome([
     path.join('.claude', 'projects'),
     path.join('.codex', 'sessions')
@@ -2528,6 +3564,9 @@ test('smart collection coalesces watch events into one targeted interval scan', 
   const originalSpawn = childProcess.spawn;
   const calls = [];
   childProcess.spawn = recordingSpawn(calls);
+  const cursorAuth = require('../../src/shared/providers/cursor/auth');
+  const originalRunCursorSync = cursorAuth.runCursorSync;
+  cursorAuth.runCursorSync = async () => {};
 
   let handle = null;
   try {
@@ -2557,12 +3596,14 @@ test('smart collection coalesces watch events into one targeted interval scan', 
     assert.equal(calls.length, 3, 'watch events never scan immediately in smart mode');
 
     await waitForCondition(() => updates.length === 2);
-    assert.equal(calls.length, 4, 'one today-only scan acknowledges the event batch');
+    assert.equal(calls.length, 5, 'one targeted tick acknowledges the event batch');
     assert.equal(calls[3][calls[3].indexOf('--client') + 1], 'claude,cursor');
+    assert.equal(calls[4][calls[4].indexOf('--client') + 1], 'claude,codex,cursor');
     await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(calls.length, 4, 'the acknowledged batch does not repeat');
+    assert.equal(calls.length, 5, 'the acknowledged batch does not repeat');
   } finally {
     if (handle) handle.stop();
+    cursorAuth.runCursorSync = originalRunCursorSync;
     childProcess.spawn = originalSpawn;
     chokidar.watch = originalWatch;
     os.homedir = originalHomedir;
@@ -2682,6 +3723,9 @@ test('smart collection retries a failed activity scan on the next interval', asy
     });
     return child;
   };
+  const cursorAuth = require('../../src/shared/providers/cursor/auth');
+  const originalRunCursorSync = cursorAuth.runCursorSync;
+  cursorAuth.runCursorSync = async () => {};
 
   let handle = null;
   try {
@@ -2719,6 +3763,7 @@ test('smart collection retries a failed activity scan on the next interval', asy
     );
   } finally {
     if (handle) handle.stop();
+    cursorAuth.runCursorSync = originalRunCursorSync;
     childProcess.spawn = originalSpawn;
     chokidar.watch = originalWatch;
     os.homedir = originalHomedir;
@@ -3601,7 +4646,7 @@ test('smart collection acknowledges the latest activity revision after tick coal
   }
 });
 
-// tokscale resolves opencode, zed and micode through `PathRoot::XdgData`
+// tokscale resolves opencode, zed, micode and amp through `PathRoot::XdgData`
 // (clients.rs) and the CodeBuddy extension logs through `dirs::data_local_dir()`,
 // which is the XDG data home on Linux. Kiro's CLI database is the deliberate
 // exception: tokscale spells it as a home-relative literal, so following XDG
@@ -3609,7 +4654,7 @@ test('smart collection acknowledges the latest activity revision after tick coal
 test('XDG_DATA_HOME moves exactly the roots tokscale resolves through it', () => {
   const tmp = withTmpHome([]);
   const xdg = path.join(tmp, 'custom-xdg');
-  for (const dir of ['opencode', 'zed/threads', 'mimocode', 'CodeBuddyExtension/Logs']) {
+  for (const dir of ['opencode', 'zed/threads', 'mimocode', 'amp/threads', 'CodeBuddyExtension/Logs']) {
     fs.mkdirSync(path.join(xdg, dir), { recursive: true });
   }
   fs.mkdirSync(path.join(tmp, '.local', 'share', 'kiro-cli'), { recursive: true });
@@ -3619,10 +4664,11 @@ test('XDG_DATA_HOME moves exactly the roots tokscale resolves through it', () =>
   process.env.XDG_DATA_HOME = xdg;
   try {
     const { watchPathsForClients } = freshCollector();
-    const roots = watchPathsForClients('opencode,zed,micode,codebuddy,kiro');
+    const roots = watchPathsForClients('opencode,zed,mimo,amp,codebuddy,kiro');
     assert.ok(roots.includes(path.join(xdg, 'opencode')));
     assert.ok(roots.includes(path.join(xdg, 'zed', 'threads')));
     assert.ok(roots.includes(path.join(xdg, 'mimocode')));
+    assert.ok(roots.includes(path.join(xdg, 'amp', 'threads')));
     if (process.platform !== 'win32' && process.platform !== 'darwin') {
       assert.ok(roots.includes(path.join(xdg, 'CodeBuddyExtension', 'Logs')));
     }
@@ -3644,16 +4690,18 @@ test('an unset XDG_DATA_HOME falls back to the .local/share roots', () => {
   const tmp = withTmpHome([
     path.join('.local', 'share', 'opencode'),
     path.join('.local', 'share', 'zed', 'threads'),
-    path.join('.local', 'share', 'mimocode')
+    path.join('.local', 'share', 'mimocode'),
+    path.join('.local', 'share', 'amp', 'threads')
   ]);
   const originalHomedir = os.homedir;
   os.homedir = () => tmp;
   try {
     const { watchPathsForClients } = freshCollector();
-    const roots = watchPathsForClients('opencode,zed,micode');
+    const roots = watchPathsForClients('opencode,zed,mimo,amp');
     assert.ok(roots.includes(path.join(tmp, '.local', 'share', 'opencode')));
     assert.ok(roots.includes(path.join(tmp, '.local', 'share', 'zed', 'threads')));
     assert.ok(roots.includes(path.join(tmp, '.local', 'share', 'mimocode')));
+    assert.ok(roots.includes(path.join(tmp, '.local', 'share', 'amp', 'threads')));
   } finally {
     os.homedir = originalHomedir;
     delete require.cache[collectorPath];
@@ -3823,6 +4871,73 @@ test('Tokscale headless capture roots are optional only while they are the defau
     assert.equal(named.dir, path.join(tmp, 'capture', 'codex'));
     assert.equal(named.exists, false);
     assert.equal(named.optional, undefined);
+  } finally {
+    os.homedir = originalHomedir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('custom Tokscale scan paths stay visible and use recursive extra-root watcher semantics', () => {
+  const tmp = withTmpHome([]);
+  const originalHomedir = os.homedir;
+  os.homedir = () => tmp;
+  try {
+    const { clientSourceChecks, visibleDiagnosticRoots, watchIgnoreMatcher, watchPathsForClients } = freshCollector();
+    const custom = path.join(tmp, 'relocated', 'codex');
+    const options = { customScanPaths: { codex: [custom] } };
+
+    const missing = visibleDiagnosticRoots('codex', options).codex.find((root) => root.custom === true);
+    assert.deepEqual(missing, {
+      id: 'custom-scan-path',
+      dir: custom,
+      custom: true,
+      exists: false
+    });
+    assert.deepEqual(clientSourceChecks('codex', options).codex.at(-1), {
+      id: 'custom-scan-path',
+      exists: false
+    });
+    assert.equal(watchPathsForClients('codex', options).includes(custom), false);
+
+    fs.mkdirSync(custom, { recursive: true });
+    assert.equal(watchPathsForClients('codex', options).includes(custom), true);
+
+    const openclawOptions = { customScanPaths: { openclaw: [custom] } };
+    const ignored = watchIgnoreMatcher('openclaw', openclawOptions);
+    assert.equal(ignored(path.join(custom, 'direct.json')), false);
+    assert.equal(ignored(path.join(custom, 'nested')), false);
+    assert.equal(ignored(path.join(custom, 'nested', 'session.json')), false);
+
+    const copilotCustom = path.join(tmp, '.copilot', 'imported-sessions');
+    fs.mkdirSync(copilotCustom, { recursive: true });
+    const copilotIgnored = watchIgnoreMatcher('copilot', {
+      customScanPaths: { copilot: [copilotCustom] }
+    });
+    assert.equal(copilotIgnored(path.join(tmp, '.copilot', 'cache')), true);
+    assert.equal(copilotIgnored(path.join(copilotCustom, 'direct.jsonl')), false);
+    assert.equal(copilotIgnored(path.join(copilotCustom, 'nested')), false);
+    assert.equal(copilotIgnored(path.join(copilotCustom, 'nested', 'session.jsonl')), false);
+  } finally {
+    os.homedir = originalHomedir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('custom Antigravity roots remain watchable without watching its self-sync cache', () => {
+  const tmp = withTmpHome([]);
+  const originalHomedir = os.homedir;
+  os.homedir = () => tmp;
+  try {
+    const { watchPathsForClients } = freshCollector();
+    const customAntigravity = path.join(tmp, 'relocated', 'antigravity');
+    fs.mkdirSync(customAntigravity, { recursive: true });
+
+    const roots = watchPathsForClients('antigravity', {
+      customScanPaths: { antigravity: [customAntigravity] }
+    });
+    assert.deepEqual(roots, [customAntigravity]);
   } finally {
     os.homedir = originalHomedir;
     delete require.cache[collectorPath];

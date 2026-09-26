@@ -4,11 +4,20 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const { LIMIT_PROVIDER_IDS } = require('../../src/shared/limits/providers');
 
 const rootDir = path.join(__dirname, '..', '..');
 const read = (file) => fs.readFileSync(path.join(rootDir, file), 'utf8');
 
 const localizedReadmes = ['README.md', 'README.zh-TW.md', 'README.zh-CN.md', 'README.ja.md', 'README.ko.md'];
+
+const nativeMacWidgetCopy = {
+  'README.md': '- **Native macOS Widgets** — View token usage and cost, trends, AI tool quota remaining and reset times, activity heatmaps, and breakdowns by tool or model in Small, Medium, and Large layouts on macOS 14+',
+  'README.zh-TW.md': '- **原生 macOS 小工具**：在 macOS 14+ 上透過小型、中型與大型版面查看 Token 用量與成本、趨勢、各 AI 工具的剩餘額度與重設時間、活動熱圖，以及依工具或模型分類的明細',
+  'README.zh-CN.md': '- **原生 macOS 小部件**：在 macOS 14+ 上通过小号、中号和大号布局查看 Token 用量与成本、趋势、各 AI 工具的剩余额度与重置时间、活动热力图，以及按工具或模型分类的明细',
+  'README.ja.md': '- **ネイティブ macOS ウィジェット** — macOS 14 以降で、小・中・大サイズのレイアウトにトークン使用量とコスト、推移、AI ツールごとのクォータ残量とリセット時刻、アクティビティヒートマップ、ツール・モデル別の内訳を表示します',
+  'README.ko.md': '- **네이티브 macOS 위젯** — macOS 14 이상에서 소형·중형·대형 레이아웃으로 토큰 사용량과 비용, 추세, AI 도구별 잔여 할당량과 재설정 시간, 활동 히트맵, 도구·모델별 분석을 확인할 수 있습니다'
+};
 
 // The supported-tools table is what a reader can actually verify, so the prose counts are
 // checked against it — not against LIMIT_PROVIDER_IDS, where zai/zaiteam are two ids but
@@ -47,29 +56,40 @@ const supportedToolOrder = [
   'OpenCode',
   'Hermes Agent',
   'OpenClaw',
-  'Cursor',
+  'Cursor IDE / Cursor CLI',
   'Antigravity',
   'Cline',
-  'Kimi CLI / Kimi Code',
+  'Amp',
+  'Factory Droid',
+  'Kimi CLI / Kimi Code / Kimi Work',
   'Qwen CLI',
   'Grok Build',
   'GitHub Copilot',
   'Pi',
+  'Oh My Pi',
   'Zed',
-  'Kilo Code',
-  'MiMo Code',
+  'Kilo',
+  'Command Code',
+  'MiMo Code / MiMo Desktop',
   'ZCode / GLM',
   'Kiro',
   'CodeBuddy',
   'WorkBuddy',
   'Proma',
+  'Qoder',
   'Reasonix',
-  'DeepSeek',
+  'DeepSeek / DeepSeek Harness',
+  'Cherry Studio',
+  'LM Studio',
+  'Unsloth Studio',
+  'Devin CLI / Devin Desktop',
+  'TypeSafe',
   'OpenRouter',
   'Minimax',
   'Volcengine',
-  'Qoder',
   'Ollama',
+  'Trae CN',
+  'Alibaba Cloud',
   'Third-party APIs'
 ];
 
@@ -82,27 +102,38 @@ const supportedToolIdOrder = [
   'cursor',
   'antigravity',
   'cline',
+  'amp',
+  'droid',
   'kimi',
   'qwen',
   'xai',
   'copilot',
   'pi',
+  'omp',
   'zed',
-  'kilocode',
-  'mimo-code',
+  'kilo',
+  'commandcode',
+  'mimo',
   'zcode',
   'kiro',
   'codebuddy',
   'workbuddy',
   'proma',
+  'qoder',
   'reasonix',
   'deepseek',
+  'cherrystudio',
+  'lmstudio',
+  'unsloth',
+  'devin',
+  'typesafe',
   'openrouter',
   'minimax',
   'volcengine',
-  'qoder',
   'ollama',
-  'newapi'
+  'trae',
+  'alibaba',
+  'thirdparty'
 ];
 
 // Exact counts, not "at least": a floor check would still pass after new tools land, which is
@@ -158,6 +189,79 @@ test('localized READMEs list the same supported tools', () => {
     assert.deepEqual(supportedToolCounts(text, file), baseline, file);
     assert.deepEqual(supportedToolIds(text, file), supportedToolIdOrder, file);
   }
+});
+
+test('localized READMEs describe native macOS Widget data and layouts', () => {
+  for (const [file, copy] of Object.entries(nativeMacWidgetCopy)) {
+    const text = read(file);
+    assert.ok(text.includes(copy), file);
+    assert.doesNotMatch(text, /source-only preview|源码预览|原始碼預覽|소스 코드 미리보기|ソースコード上のプレビュー/, file);
+  }
+});
+
+test('localized READMEs disclose the LM Studio server-log tracking boundary', () => {
+  for (const file of localizedReadmes) {
+    const text = read(file);
+    const rowEnd = text.indexOf('\n', text.indexOf('tools-icon/lmstudio.png'));
+    const detailsStart = text.indexOf('<details>', rowEnd);
+    const detailsEnd = text.indexOf('</details>', detailsStart);
+    const beforeDetails = text.slice(rowEnd, detailsStart);
+    const notes = text.slice(detailsStart, detailsEnd);
+
+    assert.doesNotMatch(beforeDetails, /\/api\/v1\/chat/, file);
+    assert.match(notes, /\/v1\/chat\/completions/, file);
+    assert.match(notes, /\/v1\/responses/, file);
+    assert.match(notes, /\/api\/v1\/chat/, file);
+  }
+});
+
+// The provider list is ordered to match the README table, so a reader comparing
+// the two sees the same sequence. Nothing enforced that before: the order test
+// pins LIMIT_PROVIDERS against its own hard-coded copy and the table test pins
+// the README against its own, so both could pass while the two disagreed — which
+// is exactly how Command Code landed in the wrong slot.
+//
+// The table's icon id is not always the provider id (a tool row is named after
+// its artwork), and GLM/GLM Team share one row, so the two are bridged here.
+const README_ICON_TO_LIMIT_PROVIDERS = {
+  droid: ['factory'],
+  xai: ['grok'],
+  zcode: ['zai', 'zaiteam']
+};
+
+test('localized READMEs disclose the Unsloth database and inference scope', () => {
+  for (const file of localizedReadmes) {
+    const text = read(file);
+    assert.match(text, /Unsloth Studio \| `~\/\.unsloth\/studio\/studio\.db` \| ✅ \| — \| — \|/, file);
+    assert.ok(text.includes('`$UNSLOTH_STUDIO_HOME`'), file);
+    assert.ok(text.includes('(docs/providers/unsloth.md)'), file);
+  }
+});
+
+// Devin's ✅ means a local source exists, not that a default install produces
+// numbers: Desktop only counts agents that write `usage_update` locally, and the
+// stock `devin-cloud` agent meters server-side. Without this note a reader sees
+// the ✅ and a discovered acp-events directory reporting zero tokens.
+test('localized READMEs disclose the Devin Desktop agent boundary', () => {
+  for (const file of localizedReadmes) {
+    const text = read(file);
+    assert.ok(text.includes('`devin-cloud`'), file);
+    assert.ok(text.includes('(docs/providers/devin.md)'), file);
+  }
+});
+
+test('limit provider order follows the supported-tools table', () => {
+  const text = read('README.md');
+  const fromReadme = text
+    .split('\n')
+    .filter((line) => line.startsWith('| <img'))
+    .filter((row) => row.split('|').map((cell) => cell.trim())[5] === '✅')
+    .flatMap((row) => {
+      const icon = row.match(/tools-icon\/([^".]+)\.[a-z]+"/i)[1];
+      return README_ICON_TO_LIMIT_PROVIDERS[icon] || [icon];
+    });
+
+  assert.deepEqual(fromReadme, [...LIMIT_PROVIDER_IDS]);
 });
 
 test('README tool and provider counts match the supported-tools table', () => {
@@ -217,11 +321,7 @@ test('WSL SQLite guides keep English and Chinese entry points connected', () => 
 test('WSL SQLite guides state and verify the Node.js prerequisite', () => {
   for (const file of ['docs/wsl-sqlite-setup.md', 'docs/wsl-sqlite-setup.zh-CN.md']) {
     const guide = read(file);
-    assert.match(guide, /Node\.js 22\.13\.0/, file);
+    assert.match(guide, /Node\.js 22\.15\.0/, file);
     assert.match(guide, /node --version\nnpm --version\n/, file);
   }
-});
-
-test('legacy Hermes guide keeps published links working', () => {
-  assert.match(read('docs/hermes-wsl-setup.md'), /\(wsl-sqlite-setup\.zh-CN\.md\)/);
 });

@@ -14,7 +14,7 @@ function read(filePath) {
 
 test('Codex account login exposes browser, copy, and cancel controls', () => {
   const html = read(path.join(rendererDir, 'index.html'));
-  const details = html.match(/<div id="codexSettingsDetails"[\s\S]*?<div id="codexAccountErrorMessage" class="settings-note error hidden"><\/div>/)?.[0] || '';
+  const details = html.match(/<div id="codexSettingsDetails"[\s\S]*?<div id="codexAccountErrorMessage" class="settings-note error hidden" role="alert"><\/div>/)?.[0] || '';
 
   assert.match(details, /<button id="codexCancelLoginButton"[\s\S]*class="hidden"[\s\S]*data-i18n="settings\.common\.cancel">/);
   assert.match(details, /<div id="codexLoginUrlActions" class="settings-actions hidden">[\s\S]*codexOpenLoginUrlButton[\s\S]*codexCopyLoginUrlButton[\s\S]*codexCancelLoginButton/);
@@ -100,7 +100,7 @@ test('Codex managed home paths reject traversal outside the managed root', () =>
   assert.match(addAccount, /if \(!homePath\) return \{ ok: false, error:/);
 });
 
-test('Codex managed login selects and persists a workspace before account commit', () => {
+test('Codex managed login stores workspace metadata without rewriting CLI auth before account commit', () => {
   const main = read(path.join(electronDir, 'main.js'));
   const preload = read(path.join(electronDir, 'preload.js'));
   const html = read(path.join(rendererDir, 'index.html'));
@@ -116,8 +116,10 @@ test('Codex managed login selects and persists a workspace before account commit
 
   assert.match(resolver, /listCodexWorkspaces\(auth/);
   assert.match(resolver, /options\.selectWorkspace/);
-  assert.match(resolver, /authWithSelectedCodexWorkspace/);
-  assert.match(resolver, /writeCodexAuthFile/);
+  assert.match(resolver, /workspaceAccountId = normalizeWorkspaceId\(selected\.id\)/);
+  assert.match(resolver, /accountKey: codexAccountKey\(initialIdentity\.email, workspaceAccountId\)/);
+  assert.doesNotMatch(resolver, /workspaceIsFedramp|workspaceFedrampChecked/);
+  assert.doesNotMatch(resolver, /writeCodexAuthFile/);
   const workspaceIndex = addAccount.indexOf('resolveCodexWorkspaceAfterLogin');
   const matchingIndex = addAccount.indexOf('findExistingCodexAccount');
   assert.ok(
@@ -151,11 +153,12 @@ test('Codex startup hydrates missing managed workspace labels without blocking s
   assert.doesNotMatch(hydration, /workspaceLabel === 'Personal'|legacyPersonalLabel/);
   assert.match(hydration, /CODEX_WORKSPACE_LABEL_HYDRATION_CONCURRENCY/);
   assert.match(hydration, /mapWithConcurrency/);
-  assert.match(hydration, /listCodexWorkspaces\(auth, \{ env: process\.env \}\)/);
+  assert.match(hydration, /listCodexWorkspaces\(auth, electronProviderDeps\(\{ env: process\.env \}\)\)/);
   assert.match(hydration, /workspaceAccountId !== resolved\.workspaceAccountId/);
   assert.match(hydration, /account\.enabled === false/);
   assert.match(hydration, /workspaceLabel: resolved\.label/);
   assert.match(hydration, /workspaceKind: resolved\.workspaceKind/);
+  assert.doesNotMatch(hydration, /workspaceIsFedramp|workspaceFedrampChecked/);
   assert.match(hydration, /queueLimitInvalidation\(\{ provider: 'codex' \}, 'workspace-label-hydrated'\)/);
   assert.match(ready, /void hydrateCodexManagedWorkspaceLabels\(\);/);
 });

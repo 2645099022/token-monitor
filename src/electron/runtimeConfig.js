@@ -2,10 +2,20 @@
 
 const { clientsCsvForSetting } = require('../shared/clientTracking');
 const { normalizeHistoryIntervalMs } = require('../shared/collector');
-const { normalizeLimitsRefreshMs, parseLimitProviders } = require('../shared/limitCollector');
+const {
+  normalizeLimitsRefreshMode,
+  normalizeLimitsRefreshMs,
+  parseLimitProviders
+} = require('../shared/limits/collector');
 const { normalizeSyncUploadIntervalMs } = require('../shared/syncUploadInterval');
+const { normalizeCustomScanPaths } = require('../shared/customScanPaths');
+const { limitProviderSettingKeys } = require('../shared/limits/accounts');
+const { normalizeCursorAccountIds } = require('../shared/providers/cursor/account');
+const { limitsAccountConfig } = require('./limits/accountSettings');
 
 const DEFAULT_ALL_TIME_SINCE = '2024-01-01';
+
+const normalizeCursorDisabledAccountIds = normalizeCursorAccountIds;
 
 const MODE_STRUCTURAL_KEYS = Object.freeze([
   'hubMode',
@@ -17,6 +27,7 @@ const MODE_STRUCTURAL_KEYS = Object.freeze([
 ]);
 const USAGE_STRUCTURAL_KEYS = Object.freeze([
   'clients',
+  'customScanPaths',
   'allTimeSince',
   'collectionIntervalMs',
   'collectionMode',
@@ -26,30 +37,37 @@ const USAGE_STRUCTURAL_KEYS = Object.freeze([
   'projectsEnabled',
   'wslScanEnabled'
 ]);
+// Functions and identity fields deliberately stay out: this key answers only
+// whether replacing the active usage runtime would change its collection work.
+// Values arrive from usageConfigFromSettings() after mode-specific normalization.
+const USAGE_CONFIG_FINGERPRINT_KEYS = Object.freeze([
+  'clients',
+  'customScanPaths',
+  'allTimeSince',
+  'intervalMs',
+  'historyEnabled',
+  'dailyHistoryArchiveEnabled',
+  'projectsEnabled',
+  'historyIntervalMs',
+  'watchEnabled',
+  'watchUsePolling',
+  'watchTriggersCollection',
+  'intervalRequiresActivity',
+  'watchDebounceMs',
+  'wslScanEnabled'
+]);
 const LIMITS_RECONFIGURE_KEYS = Object.freeze([
   'limitsEnabled',
   'limitProviders',
+  'limitsRefreshMode',
   'limitsRefreshMs',
+  'cursorDisabledAccountIds',
   'opencodeLocalLimitsEnabled'
 ]);
 const SINK_STRUCTURAL_KEYS = Object.freeze(['syncUploadIntervalMs']);
-const LIMIT_PROVIDER_SETTING_KEYS = Object.freeze({
-  claude: ['claudeWebCookie'],
-  opencode: ['opencodeCookie', 'opencodeProfiles', 'opencodeLocalLimitsEnabled'],
-  openrouter: ['openrouterProfiles'],
-  deepseek: ['deepseekApiKey'],
-  minimax: ['minimaxApiKey'],
-  copilot: ['copilotApiToken', 'copilotEnterpriseHost'],
-  zai: ['zaiApiKey', 'zaiApiRegion'],
-  zaiteam: ['zaiTeamApiKey', 'zaiTeamOrganizationId', 'zaiTeamProjectId'],
-  volcengine: ['volcengineAccessKeyId', 'volcengineSecretAccessKey', 'volcengineRegion'],
-  qoder: ['qoderCookie', 'qoderSite'],
-  kimi: ['kimiApiKey', 'kimiWebAccessToken'],
-  ollama: ['ollamaCookie'],
-  codex: ['codexManagedAccounts'],
-  mimo: ['mimoManagedAccounts'],
-  thirdparty: ['thirdPartyProfiles']
-});
+// Derived from the account declarations: every watched field plus a
+// provider's extraSettingKeys scopes a limits refresh to that provider.
+const LIMIT_PROVIDER_SETTING_KEYS = Object.freeze(limitProviderSettingKeys());
 
 function equalSetting(left, right) {
   if (left === right) return true;
@@ -62,6 +80,10 @@ function changedAny(previous, next, keys) {
   return keys.some((key) => !equalSetting(previous?.[key], next?.[key]));
 }
 
+function usageConfigFingerprint(config = {}) {
+  return JSON.stringify(USAGE_CONFIG_FINGERPRINT_KEYS.map((key) => [key, config?.[key] ?? null]));
+}
+
 function normalizeAllTimeSince(value, fallback = DEFAULT_ALL_TIME_SINCE) {
   const raw = String(value ?? '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return fallback;
@@ -72,6 +94,7 @@ function normalizeAllTimeSince(value, fallback = DEFAULT_ALL_TIME_SINCE) {
 function usageConfigFromSettings(settings = {}, context = {}) {
   return {
     clients: clientsCsvForSetting(settings.clients),
+    customScanPaths: normalizeCustomScanPaths(settings.customScanPaths),
     allTimeSince: normalizeAllTimeSince(settings.allTimeSince),
     commandTimeoutMs: Number(context.commandTimeoutMs || 120 * 1000),
     deviceId: settings.deviceId || context.defaultDeviceId,
@@ -100,38 +123,65 @@ function usageConfigFromSettings(settings = {}, context = {}) {
 
 function limitsConfigFromSettings(settings = {}, context = {}) {
   const env = context.env || process.env;
+  // The Electron widget uses the WorkBuddy app's local sign-in state. Keep the
+  // raw token fallback available to the headless agent, but never let a desktop
+  // .env or legacy settings value silently bypass the app-owned session.
+  const workbuddySettings = context.workbuddyDesktopSessionOnly === true ? {} : settings;
+  const workbuddyEnv = context.workbuddyDesktopSessionOnly === true ? {} : env;
+  const workbuddyLocalSession = context.workbuddyLocalSession && typeof context.workbuddyLocalSession === 'object'
+    ? context.workbuddyLocalSession
+    : {};
   return {
     limitsEnabled: settings.limitsEnabled !== false,
     limitProviders: settings.limitProviders ?? context.defaultLimitProviders,
+    limitsRefreshMode: normalizeLimitsRefreshMode(settings.limitsRefreshMode),
     limitsRefreshMs: normalizeLimitsRefreshMs(settings.limitsRefreshMs),
-    claudeWebCookie: settings.claudeWebCookie
-      || env.CLAUDE_WEB_COOKIE
-      || '',
     claudePrepaidBalanceEnabled: settings.claudePrepaidBalanceEnabled !== false,
     opencodeLocalLimitsEnabled: settings.opencodeLocalLimitsEnabled === true,
-    opencodeCookie: settings.opencodeCookie || env.TOKEN_MONITOR_OPENCODE_COOKIE || '',
-    opencodeProfiles: settings.opencodeProfiles || {},
-    openrouterProfiles: settings.openrouterProfiles || {},
-    deepseekApiKey: settings.deepseekApiKey || '',
-    minimaxApiKey: settings.minimaxApiKey || '',
-    copilotApiToken: settings.copilotApiToken || '',
-    copilotEnterpriseHost: settings.copilotEnterpriseHost || '',
-    zaiApiKey: settings.zaiApiKey || '',
-    zaiApiRegion: settings.zaiApiRegion || 'global',
-    zaiTeamApiKey: settings.zaiTeamApiKey || '',
-    zaiTeamOrganizationId: settings.zaiTeamOrganizationId || '',
-    zaiTeamProjectId: settings.zaiTeamProjectId || '',
-    volcengineAccessKeyId: settings.volcengineAccessKeyId || '',
-    volcengineSecretAccessKey: settings.volcengineSecretAccessKey || '',
-    volcengineRegion: settings.volcengineRegion || '',
-    qoderCookie: settings.qoderCookie || '',
-    qoderSite: settings.qoderSite || 'global',
-    kimiApiKey: settings.kimiApiKey || '',
-    kimiWebAccessToken: settings.kimiWebAccessToken || '',
-    ollamaCookie: settings.ollamaCookie || '',
-    codexManagedAccounts: context.codexManagedAccounts ?? settings.codexManagedAccounts ?? [],
-    mimoManagedAccounts: context.mimoManagedAccounts ?? settings.mimoManagedAccounts ?? [],
-    thirdPartyProfiles: settings.thirdPartyProfiles || {}
+    opencodeAmbientEnabled: settings.opencodeAmbientEnabled !== false,
+    // Every declared account field: settings lane, declared env fallbacks,
+    // declared default. The workbuddy fields below stay hand-written because
+    // the desktop session rewrites their lanes entirely.
+    ...limitsAccountConfig(settings, context),
+    workbuddyAccessToken: workbuddySettings.workbuddyAccessToken
+      || workbuddyEnv.TOKEN_MONITOR_WORKBUDDY_ACCESS_TOKEN
+      || workbuddyEnv.WORKBUDDY_ACCESS_TOKEN
+      || '',
+    workbuddyUserId: workbuddySettings.workbuddyUserId
+      || workbuddyEnv.TOKEN_MONITOR_WORKBUDDY_USER_ID
+      || workbuddyEnv.WORKBUDDY_USER_ID
+      || (context.workbuddyDesktopSessionEnabled === true ? workbuddyLocalSession.userId : '')
+      || '',
+    workbuddyEnterpriseId: workbuddySettings.workbuddyEnterpriseId
+      || workbuddyEnv.TOKEN_MONITOR_WORKBUDDY_ENTERPRISE_ID
+      || workbuddyEnv.WORKBUDDY_ENTERPRISE_ID
+      || (context.workbuddyDesktopSessionEnabled === true ? workbuddyLocalSession.enterpriseId : '')
+      || '',
+    workbuddyDomain: workbuddySettings.workbuddyDomain
+      || workbuddyEnv.TOKEN_MONITOR_WORKBUDDY_DOMAIN
+      || workbuddyEnv.WORKBUDDY_DOMAIN
+      || (context.workbuddyDesktopSessionEnabled === true ? workbuddyLocalSession.domain : '')
+      || '',
+    workbuddyDepartmentInfo: workbuddySettings.workbuddyDepartmentInfo
+      || workbuddyEnv.TOKEN_MONITOR_WORKBUDDY_DEPARTMENT_INFO
+      || workbuddyEnv.WORKBUDDY_DEPARTMENT_INFO
+      || (context.workbuddyDesktopSessionEnabled === true ? workbuddyLocalSession.departmentInfo : '')
+      || '',
+    workbuddyAccountType: context.workbuddyDesktopSessionEnabled === true
+      ? workbuddyLocalSession.accountType || ''
+      : '',
+    // Why the app-owned session is unusable, when it is. An encrypted or
+    // otherwise unreadable credential is not a signed-out app, and the limits
+    // layer needs that difference to stop asking the user to sign in again.
+    workbuddyLocalSessionReason: context.workbuddyDesktopSessionEnabled === true
+      ? String(workbuddyLocalSession.reason || '').trim()
+      : '',
+    workbuddyLocale: workbuddySettings.workbuddyLocale
+      || workbuddyEnv.TOKEN_MONITOR_WORKBUDDY_LOCALE
+      || workbuddyEnv.WORKBUDDY_LOCALE
+      || '',
+    workbuddyDesktopSessionSupported: context.workbuddyDesktopSessionSupported !== false,
+    workbuddyDesktopSessionEnabled: context.workbuddyDesktopSessionEnabled === true
   };
 }
 
@@ -148,6 +198,7 @@ function diagnosticConfigurationFromSettings(settings = {}, context = {}) {
     syncUploadIntervalMs: normalizeSyncUploadIntervalMs(
       context.syncUploadIntervalMs ?? settings.syncUploadIntervalMs
     ),
+    limitsRefreshMode: limits.limitsRefreshMode,
     limitsRefreshMs: limits.limitsRefreshMs
   };
 }
@@ -177,10 +228,14 @@ function classifySettingsChange(previous = {}, next = {}) {
 
 module.exports = {
   LIMIT_PROVIDER_SETTING_KEYS,
+  USAGE_STRUCTURAL_KEYS,
   classifySettingsChange,
   diagnosticConfigurationFromSettings,
   envelopeFromSettings,
   limitsConfigFromSettings,
   normalizeAllTimeSince,
+  normalizeCursorAccountIds,
+  normalizeCursorDisabledAccountIds,
+  usageConfigFingerprint,
   usageConfigFromSettings
 };

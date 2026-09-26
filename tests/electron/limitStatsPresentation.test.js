@@ -8,15 +8,25 @@ const test = require('node:test');
 const {
   projectLimitProviderForDisplay,
   projectLimitStatsForDisplay
-} = require('../../src/electron/limitStatsPresentation');
+} = require('../../src/electron/limits/statsPresentation');
 const { homeLimitAccountsForProviders } = require('../../src/electron/renderer/homeOverview');
-const { collectLimitsOnce } = require('../../src/shared/limitCollector');
-const { aggregateLimits } = require('../../src/shared/limits');
+const { collectLimitsOnce: collectLimitsOnceRaw } = require('../../src/shared/limits/collector');
+const { aggregateLimits } = require('../../src/shared/limits/core');
 const { buildMacWidgetSnapshot } = require('../../src/shared/macWidgetSnapshot');
 const { formatTrayText } = require('../../src/shared/trayText');
 
 const projectRoot = path.join(__dirname, '..', '..');
 const updatedAt = '2026-08-09T08:03:00.000Z';
+
+// See tests/shared/limitCollector.opencode.test.js: the Go usage API needs no
+// configuration, so it must be stubbed out or it reads the developer's own
+// auth.json and probes opencode.ai.
+const collectLimitsOnce = (options, deps = {}) => collectLimitsOnceRaw(options, {
+  opencodeCollectGoApi: async () => ({ status: 'notConfigured', windows: [], identity: '' }),
+  // Without this the ambient key adds a second account to every fixture here.
+  opencodeReadGoApiKey: () => '',
+  ...deps
+});
 
 function opencodeProvider({
   accountKey = 'shared-account',
@@ -159,7 +169,7 @@ test('mixed local and Web OpenCode quota fails closed through a pre-provenance H
   );
   const collected = summary.providers[0];
   assert.equal(collected.source, 'local');
-  assert.deepEqual(collected.windows.map((window) => window.source), ['local', 'web']);
+  assert.deepEqual(collected.windows.map((window) => window.source), ['local', 'web', 'web']);
 
   const legacyLimits = roundTripThroughLegacyHub(summary);
   assert.equal(legacyLimits.providers[0].source, 'local');

@@ -132,7 +132,7 @@ test('a partly timed entry contributes its whole output and stays an integer', (
   assert.equal(result.timedTokens, 92_650);
 });
 
-test('normalizePeriod accepts both spellings and defaults an older payload to zero', () => {
+test('normalizePeriod accepts both spellings and marks older payload throughput unavailable', () => {
   assert.equal(normalizePeriod({ timedTokens: 900, timedDurationMs: 1000 }).timedDurationMs, 1000);
   assert.equal(normalizePeriod({ timed_tokens: 900, timed_duration_ms: 1000 }).timedTokens, 900);
   // outputTokens rides along in any real payload, and the cap below needs it present.
@@ -142,6 +142,58 @@ test('normalizePeriod accepts both spellings and defaults an older payload to ze
   assert.equal(legacy.timedTokens, 0);
   assert.equal(legacy.timedOutputTokens, 0);
   assert.equal(legacy.timedDurationMs, 0);
+  assert.equal(legacy.capabilities.throughput, false);
+  assert.equal(legacy.capabilities.tokenComponents, false);
+  assert.equal(legacy.unclassifiedTokens, 5);
+  assert.equal(normalizePeriod({
+    totalTokens: 5,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 0
+  }).capabilities.tokenComponents, true);
+  assert.equal(normalizePeriod({
+    outputTokens: 50,
+    timedTokens: 900,
+    timedOutputTokens: 42,
+    timedDurationMs: 1000
+  }).capabilities.throughput, true);
+  assert.equal(normalizePeriod({
+    outputTokens: 50,
+    timedTokens: 900,
+    timedOutputTokens: 42,
+    timedDurationMs: 1000,
+    capabilities: { throughput: false }
+  }).capabilities.throughput, false);
+  assert.equal(normalizePeriod().capabilities.throughput, false, 'a missing period is unavailable, not an exact zero');
+  assert.equal(normalizePeriod(emptyPeriod()).capabilities.throughput, true, 'a current producer can publish an exact empty period');
+});
+
+test('normalizePeriod preserves known native components beside an explicit unknown remainder', () => {
+  const period = normalizePeriod({
+    totalTokens: 100,
+    cacheReadTokens: 60,
+    cacheWriteTokens: 10,
+    outputTokens: 20,
+    unclassifiedTokens: 10,
+    capabilities: { tokenComponents: false },
+    clients: { codex: 100 },
+    clientCacheReads: { codex: 60 },
+    clientCacheWrites: { codex: 10 },
+    clientOutputs: { codex: 20 },
+    clientUnclassifiedTokens: { codex: 10 },
+    models: { 'gpt-5': 100 },
+    modelCacheReads: { 'gpt-5': 60 },
+    modelCacheWrites: { 'gpt-5': 10 },
+    modelOutputs: { 'gpt-5': 20 },
+    modelUnclassifiedTokens: { 'gpt-5': 10 }
+  });
+
+  assert.equal(period.capabilities.tokenComponents, false);
+  assert.equal(period.cacheReadTokens, 60);
+  assert.equal(period.outputTokens, 20);
+  assert.equal(period.unclassifiedTokens, 10);
+  assert.equal(period.clientUnclassifiedTokens.codex, 10);
+  assert.equal(period.modelUnclassifiedTokens['gpt-5'], 10);
 });
 
 test('normalization caps timedOutputTokens at the output it claims to have timed', () => {
@@ -265,7 +317,27 @@ test('an unattributed fallback period reads as no throughput data, never NaN', (
     assert.ok(Number.isFinite(merged[field]), `${field} must stay finite, got ${merged[field]}`);
   }
   assert.equal(merged.timedOutputTokens, timed.timedOutputTokens, 'the fallback adds no phantom throughput');
+  assert.equal(merged.capabilities.throughput, false, 'mixed provenance stays unavailable');
   assert.equal(normalizePeriod(fallback).timedOutputTokens, 0);
+  assert.equal(normalizePeriod(fallback).capabilities.throughput, false);
+});
+
+test('aggregate fallback component provenance survives normalization and warm deltas', () => {
+  const exactBase = extractUsageFromTokscale({ entries: [tokscaleEntry()] });
+  const exactAnchor = extractUsageFromTokscale({ entries: [tokscaleEntry()] });
+  const aggregateFallback = extractUsageFromTokscale({ totalTokens: 200, totalCost: 2 });
+
+  assert.equal(normalizePeriod(aggregateFallback).capabilities.tokenComponents, false);
+  assert.equal(normalizePeriod(aggregateFallback).capabilities.throughput, false);
+  assert.equal(normalizePeriod(aggregateFallback).unclassifiedTokens, 200);
+  assert.equal(
+    applyPeriodDelta(exactBase, aggregateFallback, exactAnchor).capabilities.tokenComponents,
+    false
+  );
+  assert.equal(
+    applyPeriodDelta(exactBase, aggregateFallback, exactAnchor).capabilities.throughput,
+    false
+  );
 });
 
 test('a targeted watch tick lands on the same throughput as a full rescan', () => {
@@ -372,6 +444,20 @@ test('applyPeriodDelta updates throughput exactly from a today-only rescan', () 
   assert.equal(month.timedOutputTokens, 408);
   assert.equal(month.timedDurationMs, 9600);
   assert.equal(month.outputTokens, 430);
+});
+
+test('applyPeriodDelta keeps throughput unavailable when the Today anchor lacks provenance', () => {
+  const baseMonth = period({ timedTokens: 5000, timedOutputTokens: 380, timedDurationMs: 9000, outputTokens: 400 });
+  const freshToday = period({ timedTokens: 800, timedOutputTokens: 66, timedDurationMs: 1500, outputTokens: 70 });
+  const unavailableAnchor = period({
+    timedTokens: 0,
+    timedOutputTokens: 0,
+    timedDurationMs: 0,
+    capabilities: { tokenComponents: true, throughput: false }
+  });
+
+  const month = applyPeriodDelta(baseMonth, freshToday, unavailableAnchor);
+  assert.equal(month.capabilities.throughput, false);
 });
 
 test('applyPeriodDelta never drives throughput negative when the anchor is stale', () => {
