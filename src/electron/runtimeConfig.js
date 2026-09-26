@@ -116,6 +116,9 @@ function usageConfigFromSettings(settings = {}, context = {}) {
     intervalRequiresActivity: Boolean(context.intervalRequiresActivity),
     watchDebounceMs: Number(context.watchDebounceMs || 1500),
     wslScanEnabled: settings.wslScanEnabled !== false,
+    // Day-split correction hooks (Electron only); see dailyUsage/correction.js.
+    beforeUpdate: context.beforeUpdate,
+    transformHistoryGraph: context.transformHistoryGraph,
     onError: context.onError,
     logger: context.logger
   };

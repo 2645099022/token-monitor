@@ -995,6 +995,19 @@ function normalizeHistoryIntervalMs(value) {
   return HISTORY_INTERVAL_VALUES.has(parsed) ? parsed : DEFAULT_HISTORY_INTERVAL_MS;
 }
 
+// options.transformHistoryGraph rewrites the raw graph a history is built from
+// (the day-split correction). It is applied to the tokscale graph, or to the
+// archive-merged graph, exactly once; a failing transform keeps the graph.
+function transformedHistoryGraph(graph, options) {
+  if (typeof options.transformHistoryGraph !== 'function') return graph;
+  try {
+    return options.transformHistoryGraph(graph) || graph;
+  } catch (error) {
+    if (typeof options.logger === 'function') options.logger(`history graph transform failed: ${error.message}`);
+    return graph;
+  }
+}
+
 async function collectHistoryOnce(options) {
   throwIfAborted(options.signal);
   const startedAt = Date.now();
@@ -1028,7 +1041,8 @@ async function collectHistoryOnce(options) {
       });
       throwIfAborted(options.signal);
       rawGraphs.push(graphJson);
-      histories.push(normalizeHistory(parseGraphResult(graphJson), { capDays, todayKey }));
+      const shownGraph = options.dailyHistoryArchiveEnabled ? graphJson : transformedHistoryGraph(graphJson, options);
+      histories.push(normalizeHistory(parseGraphResult(shownGraph), { capDays, todayKey }));
     } catch (error) {
       if (options.signal?.aborted) throw abortReason(options.signal);
       failureCode = 'history-graph-failed';
@@ -1052,7 +1066,7 @@ async function collectHistoryOnce(options) {
         capDays,
         writeEnabled: options.dailyHistoryArchiveWriteEnabled
       });
-      const retained = normalizeHistory(parseGraphResult(retainedGraph), { capDays, todayKey });
+      const retained = normalizeHistory(parseGraphResult(transformedHistoryGraph(retainedGraph, options)), { capDays, todayKey });
       const result = retained.daily.length || retained.monthly.length ? retained : null;
       reportStatus(failureCode === null);
       return result;
@@ -1607,6 +1621,7 @@ async function collectUsageOnce(options) {
       dailyHistoryArchiveWriteEnabled: options.dailyHistoryArchiveWriteEnabled,
       dailyHistoryArchiveOptions: options.dailyHistoryArchiveOptions,
       dailyHistoryLiveDays,
+      transformHistoryGraph: options.transformHistoryGraph,
       onHistoryStatus: options.onHistoryStatus,
       logger: options.logger
     });
@@ -2874,6 +2889,16 @@ function startCollector(options) {
         }
       }
       if (qoderCnReadState.periodFailed) scheduledWatchNeedsFullScan = true;
+      // Lets the host bring derived data (the day-split store) up to date with
+      // the transcripts this tick read before the summary is published.
+      if (typeof options.beforeUpdate === 'function') {
+        try {
+          await options.beforeUpdate(reason);
+        } catch (error) {
+          log(`beforeUpdate failed: ${error.message}`);
+        }
+      }
+      if (stopped) return;
       const transformedSummary = await onUpdate?.(summary, reason);
       const visibleSummary = transformedSummary && typeof transformedSummary === 'object'
         ? transformedSummary

@@ -88,6 +88,11 @@ const { Worker } = require('node:worker_threads');
 const { defaultSourceRoots: dailyUsageSourceRoots } = require('../shared/dailyUsage/sources');
 const { rangeSessions } = require('../shared/dailyUsage/rangeSessions');
 const {
+  buildDailyCorrection,
+  correctHistoryGraph,
+  correctSummaryPeriods
+} = require('../shared/dailyUsage/correction');
+const {
   antigravitySyncLockPath,
   repairAntigravitySyncLock
 } = require('../shared/providers/antigravity/selfSync');
@@ -337,6 +342,7 @@ const {
   diagnosticConfigurationFromSettings,
   envelopeFromSettings,
   limitsConfigFromSettings,
+  normalizeAllTimeSince,
   normalizeCursorAccountIds,
   normalizeCursorDisabledAccountIds,
   usageConfigFingerprint,
@@ -593,6 +599,9 @@ function defaultSettings() {
     sessionContextMetric: 'used',
     periodMonthMode: 'month',
     periodCustomRange: null,
+    // Replace tokscale's numbers with transcript-counted usage wherever the
+    // day-split store covers a session (see dailyUsage/correction.js).
+    dailyUsageCorrectionEnabled: true,
     // Append-only archives of client transcript dirs for the day-split usage
     // import, e.g. { claude: ['E:\\backup\\claude-backup'], grok: [...] }.
     dailyUsageArchiveRoots: {},
@@ -798,6 +807,8 @@ function electronUsageConfig(errorPrefix) {
     intervalRequiresActivity: collectorIntervalRequiresActivity(),
     watchDebounceMs: 1500,
     dailyHistoryArchiveWriteEnabled: () => !isExternalAgentActive(),
+    beforeUpdate: () => refreshDailyUsageBeforePublish(),
+    transformHistoryGraph: (graph) => correctedHistoryGraph(graph),
     onError: (error, reason) => console.log(`[${errorPrefix}] ${reason}: ${error.message}`),
     logger: (message) => console.log(`[${errorPrefix}] ${message}`)
   });
@@ -2743,7 +2754,78 @@ function summaryWithArchivesApplied(summary, sessionArchive, now) {
         canonicalSummary: true,
         mutate: true
       });
-  return settings?.projectsEnabled === false ? visibleSummary : applyProjectRollups(visibleSummary);
+  // After the archives, so an archived copy of a covered session is replaced
+  // too, and before project rollups, which are built from the sessions.
+  const correction = currentDailyCorrection(now);
+  const correctedSummary = correction ? correctSummaryPeriods(visibleSummary, correction) : visibleSummary;
+  return settings?.projectsEnabled === false ? correctedSummary : applyProjectRollups(correctedSummary);
+}
+
+// Day-split correction state. The correction is rebuilt when the day, the
+// all-time start, or the day-split store changes, and at most every few
+// seconds otherwise, since tokscale's own costs anchor it and move each tick.
+const DAILY_CORRECTION_MAX_AGE_MS = 5000;
+const DAILY_IMPORT_BEFORE_PUBLISH_MIN_GAP_MS = 5000;
+const DAILY_IMPORT_BEFORE_PUBLISH_WAIT_MS = 2000;
+let dailyCorrectionCache = { key: '', value: null, builtAt: 0 };
+let dailyUsageImportGeneration = 0;
+let lastDailyImportBeforePublishAt = 0;
+let dailyUncorrectedDays = {};
+
+function dailyUsageCorrectionEnabled() {
+  return settings?.dailyUsageCorrectionEnabled !== false && Boolean(usagePersistenceHandle);
+}
+
+function currentDailyCorrection(now = new Date()) {
+  if (!dailyUsageCorrectionEnabled()) return null;
+  const todayKey = normalizeDayKey(localTodayKeyFor(now));
+  // The collector's own all-time start, so allTime covers the same dates.
+  const allTimeSince = normalizeAllTimeSince(settings?.allTimeSince);
+  const key = `${todayKey}|${allTimeSince}|${dailyUsageImportGeneration}`;
+  if (dailyCorrectionCache.key === key && Date.now() - dailyCorrectionCache.builtAt < DAILY_CORRECTION_MAX_AGE_MS) {
+    return dailyCorrectionCache.value;
+  }
+  let value = null;
+  try {
+    value = buildDailyCorrection(usagePersistenceHandle.db, { todayKey, allTimeSince });
+  } catch (error) {
+    console.warn(`[daily-usage] correction build failed: ${error?.message || error}`);
+  }
+  dailyCorrectionCache = { key, value, builtAt: Date.now() };
+  return value;
+}
+
+function localTodayKeyFor(date) {
+  const value = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+}
+
+function correctedHistoryGraph(graph) {
+  const correction = currentDailyCorrection(new Date());
+  if (!correction) {
+    dailyUncorrectedDays = {};
+    return graph;
+  }
+  const result = correctHistoryGraph(graph, correction);
+  dailyUncorrectedDays = result.uncorrected;
+  return result.graph;
+}
+
+// Brings the day-split store up to date with the transcripts before a summary
+// is published, so today's corrected numbers do not trail tokscale's. Waits a
+// bounded time; a slower import lands in the next publish.
+async function refreshDailyUsageBeforePublish() {
+  if (!dailyUsageCorrectionEnabled()) return;
+  if (Date.now() - lastDailyImportBeforePublishAt < DAILY_IMPORT_BEFORE_PUBLISH_MIN_GAP_MS) return;
+  lastDailyImportBeforePublishAt = Date.now();
+  const run = runDailyUsageImport();
+  if (!run) return;
+  let timer = null;
+  await Promise.race([
+    run,
+    new Promise((resolve) => { timer = setTimeout(resolve, DAILY_IMPORT_BEFORE_PUBLISH_WAIT_MS); })
+  ]);
+  clearTimeout(timer);
 }
 
 function summaryWithArchivedClientUsage(summary) {
@@ -5749,6 +5831,7 @@ function runDailyUsageImport() {
     worker.once('message', (message) => {
       for (const line of message.logs || []) console.log(line);
       if (message.ok) {
+        if (message.imported?.parsed > 0 || message.pricing?.fetched > 0) dailyUsageImportGeneration += 1;
         console.log(`[daily-usage] import ${JSON.stringify(message.imported)} pricing ${JSON.stringify(message.pricing)} in ${Date.now() - startedAt}ms`);
       } else {
         console.warn(`[daily-usage] import failed: ${message.error?.message}`);
@@ -7067,6 +7150,7 @@ app.whenReady().then(() => {
       hiddenHomeLimitProviders: patch.hiddenHomeLimitProviders !== undefined ? normalizeHiddenLimitProviders(patch.hiddenHomeLimitProviders) : normalizeHiddenLimitProviders(settings.hiddenHomeLimitProviders),
       homeLimitAccountCount: normalizeHomeLimitAccountCount(patch.homeLimitAccountCount ?? settings.homeLimitAccountCount),
       periodMonthMode: normalizePeriodMonthMode(patch.periodMonthMode ?? settings.periodMonthMode),
+      dailyUsageCorrectionEnabled: parseBoolean(patch.dailyUsageCorrectionEnabled ?? settings.dailyUsageCorrectionEnabled, true),
       modelRankingMetric: normalizeRankingMetric(patch.modelRankingMetric ?? settings.modelRankingMetric),
       sessionContextMetric: normalizeSessionContextMetric(patch.sessionContextMetric ?? settings.sessionContextMetric),
       historyEnabled: parseBoolean(patch.historyEnabled ?? settings.historyEnabled, false),
@@ -8445,6 +8529,9 @@ app.whenReady().then(() => {
   ipcMain.handle('dashboard:open', () => { createDashboardWindow(); return true; });
   ipcMain.handle('dashboard:getHistory', (_event, options) => getDashboardHistory(options));
   ipcMain.handle('dailyUsage:range', (_event, range) => dailyUsageRange(range));
+  // Days whose value for a client could not be verified against transcripts:
+  // { 'YYYY-MM-DD': [client, ...] }, empty while the correction is off.
+  ipcMain.handle('dailyUsage:uncorrected', () => (dailyUsageCorrectionEnabled() ? dailyUncorrectedDays : {}));
   ipcMain.on('dashboard:ready', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win !== dashboardWindow || win.isDestroyed()) return;

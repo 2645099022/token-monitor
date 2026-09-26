@@ -631,3 +631,55 @@ test('shouldIncludeHistory: first call, throttle window, and force', () => {
 test('shouldIncludeHistory returns false when history collection is disabled', () => {
   assert.equal(shouldIncludeHistory(1_000_000_000_000, 0, 0, true, false), false);
 });
+
+// The day-split correction rewrites the raw graph once, before normalizing.
+function doubledTokensGraph(graph) {
+  return {
+    ...graph,
+    contributions: graph.contributions.map((row) => ({
+      ...row,
+      clients: row.clients.map((entry) => ({ ...entry, tokens: { ...entry.tokens, input: entry.tokens.input * 2 } }))
+    }))
+  };
+}
+
+test('transformHistoryGraph rewrites the tokscale graph exactly once without the archive', async () => {
+  let calls = 0;
+  const history = await collectHistoryOnce({
+    clients: 'claude', todayKey: '2026-06-07',
+    runGraph: async () => SAMPLE_GRAPH,
+    transformHistoryGraph: (graph) => { calls += 1; return doubledTokensGraph(graph); }
+  });
+  assert.equal(calls, 1);
+  assert.equal(history.daily[0].tokens, 40);
+});
+
+test('transformHistoryGraph rewrites the archive-merged graph exactly once and never the archive', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'token-monitor-daily-history-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const archivePath = path.join(dir, 'daily-history-archive.json');
+  let calls = 0;
+  const history = await collectHistoryOnce({
+    clients: 'claude', todayKey: '2026-06-07',
+    runGraph: async () => SAMPLE_GRAPH,
+    dailyHistoryArchiveEnabled: true,
+    dailyHistoryArchiveOptions: { path: archivePath },
+    transformHistoryGraph: (graph) => { calls += 1; return doubledTokensGraph(graph); }
+  });
+  assert.equal(calls, 1);
+  assert.equal(history.daily[0].tokens, 40);
+  const archived = JSON.parse(fs.readFileSync(archivePath, 'utf8'));
+  assert.doesNotMatch(JSON.stringify(archived), /"input":20/, 'the archive keeps the uncorrected observation');
+});
+
+test('a failing transformHistoryGraph keeps the graph', async () => {
+  const logs = [];
+  const history = await collectHistoryOnce({
+    clients: 'claude', todayKey: '2026-06-07',
+    runGraph: async () => SAMPLE_GRAPH,
+    transformHistoryGraph: () => { throw new Error('boom'); },
+    logger: (line) => logs.push(line)
+  });
+  assert.equal(history.daily[0].tokens, 30);
+  assert.ok(logs.some((line) => line.includes('history graph transform failed')));
+});

@@ -3456,6 +3456,12 @@ html.is-windows .settings-panel select option {
 .home-activity-tooltip-date {
   font-size: 9px;
 }
+/* A day whose value for a tool could not be checked against transcripts. */
+.home-activity-tooltip-note {
+  color: var(--yellow);
+  font-size: 9px;
+  font-weight: 500;
+}
 .home-module-empty {
   display: flex;
   min-height: 36px;

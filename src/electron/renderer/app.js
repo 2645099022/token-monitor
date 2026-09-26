@@ -6132,6 +6132,15 @@ function setupHomeActivityHover(scroller) {
       tooltip.querySelector('[data-home-activity-tooltip-count]').textContent = formatCompact(Number(cell.dataset.t || 0));
       tooltip.querySelector('[data-home-activity-tooltip-label]').textContent = 'tokens';
       tooltip.querySelector('[data-home-activity-tooltip-date]').textContent = cell.dataset.d || '';
+      let note = tooltip.querySelector('[data-home-activity-tooltip-note]');
+      if (!note) {
+        note = document.createElement('span');
+        note.className = 'home-activity-tooltip-note';
+        note.dataset.homeActivityTooltipNote = 'true';
+        tooltip.append(note);
+      }
+      note.textContent = dailyUncorrectedLabel(cell.dataset.d || '');
+      note.hidden = !note.textContent;
     }
     tooltip.dataset.visible = 'true';
     tooltip.setAttribute('aria-hidden', 'false');
@@ -6329,8 +6338,29 @@ function renderHomeTrendsModule() {
   return module;
 }
 
+// Days whose value for a tool could not be checked against transcripts, for
+// the heatmap tooltip. The list only moves when history is rescanned.
+const DAILY_UNCORRECTED_REFRESH_MS = 30 * 1000;
+state.dailyUncorrected = {};
+state.dailyUncorrectedFetchedAt = 0;
+
+function refreshDailyUncorrected() {
+  if (typeof window.tokenMonitor.getDailyUsageUncorrected !== 'function') return;
+  if (Date.now() - state.dailyUncorrectedFetchedAt < DAILY_UNCORRECTED_REFRESH_MS) return;
+  state.dailyUncorrectedFetchedAt = Date.now();
+  window.tokenMonitor.getDailyUsageUncorrected()
+    .then((value) => { state.dailyUncorrected = value && typeof value === 'object' ? value : {}; }, () => {});
+}
+
+function dailyUncorrectedLabel(dateKey) {
+  const clients = Array.isArray(state.dailyUncorrected?.[dateKey]) ? state.dailyUncorrected[dateKey] : [];
+  if (clients.length === 0) return '';
+  return t('history.uncorrected', { clients: clients.map((client) => clientLabels[client] || client).join(', ') });
+}
+
 function renderHome() {
   if (!els.homePanel) return;
+  refreshDailyUncorrected();
   // The previous scroller (and its ResizeObserver) is about to be replaced; drop the
   // observer so at most one is live. Keep the active tooltip visible while the
   // replacement heatmap reconnects it to the same date cell.
@@ -8164,6 +8194,8 @@ function syncSettingsForm() {
   }
   if (els.wslScanInput) els.wslScanInput.checked = state.settings.wslScanEnabled !== false;
   if (els.sessionUsageArchiveInput) els.sessionUsageArchiveInput.checked = state.settings.sessionUsageArchiveEnabled !== false;
+  const correctionInput = document.getElementById('dailyUsageCorrectionInput');
+  if (correctionInput) correctionInput.checked = state.settings.dailyUsageCorrectionEnabled !== false;
   for (const input of dailyUsageArchiveInputs()) {
     if (document.activeElement === input) continue;
     const dirs = state.settings.dailyUsageArchiveRoots?.[input.dataset.archiveClient];
@@ -11592,6 +11624,15 @@ els.collectionCadenceInput?.addEventListener('change', async () => {
 function dailyUsageArchiveInputs() {
   return Array.from(document.querySelectorAll('[data-archive-client]'));
 }
+
+// Turning the transcript correction on or off needs a history rescan so every
+// view switches source at once; that is exactly the manual refresh, which is
+// the only path allowed to force one (#177).
+document.getElementById('dailyUsageCorrectionInput')?.addEventListener('change', async (event) => {
+  await saveSettings({ dailyUsageCorrectionEnabled: event.target.checked });
+  state.dailyUncorrectedFetchedAt = 0;
+  els.refreshButton?.click();
+});
 
 // Folders are separated by ';' (one input per tool); saved as a whole map.
 for (const input of dailyUsageArchiveInputs()) {
