@@ -107,42 +107,64 @@ function grokTurn(endedAt, model, input, cached, output, ticks) {
   return { endedAt: new Date(endedAt).toISOString(), ...usage, modelUsage: { [model]: usage } };
 }
 
-test('grok: prefers the usage.json ledger and converts cost ticks to USD', async () => {
+function grokUpdate(sessionId, eventId, ts, turn) {
+  return {
+    timestamp: Math.floor(ts / 1000),
+    params: { sessionId, update: { sessionUpdate: 'turn_completed', usage: turn }, _meta: { eventId } }
+  };
+}
+
+test('grok: every turn comes from updates.jsonl, even when the ledger starts later', async () => {
   const dir = tmpDir();
   try {
     const sessionDir = path.join(dir, encodeURIComponent('E:\\spman\\grok'), '01a0-sess');
     fs.mkdirSync(sessionDir, { recursive: true });
+    // The ledger only covers turns after the release that introduced it.
     fs.writeFileSync(path.join(sessionDir, 'usage.json'), JSON.stringify({
       sessionId: '01a0-sess',
-      turns: [grokTurn(DAY1, 'grok-4.6-build', 1000, 800, 10, 2e10), grokTurn(DAY2, 'grok-4.6-build', 500, 400, 5, 1e10)]
+      turns: [grokTurn(DAY2, 'grok-4.6-build', 500, 400, 5, 1e10)]
     }));
-    // The same turns again in updates.jsonl must not be counted a second time.
-    writeLines(path.join(sessionDir, 'updates.jsonl'), [{
-      timestamp: Math.floor(DAY1 / 1000),
-      params: { sessionId: '01a0-sess', update: { sessionUpdate: 'turn_completed', usage: grokTurn(DAY1, 'grok-4.6-build', 1000, 800, 10, 2e10) } },
-      _meta: { eventId: 'e1' }
-    }]);
+    writeLines(path.join(sessionDir, 'updates.jsonl'), [
+      grokUpdate('01a0-sess', 'e1', DAY1, grokTurn(DAY1, 'grok-4.6-build', 1000, 800, 10, 2e10)),
+      grokUpdate('01a0-sess', 'e2', DAY2, grokTurn(DAY2, 'grok-4.6-build', 500, 400, 5, 1e10))
+    ]);
     const { events, projectPath } = await parseGrokSession(sessionDir);
     assert.equal(projectPath, 'E:\\spman\\grok');
     assert.equal(events.length, 2);
     assert.deepEqual([events[0].input, events[0].cacheRead, events[0].output, events[0].total], [200, 800, 10, 1010]);
+    // xAI reports cost in ticks of 1e-10 USD.
     assert.equal(events[0].officialCost, 2);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('grok: falls back to turn_completed updates without a ledger', async () => {
+test('grok: a reused eventId is a new turn; only an exact repeat is dropped', async () => {
   const dir = tmpDir();
   try {
     const sessionDir = path.join(dir, 'proj', 'sess-u');
-    const line = (eventId, ts) => ({
-      timestamp: Math.floor(ts / 1000),
-      params: { sessionId: 'sess-u', update: { sessionUpdate: 'turn_completed', usage: grokTurn(ts, 'grok-4.5', 100, 0, 1, 1e9) } },
-      _meta: { eventId }
-    });
-    writeLines(path.join(sessionDir, 'updates.jsonl'), [line('a', DAY1), line('a', DAY1), line('b', DAY2)]);
+    const turn = (ts) => grokTurn(ts, 'grok-4.5', 100, 0, 1, 1e9);
+    writeLines(path.join(sessionDir, 'updates.jsonl'), [
+      grokUpdate('sess-u', 'a', DAY1, turn(DAY1)),
+      grokUpdate('sess-u', 'a', DAY1, turn(DAY1)),
+      grokUpdate('sess-u', 'a', DAY2, turn(DAY2))
+    ]);
     const { events } = await parseGrokSession(sessionDir);
     assert.equal(events.length, 2);
     assert.equal(events[0].officialCost, 0.1);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('grok: the usage.json ledger is read when updates.jsonl is gone', async () => {
+  const dir = tmpDir();
+  try {
+    const sessionDir = path.join(dir, 'proj', 'sess-l');
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionDir, 'usage.json'), JSON.stringify({
+      sessionId: 'sess-l',
+      turns: [grokTurn(DAY1, 'grok-4.5', 100, 0, 1, 1e9), grokTurn(DAY2, 'grok-4.5', 100, 0, 1, 1e9)]
+    }));
+    const { events } = await parseGrokSession(sessionDir);
+    assert.equal(events.length, 2);
+    assert.equal(events[1].sessionId, 'sess-l');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

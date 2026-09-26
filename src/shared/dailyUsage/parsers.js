@@ -172,42 +172,44 @@ function grokProjectPath(sessionDir) {
   try { return decodeURIComponent(encoded); } catch (_) { return ''; }
 }
 
-// Grok Build keeps a per-turn ledger in usage.json; older sessions only have
-// the turn_completed updates. Reading both would count every turn twice.
+// Grok Build records every turn in updates.jsonl as a turn_completed update
+// carrying that turn's usage and billed cost. usage.json holds the same turns,
+// but only from the release that introduced it, so a session that spans the
+// upgrade lists fewer turns there; it is read only when updates.jsonl is gone.
+// ~/.grok/logs/unified.jsonl repeats the same work per inference and is not
+// read. eventId is reused across turns, so a line is a duplicate only when its
+// event, time and total all repeat.
 async function parseGrokSession(sessionDir) {
   const sessionIdFromDir = path.basename(sessionDir);
   const projectPath = grokProjectPath(sessionDir);
-  const usagePath = path.join(sessionDir, 'usage.json');
-  if (fs.existsSync(usagePath)) {
-    let ledger;
-    try { ledger = JSON.parse(fs.readFileSync(usagePath, 'utf8')); } catch (_) { ledger = null; }
-    if (ledger && Array.isArray(ledger.turns)) {
-      const sessionId = String(ledger.sessionId || sessionIdFromDir);
-      const events = [];
-      for (const turn of ledger.turns) {
-        const ts = Date.parse(turn.endedAt);
-        if (!Number.isFinite(ts)) continue;
-        events.push(...grokUsageEvents(sessionId, ts, turn));
-      }
-      return { events, projectPath };
-    }
-  }
   const updatesPath = path.join(sessionDir, 'updates.jsonl');
-  const events = [];
   if (fs.existsSync(updatesPath)) {
+    const events = [];
     const seen = new Set();
     for await (const obj of jsonLines(updatesPath, 'turn_completed')) {
       const update = obj.params?.update;
       if (update?.sessionUpdate !== 'turn_completed' || !update.usage) continue;
-      const eventId = obj._meta?.eventId || obj.params?._meta?.eventId || '';
-      if (eventId) {
-        if (seen.has(eventId)) continue;
-        seen.add(eventId);
-      }
       const seconds = Number(obj.timestamp);
       const ts = Number.isFinite(seconds) ? (seconds > 1e12 ? seconds : seconds * 1000) : NaN;
       if (!Number.isFinite(ts)) continue;
+      const eventId = obj._meta?.eventId || obj.params?._meta?.eventId || '';
+      const lineKey = `${eventId}|${ts}|${update.usage.totalTokens}`;
+      if (seen.has(lineKey)) continue;
+      seen.add(lineKey);
       events.push(...grokUsageEvents(String(obj.params.sessionId || sessionIdFromDir), ts, update.usage));
+    }
+    return { events, projectPath };
+  }
+  const usagePath = path.join(sessionDir, 'usage.json');
+  const events = [];
+  let ledger;
+  try { ledger = JSON.parse(fs.readFileSync(usagePath, 'utf8')); } catch (_) { ledger = null; }
+  if (ledger && Array.isArray(ledger.turns)) {
+    const sessionId = String(ledger.sessionId || sessionIdFromDir);
+    for (const turn of ledger.turns) {
+      const ts = Date.parse(turn.endedAt);
+      if (!Number.isFinite(ts)) continue;
+      events.push(...grokUsageEvents(sessionId, ts, turn));
     }
   }
   return { events, projectPath };
