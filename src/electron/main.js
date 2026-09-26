@@ -81,8 +81,11 @@ const {
   clientDiagnosticRoots,
   lookupModelPricing,
   normalizeHistoryIntervalMs,
+  tokscaleCommand,
   visibleDiagnosticRoots
 } = require('../shared/collector');
+const { Worker } = require('node:worker_threads');
+const { defaultSourceRoots: dailyUsageSourceRoots } = require('../shared/dailyUsage/sources');
 const {
   antigravitySyncLockPath,
   repairAntigravitySyncLock
@@ -558,6 +561,9 @@ function defaultSettings() {
     // the clients' default footers tend to lead with what is left.
     sessionContextMetric: 'used',
     periodMonthMode: 'month',
+    // Append-only archives of client transcript dirs for the day-split usage
+    // import, e.g. { claude: ['E:\\backup\\claude-backup'], grok: [...] }.
+    dailyUsageArchiveRoots: {},
     themeColors: {},
     vendorColors: {},
     interfaceFontFamily: '',
@@ -5687,6 +5693,49 @@ function performQuit() {
   app.exit(0);
 }
 
+// Day-split usage: parse client transcripts into usage_daily on a worker
+// thread. The first run after startup imports all history; later runs only
+// re-parse transcripts that changed.
+const DAILY_USAGE_FIRST_RUN_DELAY_MS = 20 * 1000;
+const DAILY_USAGE_INTERVAL_MS = 10 * 60 * 1000;
+let dailyUsageImportRunning = null;
+let dailyUsageImportTimer = null;
+
+function runDailyUsageImport() {
+  if (dailyUsageImportRunning || !usagePersistenceHandle) return dailyUsageImportRunning;
+  const command = tokscaleCommand();
+  const workerData = {
+    dbPath: usagePersistenceHandle.path,
+    roots: dailyUsageSourceRoots({ archiveRoots: settings?.dailyUsageArchiveRoots }),
+    tokscaleCommand: { bin: command.bin, prefixArgs: command.prefixArgs, env: command.env }
+  };
+  const startedAt = Date.now();
+  dailyUsageImportRunning = new Promise((resolve) => {
+    const worker = new Worker(require.resolve('../shared/dailyUsage/importWorker'), { workerData });
+    worker.once('message', (message) => {
+      for (const line of message.logs || []) console.log(line);
+      if (message.ok) {
+        console.log(`[daily-usage] import ${JSON.stringify(message.imported)} pricing ${JSON.stringify(message.pricing)} in ${Date.now() - startedAt}ms`);
+      } else {
+        console.warn(`[daily-usage] import failed: ${message.error?.message}`);
+      }
+      resolve(message);
+    });
+    worker.once('error', (error) => {
+      console.warn(`[daily-usage] worker error: ${error?.message || error}`);
+      resolve({ ok: false });
+    });
+  }).finally(() => { dailyUsageImportRunning = null; });
+  return dailyUsageImportRunning;
+}
+
+function scheduleDailyUsageImport() {
+  if (dailyUsageImportTimer) return;
+  setTimeout(runDailyUsageImport, DAILY_USAGE_FIRST_RUN_DELAY_MS).unref?.();
+  dailyUsageImportTimer = setInterval(runDailyUsageImport, DAILY_USAGE_INTERVAL_MS);
+  dailyUsageImportTimer.unref?.();
+}
+
 function requestAppQuit() {
   if (quitRequested) return;
   quitRequested = true;
@@ -6688,6 +6737,7 @@ app.whenReady().then(() => {
     setUsageWriter(usageWriter);
     usagePersistenceHandle = { db: usageDb, writer: usageWriter, path: usageDbPath };
     console.log('[persistence] usage history DB ready:', usageDbPath);
+    scheduleDailyUsageImport();
   } catch (err) {
     console.error('[persistence] failed to open usage history DB:', err.message);
   }

@@ -10,6 +10,7 @@
 const os = require('node:os');
 const { resolveSessionTimestampMap } = require('../sessionTimestamps');
 const { tokenValueForClient } = require('../usage');
+const { recordDailySnapshot } = require('../dailyUsage/store');
 
 const SESSION_ID_KEYS = ['sessionId', 'session_id', 'session', 'conversationId', 'conversation_id', 'threadId', 'thread_id'];
 const MODEL_KEYS = ['model', 'modelName', 'model_name', 'modelId', 'model_id'];
@@ -213,6 +214,7 @@ function createWriter(db, { logger = null, homeDir = null, resolveTimestampsMap 
         insertStmt.run(rec);
         created += 1;
       }
+      recordDailySnapshot(db, { ...rec, started_at: match?.started_at || rec.started_at });
       touched += 1;
     }
     return { touched, created, updated: touched - created };

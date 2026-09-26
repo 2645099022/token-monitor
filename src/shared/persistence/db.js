@@ -23,9 +23,10 @@ const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const { backfillMissingTimestamps } = require('./backfillTimestamps');
 const { repairUsageRecords } = require('./repairRecords');
+const { createDailySchema } = require('../dailyUsage/store');
 const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const PROJECT_ROOT = SOURCE_ROOT.endsWith(`${path.sep}app.asar`)
   ? `${SOURCE_ROOT}.unpacked`
@@ -71,6 +72,8 @@ function openDb(filePath) {
     : new Database(filePath);
   // WAL = better crash safety + concurrent reads while the writer is in a tx.
   if (filePath !== ':memory:') db.pragma('journal_mode = WAL');
+  // The day-split import worker writes through its own connection.
+  db.pragma('busy_timeout = 5000');
   db.pragma('foreign_keys = ON');
   migrate(db);
   return db;
@@ -183,6 +186,10 @@ function migrate(db) {
     // Rows written before v4 have total_tokens = 0 and may split one
     // conversation into overlapping instances; repair both in place.
     repairUsageRecords(db);
+  }
+  if (current < 5) {
+    // Day-split usage derived from transcripts (see dailyUsage/store.js).
+    createDailySchema(db);
   }
   if (current !== SCHEMA_VERSION) setSchemaVersion(db, SCHEMA_VERSION);
 }
