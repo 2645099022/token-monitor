@@ -229,6 +229,11 @@
     const palette = options.fallbackColors || fallbackColors;
     const archivedLabel = options.archivedLabel || 'Archived';
     const now = options.now || new Date();
+    // Range views (day-split usage): a session that also ran outside the range
+    // shows its share, an unsplit one says so, and the cost names its source.
+    const rangeShareLabel = typeof options.rangeShareLabel === 'function' ? options.rangeShareLabel : null;
+    const unsplitLabel = options.unsplitLabel || '';
+    const costSourceLabel = typeof options.costSourceLabel === 'function' ? options.costSourceLabel : null;
     const rows = Object.entries(period?.sessions || {})
       .map(([key, session]) => {
         if (isReasonixSyntheticSession(session, key)) return null;
@@ -244,11 +249,15 @@
         // enforces through `isArchivedSession`.
         const activityState = sessionActivityState(session, now);
         const running = activityState === 'running';
+        const lifetime = finiteNumber(session?.rangeLifetimeTokens);
         const activityParts = [
+          session?.unsplit === true ? unsplitLabel : '',
           archived ? archivedLabel : '',
           sessionActivityLabel(session, now),
+          rangeShareLabel && lifetime > value * 1.001 ? rangeShareLabel(value, lifetime) : '',
           messageLabel(session)
         ].filter(Boolean);
+        const costNote = costSourceLabel ? costSourceLabel(session) : '';
         return {
           key: `session:${key}`,
           kind: 'session',
@@ -266,8 +275,9 @@
           context: sessionContextForRow(session, now),
           client,
           backgroundReview: isBackgroundReviewSession(session) || undefined,
+          unsplit: session?.unsplit === true || undefined,
           sortTime: sessionTimestampValue(session),
-          title: `${clientLabel} session${sessionIdLabel(sessionId) ? ` ${sessionIdLabel(sessionId)}` : ''}`
+          title: `${clientLabel} session${sessionIdLabel(sessionId) ? ` ${sessionIdLabel(sessionId)}` : ''}${costNote ? `\n${costNote}` : ''}`
         };
       })
       .filter(Boolean);

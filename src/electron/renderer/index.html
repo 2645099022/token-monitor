@@ -27,6 +27,12 @@
             <button class="view-switcher-menu-item" type="button" role="menuitemradio" data-fixed-period="week"><span class="view-switcher-menu-label" data-i18n="periodRange.week">This week</span></button>
             <button class="view-switcher-menu-item" type="button" role="menuitemradio" data-fixed-period="last7"><span class="view-switcher-menu-label" data-i18n="periodRange.last7">Last 7 days</span></button>
             <button class="view-switcher-menu-item" type="button" role="menuitemradio" data-fixed-period="last30"><span class="view-switcher-menu-label" data-i18n="periodRange.last30">Last 30 days</span></button>
+            <button class="view-switcher-menu-item" type="button" role="menuitemradio" data-fixed-period="custom"><span class="view-switcher-menu-label" data-i18n="periodRange.custom">Custom…</span></button>
+            <form id="customRangeForm" class="custom-range-form hidden" aria-label="Custom range" data-i18n-aria-label="periodRange.customRange">
+              <label class="custom-range-field"><span data-i18n="periodRange.customStart">From</span><input id="customRangeStart" type="date" required></label>
+              <label class="custom-range-field"><span data-i18n="periodRange.customEnd">To</span><input id="customRangeEnd" type="date" required></label>
+              <button id="customRangeApply" class="custom-range-apply" type="submit" data-i18n="periodRange.customApply">Apply</button>
+            </form>
           </div>
           <div class="window-actions">
             <button id="pinButton" class="icon-button" title="Cycle window behavior">⇧</button>
@@ -190,6 +196,7 @@
                   <option value="week" data-i18n="periodRange.week">This week</option>
                   <option value="last7" data-i18n="periodRange.last7">Last 7 days</option>
                   <option value="last30" data-i18n="periodRange.last30">Last 30 days</option>
+                  <option value="custom" data-i18n="periodRange.customOption">Custom range</option>
                 </select>
                 <span class="settings-note settings-item-desc" data-i18n="periodRange.settingsNote">Choose the default usage range shown on Home. On Home, click the selected period at the top again to open the menu and switch quickly.</span>
               </label>
@@ -546,6 +553,13 @@
                 <span id="sessionUsageArchiveStatus" class="settings-note"></span>
                 <button id="clearSessionUsageArchiveButton" class="session-archive-clear" type="button" data-i18n="settings.collection.sessionArchiveClear">Clear retained data</button>
               </div>
+            </div>
+            <div class="settings-subgroup daily-usage-archive-settings">
+              <div class="settings-group-header"><span data-i18n="settings.dailyUsage.archiveTitle">Transcript backups</span></div>
+              <p class="settings-note" data-i18n="settings.dailyUsage.archiveNote">Folders that mirror a tool's session folder. Sessions deleted locally but kept there still count when a date range is split by day. Separate several folders with ;</p>
+              <label>Claude Code<input id="dailyUsageArchiveClaude" type="text" data-archive-client="claude" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="E:\backup\claude-backup" /></label>
+              <label>Codex<input id="dailyUsageArchiveCodex" type="text" data-archive-client="codex" maxlength="1024" autocomplete="off" spellcheck="false" /></label>
+              <label>Grok<input id="dailyUsageArchiveGrok" type="text" data-archive-client="grok" maxlength="1024" autocomplete="off" spellcheck="false" /></label>
             </div>
             <div id="wslScanRow" class="settings-wsl-block hidden">
               <label class="checkbox-label wsl-scan-toggle settings-item">

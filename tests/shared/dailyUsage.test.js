@@ -285,6 +285,38 @@ test('query: tokscale session cost is spread over days by price weight', () => {
   } finally { db.close(); }
 });
 
+test('rangeSessions: range usage with lifetime share, project, and unsplit sessions kept apart', () => {
+  const { rangeSessions } = require('../../src/shared/dailyUsage/rangeSessions');
+  const db = openDb(':memory:');
+  try {
+    const insertDaily = db.prepare(`
+      INSERT INTO usage_daily (client, source_key, session_id, model, day, input_tokens, total_tokens, message_count, first_at, last_at, project_path)
+      VALUES (?, 's', ?, 'm', ?, ?, ?, 1, ?, ?, ?)
+    `);
+    insertDaily.run('claude', 'A', '2026-09-20', 100, 100, '2026-09-20T10:00:00.000Z', '2026-09-20T11:00:00.000Z', '/work/repo');
+    insertDaily.run('claude', 'A', '2026-09-21', 300, 300, '2026-09-21T09:00:00.000Z', '2026-09-21T10:00:00.000Z', '/work/repo');
+    insertDaily.run('claude', 'B', '2026-09-25', 50, 50, '2026-09-25T09:00:00.000Z', '2026-09-25T10:00:00.000Z', null);
+    const insertRecord = db.prepare(`INSERT INTO usage_records (client, session_id, model, total_tokens, cost_usd, started_at, last_used_at) VALUES (?, ?, 'm', ?, ?, ?, ?)`);
+    insertRecord.run('claude', 'A', 400, 4, '2026-09-20T10:00:00.000Z', '2026-09-21T10:00:00.000Z');
+    // No transcript left: active across the range, listed as unsplit.
+    insertRecord.run('claude', 'C', 999, 9, new Date(2026, 8, 19, 12).toISOString(), new Date(2026, 8, 22, 12).toISOString());
+    // Outside the range.
+    insertRecord.run('cursor', 'D', 10, 1, new Date(2026, 8, 1, 12).toISOString(), new Date(2026, 8, 1, 13).toISOString());
+
+    const result = rangeSessions(db, { start: '2026-09-21', end: '2026-09-21' });
+    assert.deepEqual(Object.keys(result.sessions), ['claude:A']);
+    const a = result.sessions['claude:A'];
+    assert.equal(a.totalTokens, 300);
+    assert.equal(a.rangeLifetimeTokens, 400);
+    assert.equal(a.projectLabel, 'repo');
+    assert.ok(a.projectId);
+    assert.deepEqual(a.models, { m: 300 });
+    assert.deepEqual(Object.keys(result.unsplit), ['claude:C']);
+    assert.equal(result.unsplit['claude:C'].unsplit, true);
+    assert.equal(result.unsplit['claude:C'].totalTokens, 999);
+  } finally { db.close(); }
+});
+
 test('pricing: parses tokscale output and prices tokens, preferring an official cost', () => {
   const price = parsePricingOutput(`spinner\n${JSON.stringify({
     matchedKey: 'claude-opus-5', source: 'LiteLLM',

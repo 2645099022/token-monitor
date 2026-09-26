@@ -2695,7 +2695,8 @@ function buildFixedPeriodSourcesSnapshot() {
     historyEnabled: state.settings?.historyEnabled !== false,
     historyAvailable: meta.historyTransportAvailable === true,
     todayKey: fixedPeriodTodayKey(),
-    locale: currentCalendarLocale()
+    locale: currentCalendarLocale(),
+    customRange: effectiveCustomRange()
   });
 }
 
@@ -2788,18 +2789,50 @@ function modelRowsForPeriod(period, rankingMetric = state.settings?.modelRanking
   return toolRowsForPeriod(period);
 }
 
+function sessionCostSourceLabel(session) {
+  const sources = Array.isArray(session?.costSources) ? session.costSources : [];
+  if (session?.unsplit === true) return t('sessions.costSource.unsplit');
+  if (sources.length === 0) return Number(session?.unpricedTokens || 0) > 0 ? t('sessions.costSource.none') : '';
+  return sources.map((source) => t(`sessions.costSource.${source}`)).join('\n');
+}
+
+function daySplitRowOptions() {
+  const units = effectiveCompactTokenUnits();
+  const locale = currentLocale();
+  return {
+    rangeShareLabel: (range, total) => t('sessions.rangeShare', {
+      range: formatCompact(range, units, locale),
+      total: formatCompact(total, units, locale)
+    }),
+    unsplitLabel: t('sessions.unsplit'),
+    costSourceLabel: sessionCostSourceLabel
+  };
+}
+
 function sessionRowsForPeriod(period) {
-  const rows = sessionRowsApi.sessionRowsForPeriod(period, {
+  const derivedRange = fixedPeriodRangesApi.isDerived(state.period);
+  const baseOptions = {
     clientLabels,
     clientColors,
     modelColor,
     stableColor,
     fallbackColors: fallbackModelColors,
     archivedLabel: t('session.archived'),
-    nativeSessions: state.stats?.nativeSessions?.[state.period] || {}
+    ...(derivedRange ? daySplitRowOptions() : {})
+  };
+  const rows = sessionRowsApi.sessionRowsForPeriod(period, {
+    ...baseOptions,
+    nativeSessions: derivedRange ? {} : state.stats?.nativeSessions?.[state.period] || {}
   });
-  if (rows.length > 0) {
+  // Sessions active in the range without a day split: listed after the split
+  // ones with their lifetime totals, never summed into the range.
+  const unsplit = derivedRange ? daySplitSessionsFor(state.fixedPeriodSnapshot?.range)?.unsplit : null;
+  const unsplitRows = unsplit
+    ? sessionRowsApi.sessionRowsForPeriod({ sessions: daySplitSessionsWithMetadata(unsplit) }, baseOptions)
+    : [];
+  if (rows.length > 0 || unsplitRows.length > 0) {
     rows.sort((a, b) => b.sortTime - a.sortTime || b.value - a.value || b.cost - a.cost || a.name.localeCompare(b.name));
+    rows.push(...unsplitRows);
     return sessionRowsApi.groupBackgroundReviewRows(rows, {
       label: t('sessions.backgroundReviews'),
       countLabel: (count) => t('sessions.backgroundReviewCount', { count }),
@@ -5228,6 +5261,86 @@ async function warmFixedPeriodHistory(options = {}) {
   return true;
 }
 
+// Day-split sessions of the selected derived range (week, 7D, 30D, custom),
+// read from the local usage store. One request per range; a range already
+// loaded is refreshed at most once a minute, since the store only moves when
+// the background import runs.
+const DAY_SPLIT_REFRESH_MS = 60 * 1000;
+state.daySplit = { key: '', status: 'idle', data: null, fetchedAt: 0, pending: '' };
+
+// The saved Custom range; the last 7 days until one is chosen.
+function effectiveCustomRange() {
+  const today = fixedPeriodTodayKey();
+  return fixedPeriodRangesApi.normalizeCustomRange(state.settings?.periodCustomRange, today)
+    || fixedPeriodRangesApi.rangeForSelection('last7', { todayKey: today });
+}
+
+function daySplitAvailable() {
+  return typeof window.tokenMonitor.getDailyUsageRange === 'function';
+}
+
+function selectedPeriodRange() {
+  if (!fixedPeriodRangesApi.isDerived(state.period)) return null;
+  if (state.fixedPeriodSnapshot?.status === 'ready' && state.fixedPeriodSnapshot.range) return state.fixedPeriodSnapshot.range;
+  return fixedPeriodRangesApi.rangeForSelection(state.period, {
+    todayKey: fixedPeriodTodayKey(),
+    locale: currentCalendarLocale(),
+    customRange: effectiveCustomRange()
+  });
+}
+
+function daySplitSessionsFor(range) {
+  const key = range ? `${range.start}|${range.end}` : '';
+  return key && state.daySplit.key === key && state.daySplit.status === 'ready' ? state.daySplit.data : null;
+}
+
+function ensureDaySplitSessions(range) {
+  if (!range || !daySplitAvailable()) return;
+  const key = `${range.start}|${range.end}`;
+  const fresh = state.daySplit.key === key
+    && (state.daySplit.status === 'ready' || state.daySplit.status === 'failed')
+    && Date.now() - state.daySplit.fetchedAt < DAY_SPLIT_REFRESH_MS;
+  if (fresh || state.daySplit.pending === key) return;
+  if (state.daySplit.key !== key) state.daySplit = { key, status: 'loading', data: null, fetchedAt: 0, pending: '' };
+  state.daySplit.pending = key;
+  window.tokenMonitor.getDailyUsageRange({ start: range.start, end: range.end })
+    .then((result) => result, () => ({ ok: false }))
+    .then((result) => {
+      if (state.daySplit.key !== key) return;
+      const keepPrevious = !result?.ok && state.daySplit.status === 'ready';
+      state.daySplit = {
+        key,
+        status: result?.ok ? 'ready' : (keepPrevious ? 'ready' : 'failed'),
+        data: result?.ok ? result : state.daySplit.data,
+        fetchedAt: Date.now(),
+        pending: ''
+      };
+      if (fixedPeriodRangesApi.isDerived(state.period)) {
+        state.rowSignature = '';
+        statsRenderScheduler.request();
+      }
+    });
+}
+
+// Live metadata (title, project, kind) of sessions the collector still sees.
+function daySplitSessionsWithMetadata(sessions) {
+  const live = state.stats?.periods?.allTime?.sessions || {};
+  const out = {};
+  for (const [key, session] of Object.entries(sessions || {})) {
+    const meta = live[key];
+    out[key] = meta
+      ? {
+          ...session,
+          title: meta.title || session.title,
+          sessionKind: meta.sessionKind || session.sessionKind,
+          projectId: meta.projectId || session.projectId,
+          projectLabel: meta.projectLabel || session.projectLabel
+        }
+      : { ...session };
+  }
+  return out;
+}
+
 function fixedPeriodMessage(snapshot, breakdown = '') {
   if (snapshot?.status === 'loading') return t('periodRange.loading');
   if (breakdown === 'session') return t('periodRange.sessionUnavailable');
@@ -5254,6 +5367,49 @@ function periodMenuButtons() {
   return Array.from(els.monthPeriodMenu?.querySelectorAll('[data-fixed-period]') || []);
 }
 
+const customRangeEls = {
+  form: document.getElementById('customRangeForm'),
+  start: document.getElementById('customRangeStart'),
+  end: document.getElementById('customRangeEnd')
+};
+
+// Opens the Custom range form prefilled with the saved range, or the last
+// 7 days when none was chosen yet. Dates after today cannot be picked.
+function setCustomRangeFormOpen(open) {
+  if (!customRangeEls.form) return;
+  customRangeEls.form.classList.toggle('hidden', !open);
+  els.monthPeriodMenu?.classList.toggle('custom-range-open', Boolean(open));
+  if (!open) return;
+  const today = fixedPeriodTodayKey();
+  const range = effectiveCustomRange();
+  for (const input of [customRangeEls.start, customRangeEls.end]) input.max = today;
+  customRangeEls.start.value = range.start;
+  customRangeEls.end.value = range.end;
+  customRangeEls.start.focus();
+}
+
+async function applyCustomRange() {
+  const range = fixedPeriodRangesApi.normalizeCustomRange(
+    { start: customRangeEls.start.value, end: customRangeEls.end.value },
+    fixedPeriodTodayKey()
+  );
+  if (!range) {
+    customRangeEls.start.reportValidity();
+    return;
+  }
+  state.settings.periodCustomRange = range;
+  state.settings.periodMonthMode = 'custom';
+  setPeriodMenuOpen(false, { restoreFocus: true });
+  const changed = setPeriod('custom');
+  syncPeriodTabs();
+  syncPeriodMenu();
+  state.rowSignature = '';
+  state.periodMotionActive = changed;
+  render();
+  state.periodMotionActive = false;
+  await saveSettings({ periodMonthMode: 'custom', periodCustomRange: range });
+}
+
 function focusPeriodMenuButton(index) {
   const buttons = periodMenuButtons();
   if (!buttons.length) return;
@@ -5264,6 +5420,7 @@ function focusPeriodMenuButton(index) {
 
 function setPeriodMenuOpen(open, { restoreFocus = false, focus = '' } = {}) {
   state.periodMenuOpen = Boolean(open);
+  if (!state.periodMenuOpen) setCustomRangeFormOpen(false);
   els.monthPeriodMenu?.closest('.titlebar')?.classList.toggle('period-menu-open', state.periodMenuOpen);
   els.monthPeriodMenu?.classList.toggle('hidden', !state.periodMenuOpen);
   els.monthPeriodTab?.setAttribute('aria-expanded', String(state.periodMenuOpen));
@@ -6247,26 +6404,36 @@ function render() {
     }
     state.fixedPeriodSnapshot = buildFixedPeriodSnapshot();
     if (state.fixedPeriodSnapshot.status === 'ready') {
-      state.stats.periods[state.period] = state.fixedPeriodSnapshot.period;
+      const derived = state.fixedPeriodSnapshot.period;
+      const daySplit = daySplitSessionsFor(state.fixedPeriodSnapshot.range);
+      if (daySplit) derived.sessions = daySplitSessionsWithMetadata(daySplit.sessions);
+      state.stats.periods[state.period] = derived;
     }
   } else {
     state.fixedPeriodSnapshot = null;
   }
+  const daySplitView = derivedPeriod && (state.breakdown === 'session' || state.breakdown === 'project');
+  if (daySplitView) ensureDaySplitSessions(state.fixedPeriodSnapshot?.range || selectedPeriodRange());
   if (state.openSession && state.breakdown !== 'session') { state.openSession = null; els.sessionDetail.classList.add('hidden'); els.sessionDetail.replaceChildren(); els.sessionDetailHead.classList.add('hidden'); els.sessionDetailHead.replaceChildren(); }
   if (state.openSession) { els.sessionDetail.classList.remove('hidden'); els.sessionDetailHead.classList.remove('hidden'); } else { els.sessionDetail.classList.add('hidden'); els.sessionDetailHead.classList.add('hidden'); }
   const period = state.stats.periods?.[state.period] || { totalTokens: 0, costUsd: 0, clients: {} };
   const fixedUnavailable = derivedPeriod && state.fixedPeriodSnapshot?.status !== 'ready';
   const detailUnavailable = derivedPeriod
     && !fixedPeriodRangesApi.supportsBreakdown(state.period, state.breakdown, {
-      deviceHistoriesAvailable: Array.isArray(state.fixedPeriodHistory?.deviceHistories)
+      deviceHistoriesAvailable: Array.isArray(state.fixedPeriodHistory?.deviceHistories),
+      daySplitAvailable: daySplitAvailable()
     });
-  if (fixedUnavailable || detailUnavailable) {
+  const daySplitPending = daySplitView && !fixedUnavailable && !detailUnavailable
+    && !daySplitSessionsFor(state.fixedPeriodSnapshot?.range);
+  if (fixedUnavailable || detailUnavailable || daySplitPending) {
     cancelNumberAnimation();
     els.totalTokens.textContent = fixedUnavailable ? '—' : formatNumber(Number(period.totalTokens || 0));
     updateTotalCompact(fixedUnavailable ? 0 : Number(period.totalTokens || 0));
     els.cost.textContent = fixedUnavailable ? '' : formatCost(period.costUsd || 0);
     state.currentTotal = fixedUnavailable ? 0 : Number(period.totalTokens || 0);
-    hidePeriodContentForMessage(fixedPeriodMessage(state.fixedPeriodSnapshot, detailUnavailable ? state.breakdown : ''));
+    hidePeriodContentForMessage(daySplitPending && !fixedUnavailable && !detailUnavailable
+      ? t(state.daySplit.status === 'failed' ? 'periodRange.daySplitUnavailable' : 'periodRange.daySplitLoading')
+      : fixedPeriodMessage(state.fixedPeriodSnapshot, detailUnavailable ? state.breakdown : ''));
     renderFloatingBubbleContent();
     signalContentReady();
     return;
@@ -7756,7 +7923,7 @@ function syncPeriodTabs() {
     const mode = activeSlot === 'month'
       ? fixedPeriodRangesApi.normalizeMonthMode(state.period)
       : fixedPeriodRangesApi.normalizeMonthMode(state.settings?.periodMonthMode);
-    els.monthPeriodTab.textContent = fixedPeriodRangesApi.displayLabel(mode);
+    els.monthPeriodTab.textContent = fixedPeriodRangesApi.displayLabel(mode, { customRange: effectiveCustomRange() });
     els.monthPeriodTab.dataset.period = mode;
   }
   syncPeriodMenu();
@@ -7997,6 +8164,11 @@ function syncSettingsForm() {
   }
   if (els.wslScanInput) els.wslScanInput.checked = state.settings.wslScanEnabled !== false;
   if (els.sessionUsageArchiveInput) els.sessionUsageArchiveInput.checked = state.settings.sessionUsageArchiveEnabled !== false;
+  for (const input of dailyUsageArchiveInputs()) {
+    if (document.activeElement === input) continue;
+    const dirs = state.settings.dailyUsageArchiveRoots?.[input.dataset.archiveClient];
+    input.value = Array.isArray(dirs) ? dirs.join('; ') : '';
+  }
   renderAutomaticAppUpdateControl();
   renderSessionUsageArchiveStatus();
   const exportAutoOn = Boolean(state.settings.exportAutoEnabled);
@@ -11032,6 +11204,10 @@ for (const button of els.monthPeriodMenu?.querySelectorAll('[data-fixed-period]'
   button.addEventListener('click', async (event) => {
     event.stopPropagation();
     const selection = fixedPeriodRangesApi.normalizeMonthMode(button.dataset.fixedPeriod);
+    if (selection === 'custom') {
+      setCustomRangeFormOpen(customRangeEls.form?.classList.contains('hidden'));
+      return;
+    }
     setPeriodMenuOpen(false, { restoreFocus: true });
     const changed = setPeriod(selection);
     state.settings.periodMonthMode = selection;
@@ -11053,7 +11229,14 @@ els.monthPeriodTab?.addEventListener('keydown', (event) => {
   setPeriodMenuOpen(true, { focus: event.key === 'ArrowUp' ? 'last' : 'first' });
 });
 
+customRangeEls.form?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void applyCustomRange();
+});
+
 els.monthPeriodMenu?.addEventListener('keydown', (event) => {
+  // The date fields keep their own Tab and arrow-key behaviour.
+  if (customRangeEls.form?.contains(event.target)) return;
   if (event.key === 'Tab') {
     setPeriodMenuOpen(false);
     return;
@@ -11365,6 +11548,22 @@ els.collectionCadenceInput?.addEventListener('change', async () => {
         : Number(value)
   });
 });
+function dailyUsageArchiveInputs() {
+  return Array.from(document.querySelectorAll('[data-archive-client]'));
+}
+
+// Folders are separated by ';' (one input per tool); saved as a whole map.
+for (const input of dailyUsageArchiveInputs()) {
+  input.addEventListener('change', async () => {
+    const roots = {};
+    for (const field of dailyUsageArchiveInputs()) {
+      const dirs = field.value.split(';').map((dir) => dir.trim()).filter(Boolean);
+      if (dirs.length) roots[field.dataset.archiveClient] = dirs;
+    }
+    await saveSettings({ dailyUsageArchiveRoots: roots });
+  });
+}
+
 els.sessionUsageArchiveInput?.addEventListener('change', async () => {
   await saveSettings({ sessionUsageArchiveEnabled: els.sessionUsageArchiveInput.checked });
 });

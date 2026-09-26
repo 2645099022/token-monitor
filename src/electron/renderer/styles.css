@@ -5281,6 +5281,46 @@ html.is-windows .limit-live-badge {
   -webkit-app-region: no-drag;
   grid-template-columns: minmax(0, 1fr);
 }
+/* Custom range: two dates and Apply, opened in place under the Custom item. */
+.period-menu.custom-range-open { width: 168px; }
+.custom-range-form {
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 7px 7px 6px;
+  border-top: 1px solid var(--line);
+}
+.custom-range-field {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.custom-range-field input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(var(--sunken-rgb), 0.48);
+  color: var(--text);
+  color-scheme: dark light;
+  font: inherit;
+  font-size: 11px;
+  outline: none;
+}
+.custom-range-field input:focus-visible { border-color: var(--line-strong); }
+.custom-range-apply {
+  height: 24px;
+  border: 1px solid rgba(var(--accent-rgb), 0.58);
+  border-radius: 6px;
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+}
+.custom-range-apply:hover { background: rgba(var(--accent-rgb), 0.2); }
 .period-menu.hidden {
   /* Animates out rather than disappearing, so it must keep its box. Higher
      specificity than the blanket `.hidden`, and matching weight to beat it. */

@@ -654,6 +654,45 @@ test('fixed periods fail closed without History and for unsupported detail views
   assert.equal(ranges.supportsBreakdown('last7', 'device', { deviceHistoriesAvailable: true }), true);
   assert.equal(ranges.supportsBreakdown('last7', 'device', { deviceHistoriesAvailable: false }), false);
   assert.equal(ranges.supportsBreakdown('last7', 'model'), true);
+  // Sessions and Projects of a derived range come from the day-split store.
+  assert.equal(ranges.supportsBreakdown('custom', 'session', { daySplitAvailable: true }), true);
+  assert.equal(ranges.supportsBreakdown('last30', 'project', { daySplitAvailable: true }), true);
+});
+
+test('custom range is ordered, capped at today, and labelled by its dates', () => {
+  assert.equal(ranges.isDerived('custom'), true);
+  assert.equal(ranges.normalizeMonthMode('custom'), 'custom');
+  assert.equal(ranges.slotForSelection('custom'), 'month');
+  assert.deepEqual(ranges.normalizeCustomRange({ start: '2026-09-15', end: '2026-09-01' }), { start: '2026-09-01', end: '2026-09-15' });
+  assert.deepEqual(ranges.normalizeCustomRange({ start: '2026-09-20', end: '2026-10-05' }, '2026-09-26'), { start: '2026-09-20', end: '2026-09-26' });
+  assert.equal(ranges.normalizeCustomRange({ start: '2026-02-30', end: '2026-03-01' }), null);
+  assert.equal(ranges.normalizeCustomRange(null), null);
+  assert.deepEqual(
+    ranges.rangeForSelection('custom', { todayKey: '2026-09-26', customRange: { start: '2026-09-01', end: '2026-09-15' } }),
+    { start: '2026-09-01', end: '2026-09-15' }
+  );
+  assert.equal(ranges.rangeForSelection('custom', { todayKey: '2026-09-26' }), null);
+
+  const now = new Date(2026, 8, 26, 12);
+  assert.equal(ranges.displayLabel('custom', { customRange: { start: '2026-09-01', end: '2026-09-15' }, now }), '09/01–09/15');
+  assert.equal(ranges.displayLabel('custom', { customRange: { start: '2026-09-03', end: '2026-09-03' }, now }), '09/03');
+  assert.equal(ranges.displayLabel('custom', { customRange: { start: '2025-12-20', end: '2026-01-05' }, now }), '25/12/20–26/01/05');
+  assert.equal(ranges.displayLabel('custom', { now }), 'CUSTOM');
+  assert.equal(ranges.displayLabel('last7'), '7D');
+});
+
+test('custom range snapshot sums only the chosen days, even when they end before today', () => {
+  const snapshot = ranges.fixedPeriodSnapshot('custom', {
+    historyEnabled: true,
+    historyAvailable: true,
+    todayKey: '2026-09-26',
+    customRange: { start: '2026-09-02', end: '2026-09-03' },
+    daily: [day('2026-09-01', 100), day('2026-09-02', 20), day('2026-09-03', 3), day('2026-09-26', 5000)],
+    todayPeriod: null
+  });
+  assert.equal(snapshot.status, 'ready');
+  assert.deepEqual(snapshot.range, { start: '2026-09-02', end: '2026-09-03' });
+  assert.equal(snapshot.period.totalTokens, 23);
 });
 
 test('period menu keyboard navigation moves focus with standard menu keys', () => {

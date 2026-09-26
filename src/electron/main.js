@@ -86,6 +86,7 @@ const {
 } = require('../shared/collector');
 const { Worker } = require('node:worker_threads');
 const { defaultSourceRoots: dailyUsageSourceRoots } = require('../shared/dailyUsage/sources');
+const { rangeSessions } = require('../shared/dailyUsage/rangeSessions');
 const {
   antigravitySyncLockPath,
   repairAntigravitySyncLock
@@ -509,10 +510,40 @@ if (!gotLock) app.exit(0);
 
 const HOME_LIMIT_ACCOUNT_COUNT_DEFAULT = 3;
 const HOME_LIMIT_ACCOUNT_COUNT_MAX = 12;
-const PERIOD_MONTH_MODES = new Set(['month', 'week', 'last7', 'last30']);
+const PERIOD_MONTH_MODES = new Set(['month', 'week', 'last7', 'last30', 'custom']);
 
 function normalizePeriodMonthMode(value) {
   return PERIOD_MONTH_MODES.has(value) ? value : 'month';
+}
+
+function normalizeDayKey(value) {
+  const key = String(value || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return '';
+  const date = new Date(`${key}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === key ? key : '';
+}
+
+// { start, end } local day keys of the Custom range, or null when unset.
+function normalizePeriodCustomRange(value) {
+  const start = normalizeDayKey(value?.start);
+  const end = normalizeDayKey(value?.end);
+  if (!start || !end) return null;
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+// { client: [dir, ...] } archive roots of the day-split import.
+function normalizeDailyUsageArchiveRoots(value) {
+  const out = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  for (const [client, dirs] of Object.entries(value)) {
+    if (!/^[a-z0-9-]+$/.test(client)) continue;
+    const list = (Array.isArray(dirs) ? dirs : [dirs])
+      .map((dir) => String(dir || '').trim())
+      .filter(Boolean);
+    const unique = [...new Set(list)].slice(0, 8);
+    if (unique.length) out[client] = unique;
+  }
+  return out;
 }
 
 function normalizeHomeLimitAccountCount(value) {
@@ -561,6 +592,7 @@ function defaultSettings() {
     // the clients' default footers tend to lead with what is left.
     sessionContextMetric: 'used',
     periodMonthMode: 'month',
+    periodCustomRange: null,
     // Append-only archives of client transcript dirs for the day-split usage
     // import, e.g. { claude: ['E:\\backup\\claude-backup'], grok: [...] }.
     dailyUsageArchiveRoots: {},
@@ -2466,6 +2498,8 @@ function readSettings() {
     }
     merged.homeLimitAccountCount = normalizeHomeLimitAccountCount(merged.homeLimitAccountCount);
     merged.periodMonthMode = normalizePeriodMonthMode(merged.periodMonthMode);
+    merged.periodCustomRange = normalizePeriodCustomRange(merged.periodCustomRange);
+    merged.dailyUsageArchiveRoots = normalizeDailyUsageArchiveRoots(merged.dailyUsageArchiveRoots);
     if (saved.historyEnabled !== undefined) {
       merged.historyEnabled = parseBoolean(saved.historyEnabled, false);
     }
@@ -5729,6 +5763,20 @@ function runDailyUsageImport() {
   return dailyUsageImportRunning;
 }
 
+// Day-split sessions of { start, end } for the Sessions and Projects views of
+// week / last 7 / last 30 / custom ranges. This device only.
+function dailyUsageRange(range = {}) {
+  const start = normalizeDayKey(range?.start);
+  const end = normalizeDayKey(range?.end);
+  if (!usagePersistenceHandle || !start || !end || start > end) return { ok: false, reason: 'unavailable' };
+  try {
+    return { ok: true, ...rangeSessions(usagePersistenceHandle.db, { start, end }) };
+  } catch (error) {
+    console.warn(`[daily-usage] range query failed: ${error?.message || error}`);
+    return { ok: false, reason: 'failed' };
+  }
+}
+
 function scheduleDailyUsageImport() {
   if (dailyUsageImportTimer) return;
   setTimeout(runDailyUsageImport, DAILY_USAGE_FIRST_RUN_DELAY_MS).unref?.();
@@ -6941,6 +6989,8 @@ app.whenReady().then(() => {
     if (patch.heatmapMetric !== undefined) normalizedPatch.heatmapMetric = normalizeHeatmapMetric(patch.heatmapMetric, settings.heatmapMetric);
     if (patch.homeActiveDaysWindow !== undefined) normalizedPatch.homeActiveDaysWindow = normalizeHomeActiveDaysWindow(patch.homeActiveDaysWindow, settings.homeActiveDaysWindow);
     if (patch.sessionContextMetric !== undefined) normalizedPatch.sessionContextMetric = normalizeSessionContextMetric(patch.sessionContextMetric, settings.sessionContextMetric);
+    if (patch.periodCustomRange !== undefined) normalizedPatch.periodCustomRange = normalizePeriodCustomRange(patch.periodCustomRange);
+    if (patch.dailyUsageArchiveRoots !== undefined) normalizedPatch.dailyUsageArchiveRoots = normalizeDailyUsageArchiveRoots(patch.dailyUsageArchiveRoots);
     settings = normalizeWindowBehaviorSettings({
       ...settings,
       ...normalizedPatch,
@@ -8394,6 +8444,7 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('dashboard:open', () => { createDashboardWindow(); return true; });
   ipcMain.handle('dashboard:getHistory', (_event, options) => getDashboardHistory(options));
+  ipcMain.handle('dailyUsage:range', (_event, range) => dailyUsageRange(range));
   ipcMain.on('dashboard:ready', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win !== dashboardWindow || win.isDestroyed()) return;

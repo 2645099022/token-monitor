@@ -3,14 +3,15 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.TokenMonitorFixedPeriodRanges = api;
 })(typeof window !== 'undefined' ? window : null, function createFixedPeriodRangesApi() {
-  const MONTH_MODES = Object.freeze(['month', 'week', 'last7', 'last30']);
+  const MONTH_MODES = Object.freeze(['month', 'week', 'last7', 'last30', 'custom']);
   const LABELS = Object.freeze({
     today: 'DAY',
     month: 'MONTH',
     allTime: 'TOTAL',
     week: 'WEEK',
     last7: '7D',
-    last30: '30D'
+    last30: '30D',
+    custom: 'CUSTOM'
   });
 
   function finiteNumber(value) {
@@ -76,14 +77,36 @@
   }
 
   function isDerived(value) {
-    return value === 'week' || value === 'last7' || value === 'last30';
+    return value === 'week' || value === 'last7' || value === 'last30' || value === 'custom';
+  }
+
+  // { start, end } of the Custom range with its end capped at today, or null.
+  function normalizeCustomRange(value, todayKey = '') {
+    let start = normalizeDateKey(value?.start);
+    let end = normalizeDateKey(value?.end);
+    if (!start || !end) return null;
+    if (start > end) [start, end] = [end, start];
+    const today = normalizeDateKey(todayKey);
+    if (today && end > today) end = today;
+    if (today && start > today) start = today;
+    return { start, end };
   }
 
   function slotForSelection(value) {
     return isDerived(value) || value === 'month' ? 'month' : value;
   }
 
-  function displayLabel(value) {
+  // Custom reads as its dates (MM/DD–MM/DD, with the year when the range does
+  // not lie in the current year); every other selection has a fixed label.
+  function displayLabel(value, options = {}) {
+    if (value === 'custom') {
+      const range = normalizeCustomRange(options.customRange);
+      if (!range) return LABELS.custom;
+      const currentYear = String(localDayKey(options.now)).slice(0, 4);
+      const withYear = range.start.slice(0, 4) !== currentYear || range.end.slice(0, 4) !== currentYear;
+      const format = (key) => (withYear ? `${key.slice(2, 4)}/` : '') + `${key.slice(5, 7)}/${key.slice(8, 10)}`;
+      return range.start === range.end ? format(range.start) : `${format(range.start)}–${format(range.end)}`;
+    }
     return LABELS[value] || LABELS.today;
   }
 
@@ -97,6 +120,7 @@
     }
     if (selection === 'last7') return { start: dayKeyAddDays(todayKey, -6), end: todayKey };
     if (selection === 'last30') return { start: dayKeyAddDays(todayKey, -29), end: todayKey };
+    if (selection === 'custom') return normalizeCustomRange(options.customRange, todayKey);
     return null;
   }
 
@@ -659,9 +683,11 @@
     return fixedPeriodSnapshotFromDevices(selection, sources, options).devices || [];
   }
 
+  // Sessions and Projects of a derived range come from the local day-split
+  // usage store, which answers per range (options.daySplitAvailable).
   function supportsBreakdown(selection, breakdown, options = {}) {
     if (!isDerived(selection)) return true;
-    if (breakdown === 'session' || breakdown === 'project') return false;
+    if (breakdown === 'session' || breakdown === 'project') return options.daySplitAvailable === true;
     if (breakdown === 'device') return options.deviceHistoriesAvailable === true;
     return true;
   }
@@ -682,6 +708,7 @@
     joinDeviceHistorySources,
     localDayKey,
     handlePeriodMenuNavigation,
+    normalizeCustomRange,
     normalizeMonthMode,
     periodMenuTargetIndex,
     readySnapshotForSelection,

@@ -17,11 +17,11 @@ test('fixed periods reuse the existing three-slot control', () => {
   assert.doesNotMatch(html, /id="monthPeriodTab"[^>]*>[^<]*(?:▼|▾|⌄)/);
 });
 
-test('the middle-slot menu and Settings expose the same four fixed choices', () => {
+test('the middle-slot menu and Settings expose the same fixed choices', () => {
   const html = read('index.html');
   const menu = html.slice(html.indexOf('id="monthPeriodMenu"'), html.indexOf('class="window-actions"'));
   const setting = html.slice(html.indexOf('id="periodMonthModeInput"'), html.indexOf('</select>', html.indexOf('id="periodMonthModeInput"')));
-  const expected = ['month', 'week', 'last7', 'last30'];
+  const expected = ['month', 'week', 'last7', 'last30', 'custom'];
   assert.deepEqual([...menu.matchAll(/data-fixed-period="([^"]+)"/g)].map((match) => match[1]), expected);
   assert.deepEqual([...setting.matchAll(/option value="([^"]+)"/g)].map((match) => match[1]), expected);
 });
@@ -34,7 +34,7 @@ test('fixed-period menu follows the glass theme and keeps labels left aligned', 
   const boot = read('floatingBubbleBoot.js');
   assert.ok(html.indexOf('src="fixedPeriodRanges.js"') < html.indexOf('src="app.js"'));
   assert.match(html, /id="monthPeriodMenu" class="view-switcher-menu period-menu hidden"/);
-  assert.equal((html.match(/class="view-switcher-menu-item"/g) || []).length, 4);
+  assert.equal((html.match(/class="view-switcher-menu-item"/g) || []).length, 5);
   assert.match(css, /\.view-switcher-menu-item\s*\{[^}]*font-size:\s*11px;[^}]*text-align:\s*left;/s);
   assert.ok(css.lastIndexOf('.period-menu {') > css.indexOf('.view-switcher-menu {'));
   assert.match(css, /\.titlebar\.period-menu-open\s*\{\s*z-index:\s*13;/);
