@@ -26,6 +26,19 @@ test('the middle-slot menu and Settings expose the same fixed choices', () => {
   assert.deepEqual([...setting.matchAll(/option value="([^"]+)"/g)].map((match) => match[1]), expected);
 });
 
+test('every middle-slot mode passes the renderer, bubble and boot period allowlists', () => {
+  const { MONTH_MODES } = require('../../src/electron/renderer/fixedPeriodRanges');
+  const lists = {
+    app: read('app.js').match(/const viewPeriodValues = new Set\(\[([^\]]+)\]\)/)?.[1],
+    boot: read('floatingBubbleBoot.js').match(/if \(\[([^\]]+)\]\.includes\(period\)\)/)?.[1],
+    bubble: fs.readFileSync(path.join(rendererDir, '..', 'floatingBubble.js'), 'utf8').match(/INITIAL_RENDERER_PERIODS = new Set\(\[([^\]]+)\]\)/)?.[1]
+  };
+  for (const [name, list] of Object.entries(lists)) {
+    assert.ok(list, `${name} period allowlist not found`);
+    for (const mode of MONTH_MODES) assert.match(list, new RegExp(`'${mode}'`), `${name} allowlist misses ${mode}`);
+  }
+});
+
 test('fixed-period menu follows the glass theme and keeps labels left aligned', () => {
   const html = read('index.html');
   const css = read('styles.css');
