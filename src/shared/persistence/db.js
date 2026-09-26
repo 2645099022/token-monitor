@@ -23,8 +23,9 @@ const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const { backfillMissingTimestamps } = require('./backfillTimestamps');
+const { repairUsageRecords } = require('./repairRecords');
 const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const PROJECT_ROOT = SOURCE_ROOT.endsWith(`${path.sep}app.asar`)
   ? `${SOURCE_ROOT}.unpacked`
@@ -177,6 +178,11 @@ function migrate(db) {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_dedup
         ON usage_records(client, session_id, IFNULL(model, ''), COALESCE(started_at, ''));
     `);
+  }
+  if (current < 4) {
+    // Rows written before v4 have total_tokens = 0 and may split one
+    // conversation into overlapping instances; repair both in place.
+    repairUsageRecords(db);
   }
   if (current !== SCHEMA_VERSION) setSchemaVersion(db, SCHEMA_VERSION);
 }

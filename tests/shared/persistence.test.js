@@ -26,7 +26,7 @@ test('openDb: in-memory schema bootstraps and is queryable', () => {
   const db = openDb(':memory:');
   const version = db.prepare(`SELECT value FROM schema_meta WHERE key='version'`).get();
   assert.equal(Number(version.value), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 3);
+  assert.equal(SCHEMA_VERSION, 4);
   const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`).all().map(r => r.name);
   assert.ok(tables.includes('usage_records'), 'usage_records table should exist');
   assert.ok(tables.includes('schema_meta'), 'schema_meta table should exist');
@@ -375,10 +375,77 @@ test('backfillMissingTimestamps fills from a local transcript and ignores ingest
   }
 });
 
-test('isSameSessionInstance keys off creation time, not last_used_at', () => {
+test('isSameSessionInstance: a start inside the stored lifetime is the same instance', () => {
   const existing = { started_at: '2026-08-01T00:00:00.000Z', last_used_at: '2026-08-01T03:00:00.000Z' };
   assert.equal(isSameSessionInstance(existing, { started_at: '2026-08-01T00:00:20.000Z' }), true);
+  // First usage message several minutes after the first transcript line.
+  assert.equal(isSameSessionInstance(existing, { started_at: '2026-08-01T00:07:00.000Z' }), true);
   assert.equal(isSameSessionInstance(existing, { started_at: '2026-08-01T04:00:00.000Z' }), false);
   assert.equal(isSameSessionInstance(existing, { started_at: null }), true);
   assert.equal(isSameSessionInstance({ started_at: null }, { started_at: '2026-08-01T00:00:00.000Z' }), true);
+});
+
+test('rowToRecord: derives total_tokens from tokscale components', () => {
+  const claude = rowToRecord({
+    client: 'claude', sessionId: 'c1', model: 'claude-opus-5',
+    input: 732, output: 237701, cacheRead: 79600038, cacheWrite: 549752, reasoning: 0
+  }, null, null);
+  assert.equal(claude.total_tokens, 732 + 237701 + 79600038 + 549752);
+  // Codex reports reasoning separately from output; it is part of the total.
+  const codex = rowToRecord({
+    client: 'codex', sessionId: 'x1', model: 'gpt-5',
+    input: 96655, output: 4312, cacheRead: 502016, cacheWrite: 0, reasoning: 3386
+  }, null, null);
+  assert.equal(codex.total_tokens, 606369);
+});
+
+test('createWriter: a shifted start for the same conversation does not fork a row', () => {
+  const db = openDb(':memory:');
+  const writer = createWriter(db);
+  const base = { client: 'claude', sessionId: 'shift-1', model: 'claude-opus-5', input: 1, output: 10 };
+  writer.ingestRows([{ ...base, startedAt: '2026-09-21T02:44:14.678Z', lastUsedAt: '2026-09-21T08:45:24.875Z' }]);
+  writer.ingestRows([{ ...base, output: 20, startedAt: '2026-09-21T02:46:22.279Z', lastUsedAt: '2026-09-21T08:46:00.000Z' }]);
+  const rows = db.prepare(`SELECT total_tokens, started_at FROM usage_records WHERE session_id = 'shift-1'`).all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].total_tokens, 21);
+  assert.equal(rows[0].started_at, '2026-09-21T02:44:14.678Z');
+  writer.close();
+});
+
+test('v4 repair merges overlapping instances and recomputes zero totals', () => {
+  const file = tmpDbPath();
+  try {
+    const db = openDb(file);
+    db.prepare(`DELETE FROM schema_meta`).run();
+    db.prepare(`INSERT INTO schema_meta (key, value) VALUES ('version', '3')`).run();
+    const insert = db.prepare(`
+      INSERT INTO usage_records (client, session_id, model, total_tokens, started_at, last_used_at, ingested_at, scan_count, source_payload)
+      VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
+    `);
+    const payload = JSON.stringify({ client: 'claude', sessionId: 'dup', model: 'm', input: 5, output: 7, cacheRead: 100, cacheWrite: 3 });
+    insert.run('claude', 'dup', 'm', '2026-09-21T02:44:14.678Z', '2026-09-21T08:45:24.875Z', '2026-09-21 09:00:00', 69, payload);
+    insert.run('claude', 'dup', 'm', '2026-09-21T02:46:22.279Z', '2026-09-21T08:45:05.658Z', '2026-09-26 10:00:00', 2, payload);
+    // A genuinely reused id: starts after the first instance ended.
+    insert.run('claude', 'dup', 'm', '2026-09-22T10:00:00.000Z', '2026-09-22T11:00:00.000Z', '2026-09-22 12:00:00', 4, payload);
+    db.close();
+
+    const reopened = openDb(file);
+    const rows = reopened.prepare(`
+      SELECT started_at, last_used_at, total_tokens, scan_count FROM usage_records WHERE session_id = 'dup' ORDER BY started_at
+    `).all();
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows[0], {
+      started_at: '2026-09-21T02:44:14.678Z',
+      last_used_at: '2026-09-21T08:45:24.875Z',
+      total_tokens: 115,
+      scan_count: 71
+    });
+    assert.equal(rows[1].started_at, '2026-09-22T10:00:00.000Z');
+    assert.equal(rows[1].total_tokens, 115);
+    reopened.close();
+  } finally {
+    for (const suffix of ['', '-wal', '-shm', '-journal']) {
+      try { fs.unlinkSync(file + suffix); } catch (_) {}
+    }
+  }
 });

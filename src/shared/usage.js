@@ -1646,5 +1646,6 @@ module.exports = {
   normalizePeriod,
   projectRollupFromSessions,
   setPersistenceWriter,
-  stripSessionTextFromDeviceRecord
+  stripSessionTextFromDeviceRecord,
+  tokenValueForClient
 };

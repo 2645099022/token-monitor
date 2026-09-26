@@ -9,6 +9,7 @@
 
 const os = require('node:os');
 const { resolveSessionTimestampMap } = require('../sessionTimestamps');
+const { tokenValueForClient } = require('../usage');
 
 const SESSION_ID_KEYS = ['sessionId', 'session_id', 'session', 'conversationId', 'conversation_id', 'threadId', 'thread_id'];
 const MODEL_KEYS = ['model', 'modelName', 'model_name', 'modelId', 'model_id'];
@@ -18,7 +19,6 @@ const CLIENT_KEYS = ['client', 'clients', 'source', 'platform', 'agent', 'tool',
 const STARTED_AT_KEYS = ['startedAt', 'started_at', 'firstUsedAt', 'first_used_at', 'startTime', 'start_time'];
 const LAST_USED_AT_KEYS = ['lastUsedAt', 'last_used_at', 'lastTime', 'last_time', 'updatedAt', 'updated_at', 'timestamp', 'date', 'ts'];
 
-const TOKEN_KEYS = ['totalTokens', 'total_tokens', 'totalTokenCount', 'total_token_count', 'tokens', 'tokenCount', 'token_count'];
 const CACHE_READ_KEYS = ['cacheRead', 'cacheReadTokens', 'cache_read_tokens', 'cachedTokens', 'cached_tokens', 'cacheReadInputTokens', 'cache_read_input_tokens'];
 const CACHE_WRITE_KEYS = ['cacheWrite', 'cacheWriteTokens', 'cache_write_tokens', 'cacheCreationInputTokens', 'cache_creation_input_tokens'];
 const OUTPUT_KEYS = ['output', 'outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens', 'totalOutput'];
@@ -90,10 +90,16 @@ function isSameSessionInstance(existing, incoming, slackMs = INSTANCE_SLACK_MS) 
   const incomingStart = parseTs(incoming?.started_at);
   if (!Number.isFinite(incomingStart)) return true;
   const existingStart = parseTs(existing?.started_at);
-  if (!Number.isFinite(existingStart)) return true;
-  // Creation time is the instance key. Slack only covers first-line vs
-  // id-encoded start jitter, not "ended then reused the UUID".
-  return Math.abs(incomingStart - existingStart) <= slackMs;
+  const existingLast = parseTs(existing?.last_used_at);
+  if (!Number.isFinite(existingStart) && !Number.isFinite(existingLast)) return true;
+  // Different sources report different starts for one conversation (first
+  // transcript line vs first usage message), so any start inside the stored
+  // lifetime is the same instance. Only a start after it ended is a reuse.
+  const existingEnd = Math.max(
+    Number.isFinite(existingStart) ? existingStart : -Infinity,
+    Number.isFinite(existingLast) ? existingLast : -Infinity
+  );
+  return incomingStart <= existingEnd + slackMs;
 }
 
 function laterTimestamp(left, right) {
@@ -122,7 +128,9 @@ function rowToRecord(row, fallbackClient, fallbackSessionId) {
   if (!client || !sessionId) return null;
   const model = detectModel(row);
   const provider = detectProvider(row);
-  const totalTokens = Math.max(0, Math.round(firstNumber(row, TOKEN_KEYS)));
+  // Tokscale rows carry components only; derive the total the same way the
+  // live usage view does (including per-client reasoning handling).
+  const totalTokens = Math.max(0, Math.round(tokenValueForClient(row, client)));
   const cacheRead = Math.max(0, Math.round(firstNumber(row, CACHE_READ_KEYS)));
   const cacheWrite = Math.max(0, Math.round(firstNumber(row, CACHE_WRITE_KEYS)));
   const output = Math.max(0, Math.round(firstNumber(row, OUTPUT_KEYS)));
