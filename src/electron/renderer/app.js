@@ -11234,6 +11234,47 @@ customRangeEls.form?.addEventListener('submit', (event) => {
   void applyCustomRange();
 });
 
+// Calendar buttons toggle the native date picker. Chromium exposes no picker
+// state, so each button tracks its own. A press while the picker is open
+// dismisses it before the click arrives, so the state is read at pointerdown
+// and that click only closes; committing a date, Enter/Escape, leaving the
+// field, or pressing anywhere else marks the picker closed.
+for (const button of customRangeEls.form?.querySelectorAll('.custom-range-picker') || []) {
+  const input = document.getElementById(button.dataset.pickerFor);
+  if (!input) continue;
+  let open = false;
+  let openAtPress = false;
+  const setOpen = (value) => {
+    open = value;
+    button.classList.toggle('is-open', value);
+  };
+  button.addEventListener('pointerdown', () => { openAtPress = open; });
+  // Keep focus in the date field so the press does not blur it.
+  button.addEventListener('mousedown', (event) => event.preventDefault());
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    if (openAtPress) {
+      openAtPress = false;
+      setOpen(false);
+      return;
+    }
+    input.focus();
+    try {
+      input.showPicker();
+      setOpen(true);
+    } catch (_) {
+      setOpen(false);
+    }
+  });
+  for (const type of ['change', 'blur']) input.addEventListener(type, () => setOpen(false));
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' || event.key === 'Enter') setOpen(false);
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (!button.contains(event.target)) setOpen(false);
+  }, true);
+}
+
 els.monthPeriodMenu?.addEventListener('keydown', (event) => {
   // The date fields keep their own Tab and arrow-key behaviour.
   if (customRangeEls.form?.contains(event.target)) return;
