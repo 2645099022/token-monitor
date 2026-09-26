@@ -17,7 +17,7 @@ const { discoverSources } = require('./sources');
 const { createDailyStore } = require('./store');
 
 // Bump when a parser's counting rule changes; forces a full rebuild.
-const PARSER_VERSION = 1;
+const PARSER_VERSION = 2;
 
 function sourceChanged(source, registered) {
   if (!registered) return true;

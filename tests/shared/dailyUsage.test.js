@@ -254,6 +254,37 @@ test('recordWriter: antigravity-cli rows feed daily snapshots', () => {
   } finally { db.close(); }
 });
 
+test('query: tokscale session cost is spread over days by price weight', () => {
+  const db = openDb(':memory:');
+  try {
+    const insertDaily = db.prepare(`
+      INSERT INTO usage_daily (client, source_key, session_id, model, day, input_tokens, total_tokens, official_cost_usd)
+      VALUES (?, 's', ?, ?, ?, ?, ?, ?)
+    `);
+    insertDaily.run('claude', 'anchored', 'm', '2026-09-20', 100, 100, null);
+    insertDaily.run('claude', 'anchored', 'm', '2026-09-21', 300, 300, null);
+    insertDaily.run('claude', 'drifted', 'm', '2026-09-21', 100, 100, null);
+    insertDaily.run('grok', 'official', 'g', '2026-09-21', 100, 100, 0.25);
+    db.prepare(`INSERT INTO model_pricing (model, input, output, status) VALUES ('m', 0.01, 0.02, 'ok')`).run();
+    const insertRecord = db.prepare(`INSERT INTO usage_records (client, session_id, model, total_tokens, cost_usd) VALUES (?, ?, ?, ?, ?)`);
+    insertRecord.run('claude', 'anchored', 'm', 400, 10);
+    // tokscale counted a different amount of usage: no anchor.
+    insertRecord.run('claude', 'drifted', 'm', 150, 99);
+    insertRecord.run('grok', 'official', 'g', 200, 7);
+
+    const byDay = Object.fromEntries(dailyTotals(db, { start: '2026-09-20', end: '2026-09-20' })
+      .map((row) => [row.model, row.cost_usd]));
+    assert.equal(byDay.m, 2.5);
+    const sessions = Object.fromEntries(sessionUsageInRange(db).map((row) => [row.session_id, row]));
+    assert.equal(sessions.anchored.cost_usd, 10);
+    assert.equal(sessions.anchored.cost_source, 'tokscale');
+    assert.equal(sessions.drifted.cost_usd, 1);
+    assert.equal(sessions.drifted.cost_source, 'price');
+    assert.equal(sessions.official.cost_usd, 0.25);
+    assert.equal(sessions.official.cost_source, 'official');
+  } finally { db.close(); }
+});
+
 test('pricing: parses tokscale output and prices tokens, preferring an official cost', () => {
   const price = parsePricingOutput(`spinner\n${JSON.stringify({
     matchedKey: 'claude-opus-5', source: 'LiteLLM',
@@ -264,12 +295,39 @@ test('pricing: parses tokscale output and prices tokens, preferring an official 
   try {
     db.prepare(`INSERT INTO usage_daily (client, source_key, session_id, model, day, input_tokens) VALUES ('claude', 's', 'x', 'claude-opus-5', '2026-09-20', 1)`).run();
     db.prepare(`INSERT INTO usage_daily (client, source_key, session_id, model, day, input_tokens) VALUES ('claude', 's', 'y', 'unknown-model', '2026-09-20', 1)`).run();
-    const result = refreshPricing(db, { bin: 'unused' }, { lookup: (model) => (model === 'claude-opus-5' ? price : null) });
+    const result = refreshPricing(db, { bin: 'unused' }, {
+      lookup: (model) => (model === 'claude-opus-5' ? price : null),
+      readCatalog: () => null
+    });
     assert.deepEqual(result, { fetched: 1, missing: 1 });
     const prices = priceTable(db);
     const cost = costOf({ model: 'claude-opus-5', input_tokens: 1000, cache_read: 10000, cache_write: 100, output_tokens: 200 }, prices);
     assert.ok(Math.abs(cost - (1000 * 5e-6 + 10000 * 5e-7 + 100 * 6.25e-6 + 200 * 25e-6)) < 1e-12);
     assert.equal(costOf({ model: 'unknown-model', input_tokens: 5 }, prices), null);
     assert.equal(costOf({ model: 'grok', official_cost_usd: 1.5 }, prices), 1.5);
+  } finally { db.close(); }
+});
+
+test('pricing: long-context tiers bill only the part of a request above the threshold', () => {
+  const { aggregateDaily } = require('../../src/shared/dailyUsage/store');
+  // One request with 300k uncached input and 10k output; one small request.
+  const [row] = aggregateDaily([
+    { sessionId: 's', model: 'gpt', ts: DAY1, input: 300000, cacheRead: 0, cacheWrite: 0, output: 10000, reasoning: 0, total: 310000 },
+    { sessionId: 's', model: 'gpt', ts: DAY1, input: 1000, cacheRead: 0, cacheWrite: 0, output: 10, reasoning: 0, total: 1010 }
+  ]);
+  assert.equal(row.x_input_128k, 172000);
+  assert.equal(row.x_input_272k, 28000);
+  assert.equal(row.x_output_128k, 0);
+
+  const db = openDb(':memory:');
+  try {
+    db.prepare(`INSERT INTO usage_daily (client, source_key, session_id, model, day, input_tokens) VALUES ('codex', 's', 's', 'gpt', '2026-09-20', 1)`).run();
+    refreshPricing(db, { bin: 'unused' }, {
+      lookup: () => ({ input: 4e-6, output: 2e-5, cache_read: 4e-7, cache_write: null, matched_key: 'gpt', source: 'LiteLLM' }),
+      readCatalog: () => ({ input_cost_per_token_above_272k_tokens: 8e-6, output_cost_per_token_above_272k_tokens: 3e-5 })
+    });
+    const cost = costOf({ model: 'gpt', input_tokens: row.input_tokens, output_tokens: row.output_tokens, ...row }, priceTable(db));
+    const expected = 301000 * 4e-6 + 28000 * (8e-6 - 4e-6) + 10010 * 2e-5;
+    assert.ok(Math.abs(cost - expected) < 1e-12);
   } finally { db.close(); }
 });

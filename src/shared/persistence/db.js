@@ -23,7 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const { backfillMissingTimestamps } = require('./backfillTimestamps');
 const { repairUsageRecords } = require('./repairRecords');
 const { createDailySchema } = require('../dailyUsage/store');
@@ -187,8 +187,9 @@ function migrate(db) {
     // conversation into overlapping instances; repair both in place.
     repairUsageRecords(db);
   }
-  if (current < 5) {
-    // Day-split usage derived from transcripts (see dailyUsage/store.js).
+  if (current < 6) {
+    // Day-split usage derived from transcripts (see dailyUsage/store.js);
+    // v6 adds the long-context tier columns. createDailySchema is idempotent.
     createDailySchema(db);
   }
   if (current !== SCHEMA_VERSION) setSchemaVersion(db, SCHEMA_VERSION);

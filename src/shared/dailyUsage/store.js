@@ -15,6 +15,31 @@ const SNAPSHOT_SOURCE = 'snapshot';
 // Clients whose day split comes from snapshots of their cumulative totals.
 const SNAPSHOT_CLIENTS = new Set(['antigravity-cli']);
 
+// Long-context tiers, as tokscale's compute_cost bills them: within one
+// request, the part of a bucket above a threshold is charged that tier's rate
+// (a progressive walk). The per-request excess over each threshold is summed
+// per row, so the walk can be priced at query time from aggregated rows.
+// Request-wide tariffs (xAI 200k and OpenAI 272k with a direct provider) are
+// not modelled; they only apply to provider-hinted direct rows.
+const TIER_BUCKETS = [
+  { bucket: 'input', event: 'input', thresholds: [128, 200, 256, 272] },
+  { bucket: 'output', event: 'output', thresholds: [128, 200, 256, 272] },
+  { bucket: 'cache_read', event: 'cacheRead', thresholds: [200, 272] },
+  { bucket: 'cache_write', event: 'cacheWrite', thresholds: [200] }
+];
+const TIER_EXCESS_COLUMNS = TIER_BUCKETS.flatMap(({ bucket, thresholds }) =>
+  thresholds.map((k) => `x_${bucket}_${k}k`));
+const PRICING_TIER_COLUMNS = TIER_BUCKETS.flatMap(({ bucket, thresholds }) =>
+  thresholds.map((k) => `${bucket}_${k}k`));
+
+function addMissingColumns(db, table, columns, type) {
+  const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+  for (const column of columns) {
+    if (!existing.has(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+}
+
+// Idempotent: creates the tables and adds columns introduced after v5.
 function createDailySchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS usage_daily (
@@ -83,6 +108,8 @@ function createDailySchema(db) {
       fetched_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+  addMissingColumns(db, 'usage_daily', TIER_EXCESS_COLUMNS, 'INTEGER NOT NULL DEFAULT 0');
+  addMissingColumns(db, 'model_pricing', PRICING_TIER_COLUMNS, 'REAL');
 }
 
 function localDayKey(ms) {
@@ -116,7 +143,14 @@ function aggregateDaily(events) {
         first_ms: event.ts,
         last_ms: event.ts
       };
+      for (const column of TIER_EXCESS_COLUMNS) row[column] = 0;
       rows.set(key, row);
+    }
+    for (const { bucket, event: field, thresholds } of TIER_BUCKETS) {
+      for (const k of thresholds) {
+        const excess = event[field] - k * 1000;
+        if (excess > 0) row[`x_${bucket}_${k}k`] += excess;
+      }
     }
     row.input_tokens += event.input;
     row.cache_read += event.cacheRead;
@@ -136,31 +170,20 @@ function aggregateDaily(events) {
   }));
 }
 
+const ROW_VALUE_COLUMNS = [
+  'input_tokens', 'cache_read', 'cache_write', 'output_tokens', 'reasoning_tokens', 'total_tokens',
+  'official_cost_usd', 'message_count', 'first_at', 'last_at', 'project_path',
+  ...TIER_EXCESS_COLUMNS
+];
+
 function createDailyStore(db) {
   const statements = {
     deleteSourceRows: db.prepare('DELETE FROM usage_daily WHERE source_key = ?'),
     insertRow: db.prepare(`
-      INSERT INTO usage_daily (
-        client, source_key, session_id, model, day,
-        input_tokens, cache_read, cache_write, output_tokens, reasoning_tokens, total_tokens,
-        official_cost_usd, message_count, first_at, last_at, project_path
-      ) VALUES (
-        @client, @source_key, @session_id, @model, @day,
-        @input_tokens, @cache_read, @cache_write, @output_tokens, @reasoning_tokens, @total_tokens,
-        @official_cost_usd, @message_count, @first_at, @last_at, @project_path
-      )
+      INSERT INTO usage_daily (client, source_key, session_id, model, day, ${ROW_VALUE_COLUMNS.join(', ')})
+      VALUES (@client, @source_key, @session_id, @model, @day, ${ROW_VALUE_COLUMNS.map((c) => `@${c}`).join(', ')})
       ON CONFLICT(client, source_key, session_id, model, day) DO UPDATE SET
-        input_tokens = excluded.input_tokens,
-        cache_read = excluded.cache_read,
-        cache_write = excluded.cache_write,
-        output_tokens = excluded.output_tokens,
-        reasoning_tokens = excluded.reasoning_tokens,
-        total_tokens = excluded.total_tokens,
-        official_cost_usd = excluded.official_cost_usd,
-        message_count = excluded.message_count,
-        first_at = excluded.first_at,
-        last_at = excluded.last_at,
-        project_path = excluded.project_path
+        ${ROW_VALUE_COLUMNS.map((c) => `${c} = excluded.${c}`).join(',\n        ')}
     `),
     getOwner: db.prepare('SELECT source_key FROM daily_event_owner WHERE client = ? AND event_key = ?'),
     claimOwner: db.prepare('INSERT OR IGNORE INTO daily_event_owner (client, event_key, source_key) VALUES (?, ?, ?)'),
@@ -295,6 +318,9 @@ function recordDailySnapshot(db, record, now = Date.now()) {
 }
 
 module.exports = {
+  PRICING_TIER_COLUMNS,
+  TIER_BUCKETS,
+  TIER_EXCESS_COLUMNS,
   SNAPSHOT_CLIENTS,
   SNAPSHOT_SOURCE,
   aggregateDaily,
