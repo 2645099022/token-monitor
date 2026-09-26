@@ -214,6 +214,8 @@ npm run dist:linux   # Linux x64 AppImage → dist/
 npm run pack         # 未打包的 app 目录（无安装包），方便本机快速测试
 ```
 
+`better-sqlite3` 是原生模块，Electron 与外部 Node.js 使用不同的 ABI。安装、验证和原生构建请统一使用 Node.js 22.13+ 或 24；`postinstall`/`npm run rebuild:native` 会分别保存两套运行时绑定。重新构建 Electron 原生模块前请先关闭小部件。
+
 产物会放在 `dist/`。Windows 和 Linux 请在对应系统上使用上面的 `dist:*` 脚本。如果要打包 macOS 发布版，需要本机有 Developer ID Application 签名身份；本地开发或未列出的平台请用 `npm start` 运行。
 
 ## 工作原理

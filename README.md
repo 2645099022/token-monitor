@@ -214,6 +214,8 @@ npm run dist:linux   # Linux x64 AppImage         → dist/
 npm run pack         # unpacked app dir (no installer), for quick local testing
 ```
 
+`better-sqlite3` is native code and Electron uses a different ABI from external Node.js. Run installation, verification, and native builds with the same Node.js 22.13+ or 24 runtime; `postinstall`/`npm run rebuild:native` stores both runtime bindings separately. Close the widget before rebuilding Electron bindings.
+
 Output lands in `dist/`. Windows and Linux use the matching `dist:*` script above on the target OS. Packaging the macOS release build requires a local Developer ID Application signing identity; use `npm start` for local development or unsupported platforms.
 
 ## How it works

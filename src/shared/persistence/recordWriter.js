@@ -7,6 +7,9 @@
 // not abort the whole collection. Errors are logged and counted; the
 // collector continues with the rest of the rows.
 
+const os = require('node:os');
+const { resolveSessionTimestampMap } = require('../sessionTimestamps');
+
 const SESSION_ID_KEYS = ['sessionId', 'session_id', 'session', 'conversationId', 'conversation_id', 'threadId', 'thread_id'];
 const MODEL_KEYS = ['model', 'modelName', 'model_name', 'modelId', 'model_id'];
 const PROVIDER_KEYS = ['provider', 'providerName', 'provider_name'];
@@ -68,6 +71,51 @@ function detectTimestamp(row, keys) {
   return firstString(row, keys);
 }
 
+// Claude Code can reuse a deleted session UUID via a stale lastSessionId.
+// Treat that as a new instance when the incoming start is after the stored
+// session had already ended. Small start-time jitter is the same instance.
+const INSTANCE_SLACK_MS = 2 * 60 * 1000;
+
+function parseTs(value) {
+  if (!value) return NaN;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
+function modelKey(model) {
+  return model == null ? '' : String(model);
+}
+
+function isSameSessionInstance(existing, incoming, slackMs = INSTANCE_SLACK_MS) {
+  const incomingStart = parseTs(incoming?.started_at);
+  if (!Number.isFinite(incomingStart)) return true;
+  const existingStart = parseTs(existing?.started_at);
+  if (!Number.isFinite(existingStart)) return true;
+  // Creation time is the instance key. Slack only covers first-line vs
+  // id-encoded start jitter, not "ended then reused the UUID".
+  return Math.abs(incomingStart - existingStart) <= slackMs;
+}
+
+function laterTimestamp(left, right) {
+  const a = parseTs(left);
+  const b = parseTs(right);
+  if (!Number.isFinite(a)) return right || left || null;
+  if (!Number.isFinite(b)) return left || null;
+  return b > a ? right : left;
+}
+
+function pickExistingInstance(existingRows, incoming) {
+  if (!existingRows.length) return null;
+  if (!incoming.started_at) {
+    return existingRows.slice().sort((left, right) => {
+      const lastDiff = (parseTs(right.last_used_at) || parseTs(right.started_at) || right.id)
+        - (parseTs(left.last_used_at) || parseTs(left.started_at) || left.id);
+      return lastDiff !== 0 ? lastDiff : right.id - left.id;
+    })[0];
+  }
+  return existingRows.find((row) => isSameSessionInstance(row, incoming)) || null;
+}
+
 function rowToRecord(row, fallbackClient, fallbackSessionId) {
   const client = detectClient(row) || fallbackClient;
   const sessionId = detectSessionId(row) || fallbackSessionId;
@@ -100,12 +148,18 @@ function rowToRecord(row, fallbackClient, fallbackSessionId) {
   };
 }
 
-function createWriter(db, { logger = null } = {}) {
-  // UPSERT: same (client, session_id, model, COALESCE(started_at,'')) overwrites
-  // the existing row. The latest cumulative values win, scan_count increments,
-  // ingested_at updates. This is what makes "delete source session → DB still
-  // has the latest snapshot" actually work.
-  const upsertStmt = db.prepare(`
+function createWriter(db, { logger = null, homeDir = null, resolveTimestampsMap = resolveSessionTimestampMap } = {}) {
+  // Instance = (client, session_id, model, started_at). Creation time does not
+  // change for a conversation; a reused Claude UUID after lastSessionId recycle
+  // has a new started_at and becomes a new row. Rescans of the same instance
+  // update in place and never overwrite started_at.
+  const selectInstances = db.prepare(`
+    SELECT id, started_at, last_used_at
+    FROM usage_records
+    WHERE client = ? AND session_id = ? AND IFNULL(model, '') = ?
+    ORDER BY id
+  `);
+  const insertStmt = db.prepare(`
     INSERT INTO usage_records (
       client, session_id, model, provider,
       total_tokens, cache_read, cache_write, output_tokens,
@@ -115,28 +169,43 @@ function createWriter(db, { logger = null } = {}) {
       @total_tokens, @cache_read, @cache_write, @output_tokens,
       @cost_usd, @message_count, @started_at, @last_used_at, @source_payload
     )
-    ON CONFLICT(client, session_id, model, COALESCE(started_at, ''))
-    DO UPDATE SET
-      provider        = excluded.provider,
-      total_tokens    = excluded.total_tokens,
-      cache_read      = excluded.cache_read,
-      cache_write     = excluded.cache_write,
-      output_tokens   = excluded.output_tokens,
-      cost_usd        = excluded.cost_usd,
-      message_count   = excluded.message_count,
-      last_used_at    = excluded.last_used_at,
+  `);
+  const updateStmt = db.prepare(`
+    UPDATE usage_records SET
+      provider        = @provider,
+      total_tokens    = @total_tokens,
+      cache_read      = @cache_read,
+      cache_write     = @cache_write,
+      output_tokens   = @output_tokens,
+      cost_usd        = @cost_usd,
+      message_count   = @message_count,
+      started_at      = CASE
+        WHEN IFNULL(started_at, '') != '' THEN started_at
+        ELSE @started_at
+      END,
+      last_used_at    = @last_used_at,
       ingested_at     = datetime('now'),
       scan_count      = scan_count + 1,
-      source_payload  = excluded.source_payload
+      source_payload  = @source_payload
+    WHERE id = @id
   `);
   const upsertMany = db.transaction((records) => {
     let touched = 0;
     let created = 0;
-    for (const r of records) {
-      const info = upsertStmt.run(r);
-      touched++;
-      if (info.changes === 1) created++;
-      // info.changes = 1 on INSERT, 2 on UPDATE (per better-sqlite3 docs)
+    for (const rec of records) {
+      const existing = selectInstances.all(rec.client, rec.session_id, modelKey(rec.model));
+      const match = pickExistingInstance(existing, rec);
+      if (match) {
+        updateStmt.run({
+          ...rec,
+          id: match.id,
+          last_used_at: laterTimestamp(match.last_used_at, rec.last_used_at)
+        });
+      } else {
+        insertStmt.run(rec);
+        created += 1;
+      }
+      touched += 1;
     }
     return { touched, created, updated: touched - created };
   });
@@ -144,11 +213,21 @@ function createWriter(db, { logger = null } = {}) {
     ingestRows(rows, fallback = {}) {
       const records = [];
       let skipped = 0;
+      const pending = [];
       for (const row of rows) {
         if (!row || typeof row !== 'object') { skipped++; continue; }
         const rec = rowToRecord(row, fallback.client, fallback.sessionId);
         if (!rec) { skipped++; continue; }
         records.push(rec);
+        if (!rec.started_at || !rec.last_used_at) pending.push(rec);
+      }
+      if (pending.length > 0) {
+        const stamps = resolveTimestampsMap(pending, { homeDir: homeDir || os.homedir() });
+        for (const rec of pending) {
+          const found = stamps.get(`${rec.client}:${rec.session_id}`) || {};
+          if (!rec.started_at) rec.started_at = found.startedAt || null;
+          if (!rec.last_used_at) rec.last_used_at = found.lastUsedAt || rec.started_at || null;
+        }
       }
       let touched = 0, created = 0, updated = 0;
       try {
@@ -169,4 +248,10 @@ function createWriter(db, { logger = null } = {}) {
   };
 }
 
-module.exports = { createWriter, rowToRecord };
+module.exports = {
+  createWriter,
+  rowToRecord,
+  isSameSessionInstance,
+  pickExistingInstance,
+  INSTANCE_SLACK_MS
+};

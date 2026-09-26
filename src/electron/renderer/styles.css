@@ -348,12 +348,12 @@ body.is-windows.floating-bubble-collapsed-right .floating-bubble-tab {
 .title-controls {
   -webkit-app-region: no-drag;
   display: grid;
-  grid-template-columns: minmax(150px, 160px);
+  grid-template-columns: minmax(164px, 172px);
   grid-template-rows: 28px 30px;
   align-items: start;
   justify-items: stretch;
   gap: 4px;
-  flex: 0 0 160px;
+  flex: 0 0 172px;
   min-width: 0;
   height: 62px;
 }
@@ -370,64 +370,22 @@ body.is-windows.floating-bubble-collapsed-right .floating-bubble-tab {
   transform: none;
   z-index: 4;
 }
+#titlebarActionSlot,
 #footerActionSlot { display: contents; }
-/* Size the swappable action button by its slot, not by its element identity,
-   so Settings/Refresh look right in either location. */
-#titlebarActionSlot .icon-button, #titlebarActionSlot .refresh-button { width: 30px; height: 28px; font-size: 14px; }
-#footerActionSlot .icon-button { flex: 0 0 34px; }
-#footerActionSlot .refresh-button { flex: 0 0 34px; }
-#footerActionSlot .icon-button, #footerActionSlot .refresh-button { width: 34px; height: 30px; font-size: 16px; }
-.utility-actions {
-  position: relative;
-  display: inline-flex;
+#titlebarActionSlot .icon-button,
+#titlebarActionSlot .refresh-button {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 28px;
+  font-size: 14px;
+}
+#footerActionSlot .icon-button,
+#footerActionSlot .refresh-button {
   flex: 0 0 34px;
   width: 34px;
-  isolation: isolate;
+  height: 30px;
+  font-size: 16px;
 }
-.utility-actions::before {
-  content: "";
-  position: absolute;
-  inset: 0 100% 0 auto;
-  width: 6px;
-}
-.utility-actions .settings-icon-button {
-  position: relative;
-  z-index: 2;
-  flex: 0 0 34px;
-}
-.utility-actions .refresh-button {
-  position: absolute;
-  right: calc(100% + 6px);
-  z-index: 1;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(8px) scale(0.96);
-}
-.utility-actions:not(.is-swapped):hover .refresh-button,
-.utility-actions:not(.is-swapped):has(:focus-visible) .refresh-button,
-.shell.settings-open .utility-actions:not(.is-swapped) .refresh-button,
-.utility-actions .refresh-button:is(.is-refreshing, .is-refreshed, .is-refresh-error),
-.utility-actions.is-swapped .refresh-button {
-  opacity: 1;
-  pointer-events: auto;
-  transform: none;
-}
-.utility-actions.is-swapped .settings-icon-button {
-  position: absolute;
-  right: calc(100% + 6px);
-  opacity: 0;
-  pointer-events: none;
-}
-.utility-actions.is-swapped:hover .settings-icon-button,
-.utility-actions.is-swapped:has(:focus-visible) .settings-icon-button,
-.shell.settings-open .utility-actions.is-swapped .settings-icon-button {
-  opacity: 1;
-  pointer-events: auto;
-  transform: none;
-}
-#footerActionSlot .utility-actions,
-#footerActionSlot .utility-actions .icon-button,
-#footerActionSlot .utility-actions .refresh-button { height: 30px; font-size: 16px; }
 .title-controls .tabs {
   grid-row: 2;
   position: relative;
@@ -2554,9 +2512,7 @@ html.is-windows .settings-panel select option {
 }
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-reduce-motion="off"]) .refresh-button,
-  :root:not([data-reduce-motion="off"]) .refresh-button-icon,
-  :root:not([data-reduce-motion="off"]) .utility-actions .refresh-button,
-  :root:not([data-reduce-motion="off"]) .utility-actions .settings-icon-button {
+  :root:not([data-reduce-motion="off"]) .refresh-button-icon {
     transition-duration: 0.01ms;
   }
 }
@@ -4757,9 +4713,6 @@ html.is-windows .limit-live-badge {
 }
 .update-pill.hidden { display: none; }
 .update-pill:hover { background: rgba(115, 189, 245, 0.18); border-color: rgba(115, 189, 245, 0.52); }
-.footer:has(.utility-actions:hover) .update-pill,
-.footer:has(.utility-actions :focus-visible) .update-pill,
-.footer:has(.refresh-button:is(.is-refreshing, .is-refreshed, .is-refresh-error)) .update-pill,
 .shell.settings-open .footer .update-pill {
   opacity: 0;
   pointer-events: none;

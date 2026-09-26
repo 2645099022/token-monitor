@@ -6,8 +6,8 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 
-const { openDb, defaultDbPath } = require('../../src/shared/persistence/db');
-const { createWriter, rowToRecord } = require('../../src/shared/persistence/recordWriter');
+const { openDb, defaultDbPath, runtimeNativeBindingPath, SCHEMA_VERSION, backfillMissingTimestamps } = require('../../src/shared/persistence/db');
+const { createWriter, rowToRecord, isSameSessionInstance } = require('../../src/shared/persistence/recordWriter');
 const { setPersistenceWriter } = require('../../src/shared/usage');
 const usage = require('../../src/shared/usage');
 const { extractUsageFromTokscale } = usage;
@@ -16,10 +16,17 @@ function tmpDbPath() {
   return path.join(os.tmpdir(), `tm-persist-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
 }
 
+test('openDb selects a native binding for the current Node ABI', () => {
+  const binding = runtimeNativeBindingPath();
+  assert.match(binding || '', new RegExp(`node-${process.versions.modules.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}`));
+  assert.ok(fs.existsSync(binding), `native binding should exist at ${binding}`);
+});
+
 test('openDb: in-memory schema bootstraps and is queryable', () => {
   const db = openDb(':memory:');
   const version = db.prepare(`SELECT value FROM schema_meta WHERE key='version'`).get();
-  assert.equal(Number(version.value), 1);
+  assert.equal(Number(version.value), SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 3);
   const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`).all().map(r => r.name);
   assert.ok(tables.includes('usage_records'), 'usage_records table should exist');
   assert.ok(tables.includes('schema_meta'), 'schema_meta table should exist');
@@ -276,4 +283,102 @@ test('lifecycle: two different sessions in the same batch stay separate', () => 
     setPersistenceWriter(null);
     writer.close();
   }
+});
+
+test('createWriter: a reused session id with a new creation time inserts a second row', () => {
+  const db = openDb(':memory:');
+  const writer = createWriter(db, { resolveTimestampsMap: () => new Map() });
+  writer.ingestRows([
+    {
+      client: 'claude',
+      sessionId: 's-reuse',
+      model: 'opus',
+      totalTokens: 1000,
+      startedAt: '2026-08-01T00:00:00.000Z',
+      lastUsedAt: '2026-08-01T03:00:00.000Z'
+    }
+  ]);
+  writer.ingestRows([
+    {
+      client: 'claude',
+      sessionId: 's-reuse',
+      model: 'opus',
+      totalTokens: 20,
+      startedAt: '2026-08-14T10:00:00.000Z',
+      lastUsedAt: '2026-08-14T10:05:00.000Z'
+    }
+  ]);
+  const rows = db.prepare(`SELECT total_tokens, started_at FROM usage_records WHERE session_id = 's-reuse' ORDER BY started_at`).all();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].total_tokens, 1000);
+  assert.equal(rows[0].started_at, '2026-08-01T00:00:00.000Z');
+  assert.equal(rows[1].total_tokens, 20);
+  assert.equal(rows[1].started_at, '2026-08-14T10:00:00.000Z');
+  writer.close();
+});
+
+test('createWriter: tiny started_at jitter on the same creation stays one row', () => {
+  const db = openDb(':memory:');
+  const writer = createWriter(db, { resolveTimestampsMap: () => new Map() });
+  writer.ingestRows([
+    { client: 'claude', sessionId: 's-jitter', model: 'opus', totalTokens: 10, startedAt: '2026-08-01T00:00:00.000Z', lastUsedAt: '2026-08-01T00:10:00.000Z' }
+  ]);
+  writer.ingestRows([
+    { client: 'claude', sessionId: 's-jitter', model: 'opus', totalTokens: 20, startedAt: '2026-08-01T00:00:30.000Z', lastUsedAt: '2026-08-01T00:20:00.000Z' }
+  ]);
+  const rows = db.prepare(`SELECT total_tokens, started_at FROM usage_records WHERE session_id = 's-jitter'`).all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].total_tokens, 20);
+  assert.equal(rows[0].started_at, '2026-08-01T00:00:00.000Z', 'original creation time is kept');
+  writer.close();
+});
+
+test('createWriter: a later scan without timestamps keeps the stored times', () => {
+  const db = openDb(':memory:');
+  const writer = createWriter(db, { resolveTimestampsMap: () => new Map() });
+  writer.ingestRows([
+    { client: 'claude', sessionId: 's-keep', model: 'opus', totalTokens: 10, startedAt: '2026-08-01T00:00:00.000Z', lastUsedAt: '2026-08-01T01:00:00.000Z' }
+  ]);
+  writer.ingestRows([
+    { client: 'claude', sessionId: 's-keep', model: 'opus', totalTokens: 11 }
+  ]);
+  const row = db.prepare(`SELECT total_tokens, started_at, last_used_at FROM usage_records WHERE session_id = 's-keep'`).get();
+  assert.equal(row.total_tokens, 11);
+  assert.equal(row.started_at, '2026-08-01T00:00:00.000Z');
+  assert.equal(row.last_used_at, '2026-08-01T01:00:00.000Z');
+  writer.close();
+});
+
+test('backfillMissingTimestamps fills from a local transcript and ignores ingest time', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-backfill-'));
+  const db = openDb(':memory:');
+  try {
+    const dir = path.join(home, '.claude', 'projects', '-app');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'sess-backfill.jsonl'),
+      `${JSON.stringify({ timestamp: '2026-08-09T01:00:00.000Z' })}\n${JSON.stringify({ timestamp: '2026-08-09T02:00:00.000Z' })}\n`
+    );
+    db.prepare(`
+      INSERT INTO usage_records (client, session_id, model, total_tokens, ingested_at)
+      VALUES ('claude', 'sess-backfill', 'claude-opus-5', 1, '2026-08-14 10:00:00')
+    `).run();
+    const result = backfillMissingTimestamps(db, { homeDir: home, archives: new Map() });
+    assert.ok(result.updated >= 1);
+    const row = db.prepare(`SELECT started_at, last_used_at FROM usage_records WHERE session_id = 'sess-backfill'`).get();
+    assert.equal(row.started_at, '2026-08-09T01:00:00.000Z');
+    assert.equal(row.last_used_at, '2026-08-09T02:00:00.000Z');
+    assert.notEqual(row.started_at.startsWith('2026-08-14'), true);
+  } finally {
+    db.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('isSameSessionInstance keys off creation time, not last_used_at', () => {
+  const existing = { started_at: '2026-08-01T00:00:00.000Z', last_used_at: '2026-08-01T03:00:00.000Z' };
+  assert.equal(isSameSessionInstance(existing, { started_at: '2026-08-01T00:00:20.000Z' }), true);
+  assert.equal(isSameSessionInstance(existing, { started_at: '2026-08-01T04:00:00.000Z' }), false);
+  assert.equal(isSameSessionInstance(existing, { started_at: null }), true);
+  assert.equal(isSameSessionInstance({ started_at: null }, { started_at: '2026-08-01T00:00:00.000Z' }), true);
 });

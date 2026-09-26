@@ -11,7 +11,8 @@
     "agent:once": "node src/agent/agent.js --once",
     "widget": "electron .",
     "dev": "electron .",
-    "test": "node --test \"tests/**/*.test.js\"",
+    "test": "node --test",
+    "rebuild:native": "node scripts/rebuild-native.js",
     "build:mac-widget": "node scripts/build-macos-widget.js",
     "verify:mac:widget-app": "node scripts/verify-macos-widget-app.js",
     "sync:worker": "node scripts/sync-worker-shared.js",
@@ -28,7 +29,8 @@
     "dist:linux": "electron-builder --linux --x64 --publish never",
     "verify:release-artifact-names": "node scripts/verify-updater-artifact-names.js dist",
     "lint": "eslint .",
-    "verify": "npm run lint && npm test"
+    "verify": "npm run lint && npm test",
+    "postinstall": "node scripts/rebuild-native.js"
   },
   "build": {
     "appId": "com.javis.tokenmonitor",
@@ -40,6 +42,7 @@
       "src/electron/**/*",
       "src/shared/**/*",
       "src/hub/**/*",
+      "native/runtime/**/*",
       "assets/icon.png",
       "assets/icons/**/*",
       "package.json"
@@ -47,7 +50,8 @@
     "asarUnpack": [
       "node_modules/@tokscale/**/*",
       "node_modules/tokscale/**/*",
-      "node_modules/koffi/**/*"
+      "node_modules/koffi/**/*",
+      "native/runtime/**/*"
     ],
     "mac": {
       "artifactName": "Token-Monitor-${version}-${arch}.${ext}",

@@ -29,6 +29,7 @@
           </div>
           <div class="window-actions">
             <button id="pinButton" class="icon-button" title="Cycle window behavior">⇧</button>
+            <span id="titlebarActionSlot"><button id="refreshButton" class="refresh-button" title="Refresh" aria-label="Refresh"><span class="refresh-button-icon" aria-hidden="true">↻</span><span class="refresh-button-spinner" aria-hidden="true"></span></button></span>
             <button id="minButton" class="icon-button" title="Minimize">−</button>
             <button id="closeButton" class="icon-button" title="Close">×</button>
           </div>
@@ -1408,12 +1409,7 @@
           </button>
           <button id="appUpdatePillDismiss" type="button" class="update-pill-dismiss" data-i18n-title="settings.appUpdate.dismiss" data-i18n-aria-label="settings.appUpdate.dismiss" title="Dismiss this version" aria-label="Dismiss this version">×</button>
         </div>
-        <span id="footerActionSlot">
-          <span id="utilityActions" class="utility-actions">
-            <button id="refreshButton" class="refresh-button" title="Refresh" aria-label="Refresh"><span class="refresh-button-icon" aria-hidden="true">↻</span><span class="refresh-button-spinner" aria-hidden="true"></span></button>
-            <button id="settingsButton" class="icon-button settings-icon-button" title="Settings" aria-label="Settings"></button>
-          </span>
-        </span>
+        <span id="footerActionSlot"><button id="settingsButton" class="icon-button settings-icon-button" title="Settings" aria-label="Settings"></button></span>
       </footer>
       <div id="appUpdatePopover" class="app-update-popover" popover="auto" role="dialog" aria-labelledby="appUpdatePopoverTitle">
         <div class="app-update-popover-header">

@@ -9,12 +9,13 @@ npm start          # launch the Electron widget (= npm run widget / npm run dev)
 npm run hub        # start the Node hub on port 17321
 npm run agent      # start the headless collector→hub agent
 npm run agent:once # one-shot collect+post, then exit (useful for cron/launchd)
-npm test           # run the node:test suite (node --test "tests/**/*.test.js")
+npm test           # run the node:test suite under tests/ (works on Windows too)
+npm run rebuild:native # build separate Node and Electron better-sqlite3 bindings
 npm run lint       # ESLint flat config (eslint.config.js)
 npm run verify     # lint + test (single local entry point)
 ```
 
-Automated verification is `npm run verify` (= `npm run lint && npm test`); CI (`.github/workflows/ci.yml`) runs lint + test on push/PR across Node 22 & 24. The toolchain (ESLint 10 + the node:test glob) needs Node 22.13+, which is why `engines.node` is `>=22.13.0` (Node 18 & 20 are both EOL as of 2026-06).
+Automated verification is `npm run verify` (= `npm run lint && npm test`); CI (`.github/workflows/ci.yml`) runs lint + test on push/PR across Node 22 & 24. The toolchain requires Node 22.13+, which is why `engines.node` is `>=22.13.0` (Node 18 & 20 are both EOL as of 2026-06). Electron and external Node use different native-module ABIs, so `rebuild:native` keeps a per-ABI Node binding and Electron binding; close the widget before rebuilding Electron.
 
 To dry-run the agent without posting: `node src/agent/agent.js --once --dry-run`.
 

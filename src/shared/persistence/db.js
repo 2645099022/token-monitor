@@ -23,7 +23,26 @@ const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
+const { backfillMissingTimestamps } = require('./backfillTimestamps');
+const SOURCE_ROOT = path.resolve(__dirname, '..', '..', '..');
+const PROJECT_ROOT = SOURCE_ROOT.endsWith(`${path.sep}app.asar`)
+  ? `${SOURCE_ROOT}.unpacked`
+  : SOURCE_ROOT;
+
+function runtimeNativeBindingPath() {
+  const runtime = process.versions.electron ? 'electron' : 'node';
+  const abi = process.versions.modules;
+  const candidate = path.join(
+    PROJECT_ROOT,
+    'native',
+    'runtime',
+    `${process.platform}-${process.arch}`,
+    `${runtime}-${abi}`,
+    'better_sqlite3.node'
+  );
+  return fs.existsSync(candidate) ? candidate : null;
+}
 
 function defaultDbPath(app = 'agent') {
   // app: 'electron' | 'agent' | 'hub' — controls where the file lives.
@@ -45,7 +64,10 @@ function ensureDir(filePath) {
 
 function openDb(filePath) {
   if (filePath !== ':memory:') ensureDir(filePath);
-  const db = new Database(filePath);
+  const nativeBinding = runtimeNativeBindingPath();
+  const db = nativeBinding
+    ? new Database(filePath, { nativeBinding })
+    : new Database(filePath);
   // WAL = better crash safety + concurrent reads while the writer is in a tx.
   if (filePath !== ':memory:') db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
@@ -53,20 +75,52 @@ function openDb(filePath) {
   return db;
 }
 
+function schemaVersion(db) {
+  const current = db.prepare(`SELECT value FROM schema_meta WHERE key = 'version'`).get();
+  return current ? Number(current.value) : 0;
+}
+
+function setSchemaVersion(db, version) {
+  db.prepare(`
+    INSERT INTO schema_meta (key, value) VALUES ('version', ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(String(version));
+}
+
+function collapseDuplicateUsageRows(db) {
+  // v1 unique key included started_at. Filling that column later would fork
+  // a second row for the same session+model. Keep the latest cumulative row.
+  const dupes = db.prepare(`
+    SELECT client, session_id, IFNULL(model, '') AS model_key
+    FROM usage_records
+    GROUP BY client, session_id, IFNULL(model, '')
+    HAVING COUNT(*) > 1
+  `).all();
+  const deleteStmt = db.prepare(`
+    DELETE FROM usage_records
+    WHERE client = ? AND session_id = ? AND IFNULL(model, '') = ? AND id != ?
+  `);
+  const pickStmt = db.prepare(`
+    SELECT id FROM usage_records
+    WHERE client = ? AND session_id = ? AND IFNULL(model, '') = ?
+    ORDER BY scan_count DESC, id DESC
+    LIMIT 1
+  `);
+  for (const row of dupes) {
+    const keep = pickStmt.get(row.client, row.session_id, row.model_key);
+    if (keep) deleteStmt.run(row.client, row.session_id, row.model_key, keep.id);
+  }
+}
+
 function migrate(db) {
-  // Single-version schema for now. The version table is here so future
-  // migrations have somewhere to read/write from without re-inventing it.
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_meta (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
   `);
-  const current = db.prepare(`SELECT value FROM schema_meta WHERE key = 'version'`).get();
-  if (!current) {
-    db.prepare(`INSERT INTO schema_meta (key, value) VALUES (?, ?)`).run('version', String(SCHEMA_VERSION));
-  }
-  if (!current || Number(current.value) < 1) {
+  const current = schemaVersion(db);
+  if (current < 1) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS usage_records (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,21 +141,44 @@ function migrate(db) {
         source_payload  TEXT
       );
     `);
-    // Dedup strategy: ONE ROW PER (client, session_id, model, started_at).
-    // When tokscale re-scans the same session, the writer UPSERTs in place:
-    // latest cumulative values win, scan_count increments, ingested_at updates.
-    // This means deleting the source session file freezes the row at its last
-    // seen snapshot — UI shows the final state, DB keeps the audit trail.
-    // COALESCE handles NULL started_at so they participate in dedup.
     db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_dedup
-        ON usage_records(client, session_id, model, COALESCE(started_at, ''));
       CREATE INDEX IF NOT EXISTS idx_usage_client_session
         ON usage_records(client, session_id);
       CREATE INDEX IF NOT EXISTS idx_usage_last_used
         ON usage_records(last_used_at);
     `);
   }
+  if (current < 2) {
+    // Dedup is one row per (client, session_id, model). started_at is
+    // metadata, not identity — otherwise backfilling times creates duplicates.
+    collapseDuplicateUsageRows(db);
+    db.exec(`DROP INDEX IF EXISTS idx_usage_dedup;`);
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_dedup
+        ON usage_records(client, session_id, IFNULL(model, ''));
+      CREATE INDEX IF NOT EXISTS idx_usage_started
+        ON usage_records(started_at);
+    `);
+    try {
+      backfillMissingTimestamps(db);
+    } catch (error) {
+      // Schema change must still commit; timestamps can be filled on the next open.
+      if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn(`usage timestamp backfill failed: ${error.message}`);
+      }
+    }
+  }
+  if (current < 3) {
+    // started_at is the immutable creation time and part of instance identity
+    // so a reused Claude UUID after lastSessionId recycle cannot overwrite
+    // the deleted conversation's audit row.
+    db.exec(`DROP INDEX IF EXISTS idx_usage_dedup;`);
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_dedup
+        ON usage_records(client, session_id, IFNULL(model, ''), COALESCE(started_at, ''));
+    `);
+  }
+  if (current !== SCHEMA_VERSION) setSchemaVersion(db, SCHEMA_VERSION);
 }
 
-module.exports = { openDb, defaultDbPath, SCHEMA_VERSION };
+module.exports = { openDb, defaultDbPath, runtimeNativeBindingPath, SCHEMA_VERSION, backfillMissingTimestamps };

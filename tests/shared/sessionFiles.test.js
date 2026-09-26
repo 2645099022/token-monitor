@@ -62,6 +62,28 @@ test('resolves a codex session via the walk fallback when the id is not a dated 
   } finally { cleanup(home); }
 });
 
+test('resolves a claude session when the stored id is epoch-prefixed', () => {
+  const home = tmpHome();
+  try {
+    const dir = path.join(home, '.claude', 'projects', '-work');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'abc-123.jsonl');
+    fs.writeFileSync(file, '{}\n');
+    assert.equal(resolveSessionFile('claude', '1782888368983__E--spman-cc__abc-123', home), file);
+  } finally { cleanup(home); }
+});
+
+test('resolves a grok session directory by uuid', () => {
+  const home = tmpHome();
+  try {
+    const dir = path.join(home, '.grok', 'sessions', 'E%3A%5Cwork', '019fb1b6-84a1-7de3-9542-0c291ab7c4ae');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'events.jsonl');
+    fs.writeFileSync(file, `${JSON.stringify({ ts: '2026-07-30T06:25:23.034Z', type: 'start' })}\n`);
+    assert.equal(resolveSessionFile('grok', '019fb1b6-84a1-7de3-9542-0c291ab7c4ae', home), file);
+  } finally { cleanup(home); }
+});
+
 test('returns empty string when not found or unknown client', () => {
   const home = tmpHome();
   try {

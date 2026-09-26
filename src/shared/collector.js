@@ -32,7 +32,8 @@ const { hermesProfileWatchDirs, resolveHermesHome } = require('./hermesProfiles'
 const { mergeHistories, parseGraphResult, normalizeHistory } = require('./history');
 const { retainDailyHistory, retainLiveDailyHistory } = require('./dailyHistoryArchive');
 const cursorAuth = require('./cursorAuth');
-const { findSessionFiles, codexSessionFile } = require('./sessionFiles');
+const { findSessionFiles, codexSessionFile, grokSessionFile } = require('./sessionFiles');
+const { jsonlTimeRange, timestampFromSessionId } = require('./sessionTimestamps');
 const opencodeSession = require('./opencodeSession');
 const { buildPromaHistoryGraph, buildPromaPeriods, collectPromaRows } = require('./promaUsage');
 const { resolveReasonixStatsDir, REASONIX_SOURCE_CHECK_ID } = require('./reasonixPaths');
@@ -304,48 +305,6 @@ function computePeriodWindows(now = new Date()) {
   };
 }
 
-function isoFromDate(value) {
-  const date = value instanceof Date ? value : new Date(value || '');
-  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
-}
-
-function timestampFromSessionId(id) {
-  const raw = String(id || '');
-  const isoMatch = raw.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/);
-  if (isoMatch) return isoFromDate(isoMatch[0]);
-  const localMatch = raw.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2})[:-](\d{2})(?:[:-](\d{2}))?/);
-  if (!localMatch) return '';
-  const [, year, month, day, hour, minute, second = '0'] = localMatch;
-  return isoFromDate(new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)));
-}
-
-function readFileTail(filePath, bytes = 64 * 1024) {
-  let fd;
-  try {
-    fd = fs.openSync(filePath, 'r');
-    const stat = fs.fstatSync(fd);
-    const length = Math.min(bytes, stat.size);
-    const buffer = Buffer.alloc(length);
-    fs.readSync(fd, buffer, 0, length, Math.max(0, stat.size - length));
-    return buffer.toString('utf8');
-  } catch (_) {
-    return '';
-  } finally {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd); } catch (_) {}
-    }
-  }
-}
-
-function timestampFromJsonLine(line) {
-  try {
-    const obj = JSON.parse(line);
-    return isoFromDate(obj.timestamp || obj.updatedAt || obj.updated_at || obj.createdAt || obj.created_at);
-  } catch (_) {
-    return '';
-  }
-}
-
 const projectPathCache = new Map();
 
 function projectPathFromJsonl(filePath) {
@@ -400,30 +359,6 @@ function projectIdentity(value) {
   return { projectId: hashKey('project', normalized), projectLabel: label };
 }
 
-// Keyed by path -> { key: `size:mtimeMs`, value }, mirroring projectPathCache.
-// The tail timestamp only moves when the transcript grows, so a mtime match lets
-// a full-tick decoration skip re-reading every idle session (issue: periodic UI
-// stutter once project tracking made this run on every session each tick).
-const jsonlTimestampCache = new Map();
-
-function lastJsonlTimestamp(filePath) {
-  let stat;
-  try { stat = fs.statSync(filePath); } catch (_) { return ''; }
-  const cacheKey = `${stat.size}:${stat.mtimeMs}`;
-  const cached = jsonlTimestampCache.get(filePath);
-  if (cached?.key === cacheKey) return cached.value;
-  const tail = readFileTail(filePath);
-  const lines = tail.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  let value = '';
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const timestamp = timestampFromJsonLine(lines[index]);
-    if (timestamp) { value = timestamp; break; }
-  }
-  if (!value) value = stat.mtime.toISOString();
-  jsonlTimestampCache.set(filePath, { key: cacheKey, value });
-  return value;
-}
-
 function sessionRefsForPeriods(periods) {
   const refs = new Map();
   for (const period of Object.values(periods || {})) {
@@ -453,8 +388,9 @@ function sessionTimestampMap(periods, home = os.homedir(), deps = {}) {
   }
 
   const applyFile = (client, sessionId, filePath) => {
-    const startedAt = timestampFromSessionId(sessionId);
-    const lastUsedAt = lastJsonlTimestamp(filePath) || startedAt;
+    const range = jsonlTimeRange(filePath);
+    const startedAt = range.first || timestampFromSessionId(sessionId);
+    const lastUsedAt = range.last || startedAt;
     const identity = resolveProjects ? projectIdentity(projectPathFromJsonl(filePath)) : {};
     const key = `${client}:${sessionId}`;
     metadata.set(key, { startedAt, lastUsedAt, ...identity });
@@ -479,6 +415,11 @@ function sessionTimestampMap(periods, home = os.homedir(), deps = {}) {
 
   const claudeFiles = findSessionFiles(path.join(home, '.claude', 'projects'), byClient.get('claude') || []);
   for (const [sessionId, filePath] of claudeFiles) applyFile('claude', sessionId, filePath);
+
+  for (const sessionId of (byClient.get('grok') || [])) {
+    const filePath = grokSessionFile(home, sessionId);
+    if (filePath) applyFile('grok', sessionId, filePath);
+  }
 
   const codexIds = byClient.get('codex') || new Set();
   const missingCodexIds = new Set();
