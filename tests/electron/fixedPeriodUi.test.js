@@ -78,7 +78,7 @@ test('fixed-period menu follows the glass theme and keeps labels left aligned', 
   assert.match(app, /force: forceFixedPeriodHistory,[\s\S]*?retryFailed: forceFixedPeriodHistory/);
   assert.match(app, /isDerived\(next\) && state\.fixedPeriodHistoryFailed[\s\S]*?warmFixedPeriodHistory\(\{ retryFailed: true, renderOnComplete: true \}\)/);
   assert.match(app, /fixedPeriodHistorySignature !== signature[\s\S]*?\|\| state\.fixedPeriodHistoryBusy\) \{[\s\S]*?void loadFixedPeriodHistory\(\);/);
-  assert.match(boot, /\['today', 'month', 'week', 'last7', 'last30', 'allTime'\]\.includes\(period\)/);
+  assert.match(boot, /\['today', 'month', 'week', 'last7', 'last30', 'custom', 'allTime'\]\.includes\(period\)/);
   assert.match(app, /function fixedPeriodDevices\(\)/);
   assert.match(app, /devicesForReadySnapshot\(state\.fixedPeriodSnapshot, state\.period\)/);
   assert.match(app, /fixedPeriodSnapshotFromDevices\(state\.period, fixedPeriodSources\(\)/);
