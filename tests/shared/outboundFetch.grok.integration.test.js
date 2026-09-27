@@ -1,8 +1,10 @@
 'use strict';
 
 /**
- * Live integration: only runs when GROK live credentials + proxy env exist.
- * Skips cleanly otherwise so CI stays green without secrets.
+ * Live integration: only runs when asked for (TOKEN_MONITOR_LIVE_TESTS=1) and
+ * GROK live credentials + proxy env exist. Skips cleanly otherwise, so a
+ * machine that merely has a proxy and a Grok login does not reach the live
+ * service on every test run.
  */
 
 const assert = require('node:assert/strict');
@@ -24,11 +26,12 @@ function hasLiveGrokAuth() {
   }
 }
 
-const canRun = Boolean(resolveProxyUrl(process.env) && hasLiveGrokAuth());
+const canRun = process.env.TOKEN_MONITOR_LIVE_TESTS === '1'
+  && Boolean(resolveProxyUrl(process.env) && hasLiveGrokAuth());
 
 test(
   'live Grok billing via env proxy returns Weekly/Monthly window',
-  { skip: canRun ? false : 'needs HTTPS_PROXY + ~/.grok/auth.json' },
+  { skip: canRun ? false : 'needs TOKEN_MONITOR_LIVE_TESTS=1 + HTTPS_PROXY + ~/.grok/auth.json' },
   async () => {
     const cred = grokCredential(process.env);
     assert.ok(cred && cred.token);

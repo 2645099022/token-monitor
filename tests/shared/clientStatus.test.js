@@ -83,8 +83,13 @@ test('clientDataDirPresence detects Antigravity via the CLI conversations dir', 
   const cliDir = path.join(base, '.gemini', 'antigravity-cli', 'conversations');
   const originalHome = os.homedir;
   const prevGeminiHome = process.env.GEMINI_CLI_HOME;
+  // On Windows tokscale's Antigravity cache sits under %APPDATA%, not home.
+  const prevAppData = process.env.APPDATA;
+  const prevTokscaleConfig = process.env.TOKSCALE_CONFIG_DIR;
   try {
     delete process.env.GEMINI_CLI_HOME;
+    delete process.env.TOKSCALE_CONFIG_DIR;
+    process.env.APPDATA = path.join(base, 'AppData', 'Roaming');
     os.homedir = () => base;
     assert.equal(clientDataDirPresence('antigravity').antigravity, false);
     fs.mkdirSync(cliDir, { recursive: true });
@@ -95,6 +100,10 @@ test('clientDataDirPresence detects Antigravity via the CLI conversations dir', 
     os.homedir = originalHome;
     if (prevGeminiHome === undefined) delete process.env.GEMINI_CLI_HOME;
     else process.env.GEMINI_CLI_HOME = prevGeminiHome;
+    if (prevAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = prevAppData;
+    if (prevTokscaleConfig === undefined) delete process.env.TOKSCALE_CONFIG_DIR;
+    else process.env.TOKSCALE_CONFIG_DIR = prevTokscaleConfig;
     fs.rmSync(base, { recursive: true, force: true });
   }
 });

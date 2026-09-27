@@ -2216,7 +2216,10 @@ test('clientDataDirPresence requires an actual VS Code Copilot chat source', () 
     path.join('Library', 'Application Support', 'Code', 'User', 'workspaceStorage', 'plain-workspace')
   ]);
   const originalHomedir = os.homedir;
+  // On Windows VS Code's workspaceStorage is read from %APPDATA% as well.
+  const prevAppData = process.env.APPDATA;
   os.homedir = () => tmp;
+  process.env.APPDATA = path.join(tmp, 'AppData', 'Roaming');
   try {
     const { clientDataDirPresence } = freshCollector();
     assert.deepEqual(clientDataDirPresence('copilot'), { copilot: false });
@@ -2224,6 +2227,8 @@ test('clientDataDirPresence requires an actual VS Code Copilot chat source', () 
     assert.deepEqual(clientDataDirPresence('copilot'), { copilot: true });
   } finally {
     os.homedir = originalHomedir;
+    if (prevAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = prevAppData;
     delete require.cache[collectorPath];
     fs.rmSync(tmp, { recursive: true, force: true });
   }

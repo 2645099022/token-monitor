@@ -14,6 +14,16 @@ const { REASONIX_CLIENT } = require('./providers/reasonix/paths');
 const { filterReasonixSyntheticSessions, isReasonixSyntheticSession } = require('./providers/reasonix/sessionGuard');
 const { canonicalProjectKey, deterministicProjectLabel } = require('./projectKey');
 const { normalizeSyncUploadIntervalMs, staleAfterMsForSyncUpload } = require('./syncUploadInterval');
+// Local-only persistence layer (off by default until a writer is injected via
+// `options.persistence`). When a writer is supplied, every row that flows
+// through extractUsageFromTokscale is also stored to a local SQLite DB so
+// deleting the source session file does not destroy the audit trail.
+let persistenceWriter = null;
+function setPersistenceWriter(writer) { persistenceWriter = writer; }
+function persistUsageRows(rows) {
+  if (!persistenceWriter || rows.length === 0) return;
+  try { persistenceWriter.ingestRows(rows); } catch (_) { /* swallow */ }
+}
 const TOKEN_KEYS = ['totalTokens', 'total_tokens', 'totalTokenCount', 'total_token_count', 'tokens', 'tokenCount', 'token_count'];
 // Additive components for a token total. `reasoning` is deliberately excluded
 // from the generic fallback because most Tokscale clients either leave it at 0
@@ -928,6 +938,10 @@ function fallbackUsagePeriod(json) {
 function extractUsageBundleFromTokscale(json) {
   const rows = [];
   collectUsageRows(json, rows);
+  // Best-effort persistence hook. Failures must never affect the in-memory
+  // aggregation result — the local DB is a convenience layer, not a source
+  // of truth for the UI.
+  persistUsageRows(rows);
   if (rows.length === 0 && json && typeof json === 'object') {
     const period = fallbackUsagePeriod(json);
     return {
@@ -950,6 +964,7 @@ function extractUsageBundleFromTokscale(json) {
 function extractUsageFromTokscale(json) {
   const rows = [];
   collectUsageRows(json, rows);
+  persistUsageRows(rows);
   if (rows.length === 0 && json && typeof json === 'object') return fallbackUsagePeriod(json);
   const period = emptyPeriod();
   for (const row of rows) addUsageRowToPeriod(period, row);
@@ -1633,5 +1648,7 @@ module.exports = {
   normalizeDeviceRecord,
   normalizePeriod,
   projectRollupFromSessions,
-  stripSessionTextFromDeviceRecord
+  setPersistenceWriter,
+  stripSessionTextFromDeviceRecord,
+  tokenValueForClient
 };
