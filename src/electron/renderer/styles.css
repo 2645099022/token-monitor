@@ -5356,6 +5356,62 @@ html.is-windows .limit-live-badge {
   font-size: 11px;
 }
 .custom-range-apply:hover { background: rgba(var(--accent-rgb), 0.2); }
+/* Catalog price changes waiting for review; sits under the title bar in every
+   view so it is seen without opening settings. */
+.price-notice-bar {
+  -webkit-app-region: no-drag;
+  position: relative;
+  z-index: 1;
+  display: grid;
+  flex: 0 0 auto;
+  gap: 5px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--yellow) 55%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--yellow) 10%, transparent);
+  color: var(--text);
+  font-size: 11px;
+}
+.price-notice-title { color: var(--yellow); font-weight: 600; }
+.price-notice-detail { color: var(--muted); }
+.price-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.price-notice-actions label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+.price-notice-actions input {
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(var(--sunken-rgb), 0.48);
+  color: var(--text);
+  color-scheme: dark light;
+  font: inherit;
+}
+.price-notice-actions button {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.price-notice-actions button:hover { background: rgba(var(--overlay-rgb), 0.08); }
+.price-notice-actions .price-notice-confirm {
+  border-color: color-mix(in srgb, var(--yellow) 60%, transparent);
+  background: color-mix(in srgb, var(--yellow) 14%, transparent);
+}
+.price-notice-more { margin-left: auto; color: var(--muted); }
 .period-menu.hidden {
   /* Animates out rather than disappearing, so it must keep its box. Higher
      specificity than the blanket `.hidden`, and matching weight to beat it. */

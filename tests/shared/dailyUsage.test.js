@@ -353,7 +353,7 @@ test('pricing: parses tokscale output and prices tokens, preferring an official 
       lookup: (model) => (model === 'claude-opus-5' ? price : null),
       readCatalog: () => null
     });
-    assert.deepEqual(result, { fetched: 1, missing: 1 });
+    assert.deepEqual(result, { fetched: 1, missing: 1, changed: 1, notices: 0 });
     const prices = priceTable(db);
     const cost = costOf({ model: 'claude-opus-5', input_tokens: 1000, cache_read: 10000, cache_write: 100, output_tokens: 200 }, prices);
     assert.ok(Math.abs(cost - (1000 * 5e-6 + 10000 * 5e-7 + 100 * 6.25e-6 + 200 * 25e-6)) < 1e-12);

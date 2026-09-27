@@ -88,6 +88,12 @@ const { Worker } = require('node:worker_threads');
 const { defaultSourceRoots: dailyUsageSourceRoots } = require('../shared/dailyUsage/sources');
 const { rangeSessions } = require('../shared/dailyUsage/rangeSessions');
 const {
+  DEFAULT_ALERT_PERCENT: DEFAULT_PRICE_ALERT_PERCENT,
+  loadPriceConfig,
+  pendingPriceNotices,
+  resolvePriceNotice
+} = require('../shared/dailyUsage/priceHistory');
+const {
   buildDailyCorrection,
   correctHistoryGraph,
   correctSummaryPeriods
@@ -522,6 +528,11 @@ function normalizePeriodMonthMode(value) {
   return PERIOD_MONTH_MODES.has(value) ? value : 'month';
 }
 
+function normalizePriceAlertPercent(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 1 && n <= 1000 ? Math.round(n) : DEFAULT_PRICE_ALERT_PERCENT;
+}
+
 function normalizeDayKey(value) {
   const key = String(value || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return '';
@@ -605,6 +616,9 @@ function defaultSettings() {
     // Append-only archives of client transcript dirs for the day-split usage
     // import, e.g. { claude: ['E:\\backup\\claude-backup'], grok: [...] }.
     dailyUsageArchiveRoots: {},
+    // A catalog price change of at least this many percent is shown for
+    // review (see dailyUsage/priceHistory.js).
+    priceChangeAlertPercent: DEFAULT_PRICE_ALERT_PERCENT,
     themeColors: {},
     vendorColors: {},
     interfaceFontFamily: '',
@@ -2511,6 +2525,7 @@ function readSettings() {
     merged.periodMonthMode = normalizePeriodMonthMode(merged.periodMonthMode);
     merged.periodCustomRange = normalizePeriodCustomRange(merged.periodCustomRange);
     merged.dailyUsageArchiveRoots = normalizeDailyUsageArchiveRoots(merged.dailyUsageArchiveRoots);
+    merged.priceChangeAlertPercent = normalizePriceAlertPercent(merged.priceChangeAlertPercent);
     if (saved.historyEnabled !== undefined) {
       merged.historyEnabled = parseBoolean(saved.historyEnabled, false);
     }
@@ -2776,22 +2791,39 @@ function dailyUsageCorrectionEnabled() {
   return settings?.dailyUsageCorrectionEnabled !== false && Boolean(usagePersistenceHandle);
 }
 
+// price-history.json beside the database: price aliases and hand-entered
+// price versions (see dailyUsage/priceHistory.js).
+function dailyPriceConfigPath() {
+  return usagePersistenceHandle ? path.join(path.dirname(usagePersistenceHandle.path), 'price-history.json') : '';
+}
+
+let lastPriceConfigError = '';
+
+function dailyPriceConfig() {
+  const config = loadPriceConfig(dailyPriceConfigPath());
+  if (config.error && config.error !== lastPriceConfigError) console.warn(`[daily-usage] price-history.json ignored: ${config.error}`);
+  lastPriceConfigError = config.error || '';
+  return config;
+}
+
 function currentDailyCorrection(now = new Date()) {
   if (!dailyUsageCorrectionEnabled()) return null;
   const todayKey = normalizeDayKey(localTodayKeyFor(now));
   // The collector's own all-time start, so allTime covers the same dates.
   const allTimeSince = normalizeAllTimeSince(settings?.allTimeSince);
+  const priceConfig = dailyPriceConfig();
   const key = `${todayKey}|${allTimeSince}|${dailyUsageImportGeneration}`;
-  if (dailyCorrectionCache.key === key && Date.now() - dailyCorrectionCache.builtAt < DAILY_CORRECTION_MAX_AGE_MS) {
+  if (dailyCorrectionCache.key === key && dailyCorrectionCache.priceConfig === priceConfig
+    && Date.now() - dailyCorrectionCache.builtAt < DAILY_CORRECTION_MAX_AGE_MS) {
     return dailyCorrectionCache.value;
   }
   let value = null;
   try {
-    value = buildDailyCorrection(usagePersistenceHandle.db, { todayKey, allTimeSince });
+    value = buildDailyCorrection(usagePersistenceHandle.db, { todayKey, allTimeSince, priceConfig });
   } catch (error) {
     console.warn(`[daily-usage] correction build failed: ${error?.message || error}`);
   }
-  dailyCorrectionCache = { key, value, builtAt: Date.now() };
+  dailyCorrectionCache = { key, priceConfig, value, builtAt: Date.now() };
   return value;
 }
 
@@ -5817,14 +5849,22 @@ const DAILY_USAGE_INTERVAL_MS = 10 * 60 * 1000;
 let dailyUsageImportRunning = null;
 let dailyUsageImportTimer = null;
 
+// Set when tokscale's custom pricing changes, so the next import looks every
+// price up again instead of waiting for the daily refresh.
+let dailyPricingForceNext = false;
+
 function runDailyUsageImport() {
   if (dailyUsageImportRunning || !usagePersistenceHandle) return dailyUsageImportRunning;
   const command = tokscaleCommand();
   const workerData = {
     dbPath: usagePersistenceHandle.path,
     roots: dailyUsageSourceRoots({ archiveRoots: settings?.dailyUsageArchiveRoots }),
-    tokscaleCommand: { bin: command.bin, prefixArgs: command.prefixArgs, env: command.env }
+    tokscaleCommand: { bin: command.bin, prefixArgs: command.prefixArgs, env: command.env },
+    priceConfigPath: dailyPriceConfigPath(),
+    priceAlertPercent: normalizePriceAlertPercent(settings?.priceChangeAlertPercent),
+    forcePricing: dailyPricingForceNext
   };
+  dailyPricingForceNext = false;
   const startedAt = Date.now();
   dailyUsageImportRunning = new Promise((resolve) => {
     const worker = new Worker(require.resolve('../shared/dailyUsage/importWorker'), { workerData });
@@ -5832,6 +5872,7 @@ function runDailyUsageImport() {
       for (const line of message.logs || []) console.log(line);
       if (message.ok) {
         if (message.imported?.parsed > 0 || message.pricing?.fetched > 0) dailyUsageImportGeneration += 1;
+        if (message.pricing?.notices > 0) showPriceChangeNotification();
         console.log(`[daily-usage] import ${JSON.stringify(message.imported)} pricing ${JSON.stringify(message.pricing)} in ${Date.now() - startedAt}ms`);
       } else {
         console.warn(`[daily-usage] import failed: ${message.error?.message}`);
@@ -5846,6 +5887,48 @@ function runDailyUsageImport() {
   return dailyUsageImportRunning;
 }
 
+// A catalog price moved past the alert threshold. The main window shows the
+// change for review; the notification brings it there.
+function showPriceChangeNotification() {
+  const notices = dailyPriceNotices();
+  if (notices.length === 0 || !Notification.isSupported()) return;
+  const locale = trayMenuLocale();
+  const models = [...new Set(notices.map((notice) => notice.model))].join(', ');
+  const notification = new Notification({
+    title: translate(locale, 'priceNotice.osTitle'),
+    body: translate(locale, 'priceNotice.osBody', { models })
+  });
+  notification.on('click', () => { if (mainWindow && !mainWindow.isDestroyed()) revealWindow(mainWindow); });
+  notification.show();
+}
+
+function dailyPriceNotices() {
+  if (!usagePersistenceHandle) return [];
+  try {
+    return pendingPriceNotices(usagePersistenceHandle.db);
+  } catch (error) {
+    console.warn(`[daily-usage] price notices failed: ${error?.message || error}`);
+    return [];
+  }
+}
+
+function resolveDailyPriceNotice(request = {}) {
+  if (!usagePersistenceHandle) return { ok: false, reason: 'unavailable' };
+  try {
+    const result = resolvePriceNotice(usagePersistenceHandle.db, {
+      model: String(request.model || ''),
+      effectiveFrom: normalizeDayKey(request.effectiveFrom),
+      action: String(request.action || ''),
+      date: normalizeDayKey(request.date)
+    });
+    if (result.ok) dailyUsageImportGeneration += 1;
+    return result;
+  } catch (error) {
+    console.warn(`[daily-usage] price notice failed: ${error?.message || error}`);
+    return { ok: false, reason: 'failed' };
+  }
+}
+
 // Day-split sessions of { start, end } for the Sessions and Projects views of
 // week / last 7 / last 30 / custom ranges. This device only.
 function dailyUsageRange(range = {}) {
@@ -5853,7 +5936,7 @@ function dailyUsageRange(range = {}) {
   const end = normalizeDayKey(range?.end);
   if (!usagePersistenceHandle || !start || !end || start > end) return { ok: false, reason: 'unavailable' };
   try {
-    return { ok: true, ...rangeSessions(usagePersistenceHandle.db, { start, end }) };
+    return { ok: true, ...rangeSessions(usagePersistenceHandle.db, { start, end }, { priceConfig: dailyPriceConfig() }) };
   } catch (error) {
     console.warn(`[daily-usage] range query failed: ${error?.message || error}`);
     return { ok: false, reason: 'failed' };
@@ -5985,6 +6068,7 @@ function regenerateTokscalePricing() {
 }
 
 async function refreshAfterPricingChange() {
+  dailyPricingForceNext = true;
   try {
     if (ownsUsageRuntime()) {
       await deviceRuntimeHandle.tick('manual', {});
@@ -7151,6 +7235,7 @@ app.whenReady().then(() => {
       homeLimitAccountCount: normalizeHomeLimitAccountCount(patch.homeLimitAccountCount ?? settings.homeLimitAccountCount),
       periodMonthMode: normalizePeriodMonthMode(patch.periodMonthMode ?? settings.periodMonthMode),
       dailyUsageCorrectionEnabled: parseBoolean(patch.dailyUsageCorrectionEnabled ?? settings.dailyUsageCorrectionEnabled, true),
+      priceChangeAlertPercent: normalizePriceAlertPercent(patch.priceChangeAlertPercent ?? settings.priceChangeAlertPercent),
       modelRankingMetric: normalizeRankingMetric(patch.modelRankingMetric ?? settings.modelRankingMetric),
       sessionContextMetric: normalizeSessionContextMetric(patch.sessionContextMetric ?? settings.sessionContextMetric),
       historyEnabled: parseBoolean(patch.historyEnabled ?? settings.historyEnabled, false),
@@ -8532,6 +8617,8 @@ app.whenReady().then(() => {
   // Days whose value for a client could not be verified against transcripts:
   // { 'YYYY-MM-DD': [client, ...] }, empty while the correction is off.
   ipcMain.handle('dailyUsage:uncorrected', () => (dailyUsageCorrectionEnabled() ? dailyUncorrectedDays : {}));
+  ipcMain.handle('dailyUsage:priceNotices', () => dailyPriceNotices());
+  ipcMain.handle('dailyUsage:resolvePriceNotice', (_event, request) => resolveDailyPriceNotice(request));
   ipcMain.on('dashboard:ready', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win !== dashboardWindow || win.isDestroyed()) return;

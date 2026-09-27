@@ -107,9 +107,29 @@ function createDailySchema(db) {
       status      TEXT NOT NULL,
       fetched_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Catalog prices as observed day by day: a row is written only when a
+    -- model's price differs from its previous observation (see priceHistory.js).
+    CREATE TABLE IF NOT EXISTS price_versions (
+      model          TEXT    NOT NULL,
+      effective_from TEXT    NOT NULL,
+      input          REAL,
+      output         REAL,
+      cache_read     REAL,
+      cache_write    REAL,
+      matched_key    TEXT,
+      source         TEXT,
+      observed_on    TEXT    NOT NULL,
+      change_pct     REAL,
+      status         TEXT    NOT NULL DEFAULT 'active',
+      notice         TEXT,
+      backfill       INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (model, effective_from)
+    );
   `);
   addMissingColumns(db, 'usage_daily', TIER_EXCESS_COLUMNS, 'INTEGER NOT NULL DEFAULT 0');
   addMissingColumns(db, 'model_pricing', PRICING_TIER_COLUMNS, 'REAL');
+  addMissingColumns(db, 'price_versions', PRICING_TIER_COLUMNS, 'REAL');
 }
 
 function localDayKey(ms) {

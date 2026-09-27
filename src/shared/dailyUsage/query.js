@@ -3,20 +3,33 @@
 // Range queries over usage_daily. Days are local YYYY-MM-DD keys; both bounds
 // are inclusive and optional.
 //
-// Cost of a row, in order of precedence:
+// Each day is priced at the price in effect on it (priceHistory.js). Cost of a
+// row, in order of precedence:
 //   official  the client reported the billed amount (Grok)
-//   tokscale  the session is in usage_records with the same token total: its
-//             tokscale cost is spread over the days by each day's price-based
-//             weight, so session totals equal the rest of the app while the
-//             day split follows where the usage happened
-//   price     tokens x unit price (sessions tokscale never saw)
+//   tokscale  the session is in usage_records with the same token total.
+//             tokscale bills the whole session at today's price; its cost is
+//             spread over the days by each day's dated-price weight, scaled
+//             by the session's ratio of tokscale cost to its cost at today's
+//             price. Session totals equal the rest of the app while a price
+//             is unchanged, and follow the dated prices where it changed.
+//   price     tokens x the price in effect on the day (sessions tokscale
+//             never saw or billed at 0)
 // null means no price is known.
+//
+// options.priceConfig is the parsed price-history.json (aliases and manual
+// price versions).
 
-const { costOf, priceTable } = require('./pricing');
+const { costWith } = require('./pricing');
+const { createPriceBook } = require('./priceHistory');
 const { TIER_EXCESS_COLUMNS } = require('./store');
 
 // A session anchors to tokscale only when both count the same usage.
 const ANCHOR_TOKEN_TOLERANCE = 0.01;
+
+const COUNT_FIELDS = [
+  'input_tokens', 'cache_read', 'cache_write', 'output_tokens', 'reasoning_tokens', 'total_tokens', 'message_count',
+  ...TIER_EXCESS_COLUMNS
+];
 
 function groupKey(row) {
   return `${row.client}\u0000${row.session_id}\u0000${row.model || ''}`;
@@ -31,20 +44,13 @@ function rangeClause(range = {}) {
 }
 
 const SUMS = `
-  SUM(input_tokens) AS input_tokens,
-  SUM(cache_read) AS cache_read,
-  SUM(cache_write) AS cache_write,
-  SUM(output_tokens) AS output_tokens,
-  SUM(reasoning_tokens) AS reasoning_tokens,
-  SUM(total_tokens) AS total_tokens,
-  SUM(official_cost_usd) AS official_cost_usd,
-  SUM(message_count) AS message_count,
-  ${TIER_EXCESS_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(',\n  ')}
+  ${COUNT_FIELDS.map((column) => `SUM(${column}) AS ${column}`).join(',\n  ')},
+  SUM(official_cost_usd) AS official_cost_usd
 `;
 
-// Per (client, session, model): how to turn a row into its share of the
-// session's tokscale cost.
-function tokscaleAnchors(db, prices) {
+// Per (client, session, model): how to turn a day's dated-price weight into
+// its share of the session's tokscale cost.
+function tokscaleAnchors(db, book) {
   const tokscale = new Map(db.prepare(`
     SELECT client, session_id, IFNULL(model, '') AS model, SUM(cost_usd) AS cost, SUM(total_tokens) AS tokens
     FROM usage_records
@@ -61,7 +67,7 @@ function tokscaleAnchors(db, prices) {
     const reference = tokscale.get(groupKey(row));
     if (!reference || !(reference.cost > 0) || !(reference.tokens > 0)) continue;
     if (Math.abs(row.total_tokens / reference.tokens - 1) > ANCHOR_TOKEN_TOLERANCE) continue;
-    const weight = costOf(row, prices);
+    const weight = costWith(row, book.current(row.model));
     anchors.set(groupKey(row), weight > 0
       ? { perWeight: reference.cost / weight }
       : { perToken: reference.cost / row.total_tokens });
@@ -69,50 +75,79 @@ function tokscaleAnchors(db, prices) {
   return anchors;
 }
 
-function pricedRow(row, prices, anchors) {
+function pricedRow(row, book, anchors) {
   if (row.official_cost_usd != null) return { ...row, cost_usd: row.official_cost_usd, cost_source: 'official' };
   const anchor = anchors.get(groupKey(row));
-  const weight = costOf(row, prices);
+  const weight = costWith(row, book.on(row.model, row.day));
   if (anchor) {
-    const cost = anchor.perWeight != null ? weight * anchor.perWeight : (row.total_tokens || 0) * anchor.perToken;
+    const cost = anchor.perWeight != null ? (weight || 0) * anchor.perWeight : (row.total_tokens || 0) * anchor.perToken;
     return { ...row, cost_usd: cost, cost_source: 'tokscale' };
   }
   return { ...row, cost_usd: weight, cost_source: weight == null ? null : 'price' };
 }
 
-// One row per (client, session, model) with usage inside the range.
-function sessionUsageInRange(db, range = {}) {
+// Priced rows of one (day, client, session, model) each.
+function pricedDays(db, range, options, columns = '') {
   const { sql, params } = rangeClause(range);
   const rows = db.prepare(`
-    SELECT client, session_id, model, ${SUMS},
-      COUNT(DISTINCT day) AS days,
+    SELECT day, client, session_id, model, ${SUMS}${columns}
+    FROM usage_daily ${sql}
+    GROUP BY day, client, session_id, model
+  `).all(...params);
+  const book = createPriceBook(db, options.priceConfig);
+  const anchors = tokscaleAnchors(db, book);
+  return rows.map((row) => pricedRow(row, book, anchors));
+}
+
+function addCost(total, row) {
+  if (row.cost_usd != null) total.cost_usd = (total.cost_usd || 0) + row.cost_usd;
+  if (row.official_cost_usd != null) total.official_cost_usd = (total.official_cost_usd || 0) + row.official_cost_usd;
+  if (!total.cost_source && row.cost_source) total.cost_source = row.cost_source;
+}
+
+// One row per (client, session, model) with usage inside the range.
+function sessionUsageInRange(db, range = {}, options = {}) {
+  const rows = pricedDays(db, range, options, `,
       MIN(first_at) AS first_at,
       MAX(last_at) AS last_at,
-      MAX(project_path) AS project_path
-    FROM usage_daily ${sql}
-    GROUP BY client, session_id, model
-    ORDER BY last_at DESC
-  `).all(...params);
-  const prices = priceTable(db);
-  const anchors = tokscaleAnchors(db, prices);
-  return rows.map((row) => pricedRow(row, prices, anchors));
+      MAX(project_path) AS project_path`);
+  const sessions = new Map();
+  for (const row of rows) {
+    const key = groupKey(row);
+    let total = sessions.get(key);
+    if (!total) {
+      total = {
+        client: row.client,
+        session_id: row.session_id,
+        model: row.model,
+        cost_usd: null,
+        cost_source: null,
+        official_cost_usd: null,
+        days: 0,
+        first_at: null,
+        last_at: null,
+        project_path: null
+      };
+      for (const field of COUNT_FIELDS) total[field] = 0;
+      sessions.set(key, total);
+    }
+    for (const field of COUNT_FIELDS) total[field] += row[field] || 0;
+    addCost(total, row);
+    total.days += 1;
+    if (row.first_at && (!total.first_at || row.first_at < total.first_at)) total.first_at = row.first_at;
+    if (row.last_at && (!total.last_at || row.last_at > total.last_at)) total.last_at = row.last_at;
+    if (row.project_path && (!total.project_path || row.project_path > total.project_path)) total.project_path = row.project_path;
+  }
+  return [...sessions.values()].sort((a, b) => String(b.last_at || '').localeCompare(String(a.last_at || '')));
 }
 
 const TOTAL_FIELDS = ['input_tokens', 'cache_read', 'cache_write', 'output_tokens', 'reasoning_tokens', 'total_tokens', 'message_count'];
 
 // One row per (day, client, model) — the per-day totals of the range. Cost is
 // priced per session first, since each session carries its own anchor.
-function dailyTotals(db, range = {}) {
-  const { sql, params } = rangeClause(range);
-  const rows = db.prepare(`
-    SELECT day, client, session_id, model, ${SUMS}
-    FROM usage_daily ${sql}
-    GROUP BY day, client, session_id, model
-  `).all(...params);
-  const prices = priceTable(db);
-  const anchors = tokscaleAnchors(db, prices);
+function dailyTotals(db, range = {}, options = {}) {
   const totals = new Map();
-  for (const row of rows.map((r) => pricedRow(r, prices, anchors))) {
+  for (const row of pricedDays(db, range, options)) {
     const key = `${row.day}\u0000${row.client}\u0000${row.model}`;
     let total = totals.get(key);
     if (!total) {

@@ -8,6 +8,7 @@ const { parentPort, workerData } = require('node:worker_threads');
 const { openDb } = require('../persistence/db');
 const { importDailyUsage } = require('./importer');
 const { refreshPricing } = require('./pricing');
+const { loadPriceConfig } = require('./priceHistory');
 
 (async () => {
   let db;
@@ -15,7 +16,11 @@ const { refreshPricing } = require('./pricing');
   try {
     db = openDb(workerData.dbPath);
     const imported = await importDailyUsage(db, workerData.roots, { log: (line) => logs.push(line) });
-    const pricing = refreshPricing(db, workerData.tokscaleCommand);
+    const pricing = refreshPricing(db, workerData.tokscaleCommand, {
+      priceConfig: loadPriceConfig(workerData.priceConfigPath),
+      alertPercent: workerData.priceAlertPercent,
+      force: workerData.forcePricing === true
+    });
     parentPort.postMessage({ ok: true, imported, pricing, logs });
   } catch (error) {
     parentPort.postMessage({ ok: false, error: { message: error?.message, stack: error?.stack }, logs });

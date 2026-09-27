@@ -8196,6 +8196,12 @@ function syncSettingsForm() {
   if (els.sessionUsageArchiveInput) els.sessionUsageArchiveInput.checked = state.settings.sessionUsageArchiveEnabled !== false;
   const correctionInput = document.getElementById('dailyUsageCorrectionInput');
   if (correctionInput) correctionInput.checked = state.settings.dailyUsageCorrectionEnabled !== false;
+  const priceAlertInput = document.getElementById('priceChangeAlertInput');
+  if (priceAlertInput && document.activeElement !== priceAlertInput) {
+    priceAlertInput.value = String(state.settings.priceChangeAlertPercent ?? 20);
+  }
+  // The notice text follows the interface language.
+  renderPriceNotices();
   for (const input of dailyUsageArchiveInputs()) {
     if (document.activeElement === input) continue;
     const dirs = state.settings.dailyUsageArchiveRoots?.[input.dataset.archiveClient];
@@ -11633,6 +11639,126 @@ document.getElementById('dailyUsageCorrectionInput')?.addEventListener('change',
   state.dailyUncorrectedFetchedAt = 0;
   els.refreshButton?.click();
 });
+
+document.getElementById('priceChangeAlertInput')?.addEventListener('change', async (event) => {
+  const value = Math.round(Number(event.target.value));
+  if (!Number.isFinite(value) || value < 1 || value > 1000) {
+    event.target.value = String(state.settings.priceChangeAlertPercent ?? 20);
+    return;
+  }
+  await saveSettings({ priceChangeAlertPercent: value });
+});
+
+// Catalog price changes past the alert threshold, shown under the title bar
+// until each one is settled. Settling one changes past costs, which the
+// manual refresh republishes (#177).
+const PRICE_NOTICE_REFRESH_MS = 60 * 1000;
+state.priceNotices = [];
+
+function refreshPriceNotices() {
+  if (typeof window.tokenMonitor.getPriceNotices !== 'function') return;
+  window.tokenMonitor.getPriceNotices().then((value) => {
+    state.priceNotices = Array.isArray(value) ? value : [];
+    renderPriceNotices();
+  }, () => {});
+}
+
+function formatPerMillion(value) {
+  return value == null ? '—' : `$${Number(Number(value).toFixed(4))}`;
+}
+
+function priceNoticeChanges(notice) {
+  const parts = [];
+  for (const bucket of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+    const before = notice.before?.[bucket] ?? null;
+    const after = notice.after?.[bucket] ?? null;
+    if (before === after) continue;
+    parts.push(t('priceNotice.change', {
+      bucket: t(`priceNotice.bucket.${bucket}`),
+      from: formatPerMillion(before),
+      to: formatPerMillion(after)
+    }));
+  }
+  return parts.join(t('priceNotice.separator'));
+}
+
+async function settlePriceNotice(notice, action, date) {
+  const result = await window.tokenMonitor.resolvePriceNotice({
+    model: notice.model,
+    effectiveFrom: notice.effectiveFrom,
+    action,
+    date
+  }).catch(() => ({ ok: false, reason: 'failed' }));
+  if (!result?.ok) {
+    setStatus(t('priceNotice.failed', { reason: result?.reason || 'failed' }), true);
+    return;
+  }
+  refreshPriceNotices();
+  els.refreshButton?.click();
+}
+
+function renderPriceNotices() {
+  const bar = document.getElementById('priceNoticeBar');
+  if (!bar) return;
+  const [notice] = state.priceNotices;
+  bar.classList.toggle('hidden', !notice);
+  bar.replaceChildren();
+  if (!notice) return;
+
+  const title = document.createElement('div');
+  const heading = document.createElement('span');
+  heading.className = 'price-notice-title';
+  heading.textContent = `${t('priceNotice.title')} · ${notice.model}`;
+  const changes = document.createElement('span');
+  changes.textContent = `  ${priceNoticeChanges(notice)}`;
+  title.append(heading, changes);
+
+  const detail = document.createElement('div');
+  detail.className = 'price-notice-detail';
+  detail.textContent = t('priceNotice.detail', {
+    date: notice.observedOn,
+    pct: Math.round(Number(notice.changePct) || 0)
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'price-notice-actions';
+  const label = document.createElement('label');
+  label.textContent = t('priceNotice.effective');
+  const dateInput = document.createElement('input');
+  dateInput.type = 'date';
+  dateInput.value = notice.effectiveFrom;
+  dateInput.max = notice.observedOn;
+  if (notice.earliestFrom) dateInput.min = notice.earliestFrom;
+  label.append(dateInput);
+  const button = (text, className, hint, onClick) => {
+    const control = document.createElement('button');
+    control.type = 'button';
+    control.textContent = text;
+    if (className) control.className = className;
+    if (hint) control.title = hint;
+    control.addEventListener('click', onClick);
+    return control;
+  };
+  actions.append(
+    label,
+    button(t('priceNotice.confirm'), 'price-notice-confirm', '', () => {
+      const date = dateInput.value;
+      settlePriceNotice(notice, date && date !== notice.effectiveFrom ? 'redate' : 'confirm', date);
+    }),
+    button(t('priceNotice.void'), '', t('priceNotice.voidHint'), () => settlePriceNotice(notice, 'void')),
+    button(t('priceNotice.backfill'), '', t('priceNotice.backfillHint'), () => settlePriceNotice(notice, 'backfill'))
+  );
+  if (state.priceNotices.length > 1) {
+    const more = document.createElement('span');
+    more.className = 'price-notice-more';
+    more.textContent = t('priceNotice.more', { count: state.priceNotices.length - 1 });
+    actions.append(more);
+  }
+  bar.append(title, detail, actions);
+}
+
+refreshPriceNotices();
+setInterval(refreshPriceNotices, PRICE_NOTICE_REFRESH_MS);
 
 // Folders are separated by ';' (one input per tool); saved as a whole map.
 for (const input of dailyUsageArchiveInputs()) {

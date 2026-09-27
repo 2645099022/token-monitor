@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('tokenMonitor', {
   getDashboardHistory: (options) => ipcRenderer.invoke('dashboard:getHistory', options),
   getDailyUsageRange: (range) => ipcRenderer.invoke('dailyUsage:range', range),
   getDailyUsageUncorrected: () => ipcRenderer.invoke('dailyUsage:uncorrected'),
+  getPriceNotices: () => ipcRenderer.invoke('dailyUsage:priceNotices'),
+  resolvePriceNotice: (request) => ipcRenderer.invoke('dailyUsage:resolvePriceNotice', request),
   onDashboardHistoryChanged: (callback) => {
     const listener = () => { try { callback(); } catch (_) {} };
     ipcRenderer.on('dashboard:historyChanged', listener);

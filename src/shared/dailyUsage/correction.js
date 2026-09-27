@@ -108,9 +108,9 @@ function parsedCodexSessions(db) {
 
 // Per-model rows of one session inside a range, with model names normalized
 // the way the collector names them.
-function periodSessions(db, range, covered) {
+function periodSessions(db, range, covered, priceOptions) {
   const sessions = new Map();
-  for (const row of sessionUsageInRange(db, range)) {
+  for (const row of sessionUsageInRange(db, range, priceOptions)) {
     if (!CORRECTED_CLIENTS.has(row.client)) continue;
     const key = sessionKey(row.client, row.session_id);
     if (!covered.has(key)) continue;
@@ -140,9 +140,9 @@ function periodSessions(db, range, covered) {
   return sessions;
 }
 
-function dayCells(db) {
+function dayCells(db, priceOptions) {
   const days = new Map();
-  for (const row of dailyTotals(db)) {
+  for (const row of dailyTotals(db, {}, priceOptions)) {
     if (!CORRECTED_CLIENTS.has(row.client)) continue;
     if (!days.has(row.day)) days.set(row.day, new Map());
     const clients = days.get(row.day);
@@ -166,6 +166,7 @@ function dayCells(db) {
 function buildDailyCorrection(db, options = {}) {
   const todayKey = options.todayKey || localDayKey(Date.now());
   const allTimeSince = /^\d{4}-\d{2}-\d{2}$/.test(options.allTimeSince || '') ? options.allTimeSince : '';
+  const priceOptions = { priceConfig: options.priceConfig };
   const lifetimes = splitLifetimes(db);
   const records = recordSessions(db);
 
@@ -199,9 +200,9 @@ function buildDailyCorrection(db, options = {}) {
     allTime: { start: allTimeSince || undefined, end: todayKey }
   };
   const periods = {};
-  for (const name of PERIOD_NAMES) periods[name] = periodSessions(db, ranges[name], covered);
+  for (const name of PERIOD_NAMES) periods[name] = periodSessions(db, ranges[name], covered, priceOptions);
 
-  return { todayKey, covered, periods, days: dayCells(db), uncoveredDays };
+  return { todayKey, covered, periods, days: dayCells(db, priceOptions), uncoveredDays };
 }
 
 // ---------------------------------------------------------------------------

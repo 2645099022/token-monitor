@@ -57,9 +57,9 @@ function recordTotals(db) {
   return totals;
 }
 
-function rangeSessions(db, range = {}) {
+function rangeSessions(db, range = {}, options = {}) {
   const sessions = {};
-  for (const row of sessionUsageInRange(db, range)) {
+  for (const row of sessionUsageInRange(db, range, options)) {
     const key = sessionKey(row.client, row.session_id);
     let session = sessions[key];
     if (!session) {

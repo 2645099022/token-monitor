@@ -14,15 +14,20 @@
 // request the part of a bucket above a tier threshold is billed at that tier's
 // rate. Provider-scoped row selection and request-wide tariffs are not
 // reproduced; query.js anchors known sessions to tokscale's own cost instead.
+//
+// Prices are looked up once a day, under the model a price alias points to,
+// and every change is recorded as a dated version (priceHistory.js), so a day
+// keeps the price that was in effect on it.
 
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { tokscaleConfigDir } = require('../tokscaleConfig');
-const { TIER_BUCKETS } = require('./store');
+const { TIER_BUCKETS, localDayKey } = require('./store');
+const { DEFAULT_ALERT_PERCENT, EMPTY_CONFIG, recordCatalogPrice } = require('./priceHistory');
 
-const PRICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const MISSING_RETRY_MS = 24 * 60 * 60 * 1000;
+const PRICE_MAX_AGE_MS = 20 * 60 * 60 * 1000;
+const MISSING_RETRY_MS = 20 * 60 * 60 * 1000;
 
 const CATALOG_FILES = {
   LiteLLM: 'pricing-litellm.json',
@@ -95,48 +100,61 @@ function lookupPrice(model, command, spawn = spawnSync) {
   return parsePricingOutput(result.stdout);
 }
 
-function modelsNeedingPrice(db, now = Date.now()) {
+// The price keys (a model, or the model its alias points to) whose price is
+// unknown or stale; all of them when force is set.
+function modelsNeedingPrice(db, now = Date.now(), { aliases = {}, force = false } = {}) {
   const known = new Map(db.prepare('SELECT model, status, fetched_at FROM model_pricing').all()
     .map((row) => [row.model, row]));
-  const models = db.prepare(`
+  const models = new Set(db.prepare(`
     SELECT DISTINCT model FROM usage_daily
     WHERE official_cost_usd IS NULL AND model != ''
-  `).all().map((row) => row.model);
-  return models.filter((model) => {
+  `).all().map((row) => aliases[row.model] || row.model));
+  return [...models].filter((model) => {
     const row = known.get(model);
-    if (!row) return true;
+    if (!row || force) return true;
     const age = now - Date.parse(`${row.fetched_at}Z`);
     return row.status === 'ok' ? age > PRICE_MAX_AGE_MS : age > MISSING_RETRY_MS;
   });
 }
 
 function refreshPricing(db, command, options = {}) {
-  if (!command?.bin) return { fetched: 0, missing: 0 };
+  if (!command?.bin) return { fetched: 0, missing: 0, changed: 0, notices: 0 };
   const lookup = options.lookup || ((model) => lookupPrice(model, command));
+  const now = options.now ?? Date.now();
+  const config = options.priceConfig || EMPTY_CONFIG;
+  const alertPercent = options.alertPercent ?? DEFAULT_ALERT_PERCENT;
   const readCatalog = options.readCatalog
     || createCatalogReader(options.catalogDir || path.join(tokscaleConfigDir({ env: command.env || process.env }), 'cache'));
   const tierColumns = Object.keys(tierRates(null));
   const columns = ['input', 'output', 'cache_read', 'cache_write', 'matched_key', 'source', ...tierColumns];
   const upsert = db.prepare(`
     INSERT INTO model_pricing (model, ${columns.join(', ')}, status, fetched_at)
-    VALUES (@model, ${columns.map((c) => `@${c}`).join(', ')}, @status, datetime('now'))
+    VALUES (@model, ${columns.map((c) => `@${c}`).join(', ')}, @status, @fetched_at)
     ON CONFLICT(model) DO UPDATE SET
       ${[...columns, 'status', 'fetched_at'].map((c) => `${c} = excluded.${c}`).join(', ')}
   `);
-  const empty = Object.fromEntries(columns.map((c) => [c, null]));
+  // SQLite datetime() format, UTC, on the same clock as the age check.
+  const empty = { ...Object.fromEntries(columns.map((c) => [c, null])), fetched_at: new Date(now).toISOString().slice(0, 19).replace('T', ' ') };
   let fetched = 0;
   let missing = 0;
-  for (const model of modelsNeedingPrice(db, options.now)) {
+  let changed = 0;
+  let notices = 0;
+  const day = localDayKey(now);
+  for (const model of modelsNeedingPrice(db, now, { aliases: config.aliases, force: options.force })) {
     const price = lookup(model);
     if (price) {
-      upsert.run({ ...empty, model, ...price, ...tierRates(readCatalog(price.source, price.matched_key)), status: 'ok' });
+      const row = { ...empty, model, ...price, ...tierRates(readCatalog(price.source, price.matched_key)) };
+      upsert.run({ ...row, status: 'ok' });
       fetched += 1;
+      const version = recordCatalogPrice(db, model, row, { day, alertPercent });
+      if (version) changed += 1;
+      if (version?.notice === 'pending') notices += 1;
     } else {
       upsert.run({ ...empty, model, status: 'missing' });
       missing += 1;
     }
   }
-  return { fetched, missing };
+  return { fetched, missing, changed, notices };
 }
 
 function priceTable(db) {
@@ -161,12 +179,16 @@ function bucketCost(row, price, { bucket, thresholds }) {
   return cost;
 }
 
-// USD for one aggregated usage row, or null when the model has no price.
-function costOf(row, prices) {
-  if (row.official_cost_usd != null) return row.official_cost_usd;
-  const price = prices.get(row.model);
+// USD for one aggregated usage row at the given rates, or null without rates.
+function costWith(row, price) {
   if (!price) return null;
   return TIER_BUCKETS.reduce((sum, bucket) => sum + bucketCost(row, price, bucket), 0);
 }
 
-module.exports = { costOf, lookupPrice, modelsNeedingPrice, parsePricingOutput, priceTable, refreshPricing, tierRates };
+// USD for one aggregated usage row, or null when the model has no price.
+function costOf(row, prices) {
+  if (row.official_cost_usd != null) return row.official_cost_usd;
+  return costWith(row, prices.get(row.model));
+}
+
+module.exports = { costOf, costWith, lookupPrice, modelsNeedingPrice, parsePricingOutput, priceTable, refreshPricing, tierRates };
