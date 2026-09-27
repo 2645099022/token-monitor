@@ -247,6 +247,28 @@ test('query: a tokscale-anchored session follows the dated prices of its days', 
   } finally { db.close(); }
 });
 
+test('query: a 1-hour cache write bills at 2x input on Claude models, on top of tokscale', () => {
+  const db = openDb(':memory:');
+  try {
+    const insertDaily = db.prepare(`
+      INSERT INTO usage_daily (client, source_key, session_id, model, day, cache_write, cache_write_1h, total_tokens)
+      VALUES (?, 's', ?, ?, '2026-09-20', ?, ?, ?)
+    `);
+    insertDaily.run('claude', 'a', 'claude-opus-5', 1000, 800, 1000);
+    // Only Anthropic bills the 1-hour write differently.
+    insertDaily.run('claude', 'b', 'grok-4.5', 1000, 800, 1000);
+    db.prepare(`INSERT INTO model_pricing (model, input, output, cache_write, status) VALUES ('claude-opus-5', ?, ?, ?, 'ok')`).run(5 * M, 25 * M, 6.25 * M);
+    db.prepare(`INSERT INTO model_pricing (model, input, output, cache_write, status) VALUES ('grok-4.5', ?, ?, ?, 'ok')`).run(2 * M, 6 * M, 2 * M);
+    // tokscale billed every write as 5-minute.
+    db.prepare(`INSERT INTO usage_records (client, session_id, model, total_tokens, cost_usd) VALUES ('claude', 'a', 'claude-opus-5', 1000, ?)`).run(1000 * 6.25 * M);
+
+    const sessions = Object.fromEntries(sessionUsageInRange(db).map((row) => [row.session_id, row]));
+    close(sessions.a.cost_usd, 200 * 6.25 * M + 800 * 10 * M);
+    assert.equal(sessions.a.cost_source, 'tokscale');
+    close(sessions.b.cost_usd, 1000 * 2 * M);
+  } finally { db.close(); }
+});
+
 test('refreshPricing: looks prices up under alias targets and records versions', () => {
   const db = openDb(':memory:');
   try {

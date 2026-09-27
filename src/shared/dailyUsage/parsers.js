@@ -81,6 +81,9 @@ async function parseClaudeFile(filePath) {
         output: num(usage.output_tokens)
       })
     };
+    // The part of the cache write kept for 1 hour, which bills higher than
+    // the 5-minute default; included in cacheWrite.
+    event.cacheWrite1h = Math.min(event.cacheWrite, Math.max(0, Math.round(num(usage.cache_creation?.ephemeral_1h_input_tokens))));
     const id = `${obj.message.id || ''}:${obj.requestId || ''}`;
     if (id === ':') { unkeyed.push({ ...event, key: null }); continue; }
     event.key = id;

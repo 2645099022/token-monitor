@@ -26,7 +26,7 @@ test('openDb: in-memory schema bootstraps and is queryable', () => {
   const db = openDb(':memory:');
   const version = db.prepare(`SELECT value FROM schema_meta WHERE key='version'`).get();
   assert.equal(Number(version.value), SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 7);
+  assert.equal(SCHEMA_VERSION, 8);
   const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`).all().map(r => r.name);
   assert.ok(tables.includes('usage_records'), 'usage_records table should exist');
   for (const name of ['usage_daily', 'daily_sources', 'daily_event_owner', 'daily_snapshots', 'model_pricing']) {

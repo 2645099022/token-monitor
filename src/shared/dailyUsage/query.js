@@ -10,8 +10,10 @@
 //             tokscale bills the whole session at today's price; its cost is
 //             spread over the days by each day's dated-price weight, scaled
 //             by the session's ratio of tokscale cost to its cost at today's
-//             price. Session totals equal the rest of the app while a price
-//             is unchanged, and follow the dated prices where it changed.
+//             price as tokscale computes it (every cache write at the
+//             5-minute rate). Session totals equal the rest of the app while
+//             a price is unchanged and no 1-hour cache was written, and
+//             follow the dated prices and the 1-hour cache premium otherwise.
 //   price     tokens x the price in effect on the day (sessions tokscale
 //             never saw or billed at 0)
 // null means no price is known.
@@ -27,7 +29,7 @@ const { TIER_EXCESS_COLUMNS } = require('./store');
 const ANCHOR_TOKEN_TOLERANCE = 0.01;
 
 const COUNT_FIELDS = [
-  'input_tokens', 'cache_read', 'cache_write', 'output_tokens', 'reasoning_tokens', 'total_tokens', 'message_count',
+  'input_tokens', 'cache_read', 'cache_write', 'cache_write_1h', 'output_tokens', 'reasoning_tokens', 'total_tokens', 'message_count',
   ...TIER_EXCESS_COLUMNS
 ];
 
@@ -67,7 +69,9 @@ function tokscaleAnchors(db, book) {
     const reference = tokscale.get(groupKey(row));
     if (!reference || !(reference.cost > 0) || !(reference.tokens > 0)) continue;
     if (Math.abs(row.total_tokens / reference.tokens - 1) > ANCHOR_TOKEN_TOLERANCE) continue;
-    const weight = costWith(row, book.current(row.model));
+    // Priced the way tokscale prices it, so the ratio keeps tokscale's own
+    // calibration and the 1-hour cache premium is added on top per day.
+    const weight = costWith(row, book.current(row.model), { oneHourCache: false });
     anchors.set(groupKey(row), weight > 0
       ? { perWeight: reference.cost / weight }
       : { perToken: reference.cost / row.total_tokens });

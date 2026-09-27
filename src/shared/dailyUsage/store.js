@@ -127,7 +127,8 @@ function createDailySchema(db) {
       PRIMARY KEY (model, effective_from)
     );
   `);
-  addMissingColumns(db, 'usage_daily', TIER_EXCESS_COLUMNS, 'INTEGER NOT NULL DEFAULT 0');
+  // cache_write_1h: the part of cache_write kept for 1 hour (Claude).
+  addMissingColumns(db, 'usage_daily', [...TIER_EXCESS_COLUMNS, 'cache_write_1h'], 'INTEGER NOT NULL DEFAULT 0');
   addMissingColumns(db, 'model_pricing', PRICING_TIER_COLUMNS, 'REAL');
   addMissingColumns(db, 'price_versions', PRICING_TIER_COLUMNS, 'REAL');
 }
@@ -155,6 +156,7 @@ function aggregateDaily(events) {
         input_tokens: 0,
         cache_read: 0,
         cache_write: 0,
+        cache_write_1h: 0,
         output_tokens: 0,
         reasoning_tokens: 0,
         total_tokens: 0,
@@ -175,6 +177,7 @@ function aggregateDaily(events) {
     row.input_tokens += event.input;
     row.cache_read += event.cacheRead;
     row.cache_write += event.cacheWrite;
+    row.cache_write_1h += event.cacheWrite1h || 0;
     row.output_tokens += event.output;
     row.reasoning_tokens += event.reasoning;
     row.total_tokens += event.total;
@@ -191,7 +194,7 @@ function aggregateDaily(events) {
 }
 
 const ROW_VALUE_COLUMNS = [
-  'input_tokens', 'cache_read', 'cache_write', 'output_tokens', 'reasoning_tokens', 'total_tokens',
+  'input_tokens', 'cache_read', 'cache_write', 'cache_write_1h', 'output_tokens', 'reasoning_tokens', 'total_tokens',
   'official_cost_usd', 'message_count', 'first_at', 'last_at', 'project_path',
   ...TIER_EXCESS_COLUMNS
 ];

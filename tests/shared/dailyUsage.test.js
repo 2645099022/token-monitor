@@ -46,7 +46,10 @@ test('claude: keeps the final usage of a streamed message and splits by local da
     const file = path.join(dir, 'sess-a.jsonl');
     writeLines(file, [
       claudeLine(1, DAY1, { input_tokens: 10, output_tokens: 0 }),
-      claudeLine(1, DAY1, { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 }),
+      claudeLine(1, DAY1, {
+        input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 20,
+        cache_creation: { ephemeral_5m_input_tokens: 5, ephemeral_1h_input_tokens: 15 }
+      }),
       claudeLine(2, DAY2, { input_tokens: 1, output_tokens: 2 })
     ]);
     const { events, projectPath } = await parseClaudeFile(file);
@@ -54,9 +57,10 @@ test('claude: keeps the final usage of a streamed message and splits by local da
     assert.equal(events.length, 2);
     const first = events.find((e) => e.key === 'msg-1:req-1');
     assert.deepEqual(
-      [first.input, first.cacheRead, first.cacheWrite, first.output, first.total],
-      [10, 100, 20, 5, 135]
+      [first.input, first.cacheRead, first.cacheWrite, first.cacheWrite1h, first.output, first.total],
+      [10, 100, 20, 15, 5, 135]
     );
+    assert.equal(events.find((e) => e.key !== 'msg-1:req-1').cacheWrite1h, 0);
     assert.notEqual(localDayKey(events[0].ts), localDayKey(events[1].ts));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
