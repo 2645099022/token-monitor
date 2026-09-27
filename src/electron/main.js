@@ -91,7 +91,8 @@ const {
   DEFAULT_ALERT_PERCENT: DEFAULT_PRICE_ALERT_PERCENT,
   loadPriceConfig,
   pendingPriceNotices,
-  resolvePriceNotice
+  resolvePriceNotice,
+  withFallbackAliases
 } = require('../shared/dailyUsage/priceHistory');
 const {
   buildDailyCorrection,
@@ -2798,12 +2799,35 @@ function dailyPriceConfigPath() {
 }
 
 let lastPriceConfigError = '';
+let mergedPriceConfig = { file: null, aliasesJson: '', value: null };
 
+// The file's config plus the Settings model aliases as price fallbacks. The
+// same object is returned while neither changes, which the correction cache
+// relies on.
 function dailyPriceConfig() {
-  const config = loadPriceConfig(dailyPriceConfigPath());
-  if (config.error && config.error !== lastPriceConfigError) console.warn(`[daily-usage] price-history.json ignored: ${config.error}`);
-  lastPriceConfigError = config.error || '';
-  return config;
+  const file = loadPriceConfig(dailyPriceConfigPath());
+  if (file.error && file.error !== lastPriceConfigError) console.warn(`[daily-usage] price-history.json ignored: ${file.error}`);
+  lastPriceConfigError = file.error || '';
+  const displayAliases = normalizeModelAliases(settings?.modelAliases);
+  const aliasesJson = JSON.stringify(displayAliases);
+  if (mergedPriceConfig.file !== file || mergedPriceConfig.aliasesJson !== aliasesJson) {
+    mergedPriceConfig = { file, aliasesJson, value: withFallbackAliases(file, displayAliases) };
+  }
+  return mergedPriceConfig.value;
+}
+
+// Creates price-history.json from a template when it is missing (never
+// overwrites) and opens it in the system editor.
+async function openDailyPriceConfig() {
+  const filePath = dailyPriceConfigPath();
+  if (!filePath) return { ok: false, reason: 'unavailable' };
+  try {
+    fs.writeFileSync(filePath, `${JSON.stringify({ aliases: {}, versions: [] }, null, 2)}\n`, { flag: 'wx' });
+  } catch (error) {
+    if (error?.code !== 'EEXIST') return { ok: false, reason: error?.code || 'failed' };
+  }
+  const failure = await shell.openPath(filePath);
+  return failure ? { ok: false, reason: failure } : { ok: true, path: filePath };
 }
 
 function currentDailyCorrection(now = new Date()) {
@@ -5861,6 +5885,7 @@ function runDailyUsageImport() {
     roots: dailyUsageSourceRoots({ archiveRoots: settings?.dailyUsageArchiveRoots }),
     tokscaleCommand: { bin: command.bin, prefixArgs: command.prefixArgs, env: command.env },
     priceConfigPath: dailyPriceConfigPath(),
+    displayAliases: normalizeModelAliases(settings?.modelAliases),
     priceAlertPercent: normalizePriceAlertPercent(settings?.priceChangeAlertPercent),
     forcePricing: dailyPricingForceNext
   };
@@ -8619,6 +8644,7 @@ app.whenReady().then(() => {
   ipcMain.handle('dailyUsage:uncorrected', () => (dailyUsageCorrectionEnabled() ? dailyUncorrectedDays : {}));
   ipcMain.handle('dailyUsage:priceNotices', () => dailyPriceNotices());
   ipcMain.handle('dailyUsage:resolvePriceNotice', (_event, request) => resolveDailyPriceNotice(request));
+  ipcMain.handle('dailyUsage:openPriceConfig', () => openDailyPriceConfig());
   ipcMain.on('dashboard:ready', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win !== dashboardWindow || win.isDestroyed()) return;

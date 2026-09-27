@@ -8,7 +8,7 @@ const { parentPort, workerData } = require('node:worker_threads');
 const { openDb } = require('../persistence/db');
 const { importDailyUsage } = require('./importer');
 const { refreshPricing } = require('./pricing');
-const { loadPriceConfig } = require('./priceHistory');
+const { loadPriceConfig, withFallbackAliases } = require('./priceHistory');
 
 (async () => {
   let db;
@@ -17,7 +17,7 @@ const { loadPriceConfig } = require('./priceHistory');
     db = openDb(workerData.dbPath);
     const imported = await importDailyUsage(db, workerData.roots, { log: (line) => logs.push(line) });
     const pricing = refreshPricing(db, workerData.tokscaleCommand, {
-      priceConfig: loadPriceConfig(workerData.priceConfigPath),
+      priceConfig: withFallbackAliases(loadPriceConfig(workerData.priceConfigPath), workerData.displayAliases),
       alertPercent: workerData.priceAlertPercent,
       force: workerData.forcePricing === true
     });

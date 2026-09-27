@@ -16,14 +16,21 @@
 //
 // price-history.json:
 //   {
-//     "aliases":  { "zpt-6": "gpt-6-astra" },
+//     "aliases":  { "some-model": "gpt-6-astra" },
 //     "versions": [ { "model": "gpt-6-astra", "from": "2026-10-01",
 //                     "input": 8, "output": 40, "cacheRead": 0.8 } ]
 //   }
-// An alias bills a model at another model's prices. Rates in the file and in
-// ANNOUNCED_PRICES are USD per 1M tokens; the database stores USD per token.
-// A rate a manual version leaves out is scaled from the current catalog price:
-// missing base rates by the input ratio, tier rates by their bucket's ratio.
+// Rates in the file and in ANNOUNCED_PRICES are USD per 1M tokens; the
+// database stores USD per token. A rate a manual version leaves out is scaled
+// from the current catalog price: missing base rates by the input ratio, tier
+// rates by their bucket's ratio.
+//
+// Price aliases bill a model at another model's prices:
+//   aliases          from price-history.json, always applied
+//   fallbackAliases  the model aliases entered in Settings (a display
+//                    merge), applied only to a model with no price of its
+//                    own, since merged rows need not share a price. Aliases
+//                    inferred by automatic grouping never price anything.
 
 const fs = require('node:fs');
 const { PRICING_TIER_COLUMNS, TIER_BUCKETS } = require('./store');
@@ -81,6 +88,38 @@ function normalizePriceConfig(json) {
     .map((entry) => manualVersion(entry, RANK.user))
     .filter(Boolean);
   return { aliases, versions };
+}
+
+// The model-name key Settings aliases match on (renderer/modelAliases.js):
+// case, '.', '_' and spaces do not tell two names apart.
+function aliasMatchKey(model) {
+  return String(model || '').trim().toLowerCase()
+    .replace(/[._\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// A price config with the Settings model aliases added as fallbacks.
+function withFallbackAliases(config, displayAliases) {
+  const fallbackAliases = {};
+  for (const [alias, canonical] of Object.entries(displayAliases || {})) {
+    const key = aliasMatchKey(alias);
+    const target = typeof canonical === 'string' ? canonical.trim() : '';
+    if (key && target && key !== aliasMatchKey(target)) fallbackAliases[key] = target;
+  }
+  return { ...(config || EMPTY_CONFIG), fallbackAliases };
+}
+
+// The model whose price a model is billed at. hasOwnPrice(model) tells
+// whether the model can be priced under its own name.
+function priceKeyResolver(config, hasOwnPrice) {
+  const aliases = config?.aliases || {};
+  const fallback = config?.fallbackAliases || {};
+  return (model) => {
+    if (aliases[model]) return aliases[model];
+    const target = fallback[aliasMatchKey(model)];
+    return target && !hasOwnPrice(model) ? target : model;
+  };
 }
 
 const configCache = new Map();
@@ -142,7 +181,6 @@ function pushTo(map, key, value) {
 // current() is the catalog price tokscale bills today, on() the price in
 // effect on a day. Both return rate rows (USD per token) or null.
 function createPriceBook(db, config = EMPTY_CONFIG) {
-  const aliases = config?.aliases || {};
   const current = new Map(db.prepare(`SELECT * FROM model_pricing WHERE status = 'ok'`).all()
     .map((row) => [row.model, row]));
   const catalog = new Map();
@@ -152,7 +190,7 @@ function createPriceBook(db, config = EMPTY_CONFIG) {
   const manual = new Map();
   for (const version of [...ANNOUNCED_VERSIONS, ...(config?.versions || [])]) pushTo(manual, version.model, version);
 
-  const key = (model) => aliases[model] || model;
+  const key = priceKeyResolver(config, (model) => current.has(model) || catalog.has(model) || manual.has(model));
   const timelines = new Map();
   function timeline(priceKey) {
     if (timelines.has(priceKey)) return timelines.get(priceKey);
@@ -327,11 +365,14 @@ module.exports = {
   DEFAULT_ALERT_PERCENT,
   EMPTY_CONFIG,
   RATE_COLUMNS,
+  aliasMatchKey,
   changePercent,
   createPriceBook,
   loadPriceConfig,
   normalizePriceConfig,
   pendingPriceNotices,
+  priceKeyResolver,
   recordCatalogPrice,
-  resolvePriceNotice
+  resolvePriceNotice,
+  withFallbackAliases
 };

@@ -11649,6 +11649,11 @@ document.getElementById('priceChangeAlertInput')?.addEventListener('change', asy
   await saveSettings({ priceChangeAlertPercent: value });
 });
 
+document.getElementById('openPriceConfigButton')?.addEventListener('click', async () => {
+  const result = await window.tokenMonitor.openPriceConfig?.().catch(() => null);
+  if (!result?.ok) setStatus(t('settings.dailyUsage.openPriceConfigFailed', { reason: result?.reason || 'failed' }), true);
+});
+
 // Catalog price changes past the alert threshold, shown under the title bar
 // until each one is settled. Settling one changes past costs, which the
 // manual refresh republishes (#177).

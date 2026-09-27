@@ -556,8 +556,8 @@
                 <button id="clearSessionUsageArchiveButton" class="session-archive-clear" type="button" data-i18n="settings.collection.sessionArchiveClear">Clear retained data</button>
               </div>
             </div>
-            <div class="settings-subgroup daily-usage-archive-settings">
-              <div class="settings-group-header"><span data-i18n="settings.dailyUsage.archiveTitle">Transcript backups</span></div>
+            <div class="settings-subgroup daily-usage-pricing-settings">
+              <div class="settings-group-header"><span data-i18n="settings.dailyUsage.pricingTitle">Usage correction and pricing</span></div>
               <label class="checkbox-label daily-usage-correction-toggle settings-item">
                 <span class="settings-item-text">
                   <span class="settings-item-title" data-i18n="settings.dailyUsage.correctionTitle">Correct usage from transcripts</span>
@@ -572,6 +572,13 @@
                 <input id="priceChangeAlertInput" type="number" min="1" max="1000" step="1" inputmode="numeric" />
                 <span class="settings-note settings-item-desc" data-i18n="settings.dailyUsage.priceAlertDesc">Each day is billed at the price in effect on it. When a model's catalog price moves by at least this much, the change is shown at the top of the window so you can set when it took effect.</span>
               </label>
+              <p class="settings-note" data-i18n="settings.dailyUsage.priceConfigNote">Price changes from before they were observed, and price aliases that apply even to a model with its own price, go in price-history.json.</p>
+              <div class="settings-actions">
+                <button id="openPriceConfigButton" type="button" data-i18n="settings.dailyUsage.openPriceConfig">Open price-history.json</button>
+              </div>
+            </div>
+            <div class="settings-subgroup daily-usage-archive-settings">
+              <div class="settings-group-header"><span data-i18n="settings.dailyUsage.archiveTitle">Transcript backups</span></div>
               <p class="settings-note" data-i18n="settings.dailyUsage.archiveNote">Folders that mirror a tool's session folder. Sessions deleted locally but kept there still count when a date range is split by day. Separate several folders with ;</p>
               <label>Claude Code<input id="dailyUsageArchiveClaude" type="text" data-archive-client="claude" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="E:\backup\claude-backup" /></label>
               <label>Codex<input id="dailyUsageArchiveCodex" type="text" data-archive-client="codex" maxlength="1024" autocomplete="off" spellcheck="false" /></label>

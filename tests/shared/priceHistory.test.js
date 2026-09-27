@@ -10,7 +10,8 @@ const { openDb } = require('../../src/shared/persistence/db');
 const { refreshPricing } = require('../../src/shared/dailyUsage/pricing');
 const { sessionUsageInRange, dailyTotals } = require('../../src/shared/dailyUsage/query');
 const {
-  createPriceBook, loadPriceConfig, normalizePriceConfig, pendingPriceNotices, recordCatalogPrice, resolvePriceNotice
+  createPriceBook, loadPriceConfig, normalizePriceConfig, pendingPriceNotices, recordCatalogPrice, resolvePriceNotice,
+  withFallbackAliases
 } = require('../../src/shared/dailyUsage/priceHistory');
 
 const M = 1e-6;
@@ -116,6 +117,44 @@ test('price book: aliases bill at the target model, and backfill replaces all ea
 
     assert.deepEqual(resolvePriceNotice(db, { model: 'gpt-6-astra', effectiveFrom: '2026-10-01', action: 'backfill' }), { ok: true });
     close(createPriceBook(db).on('gpt-6-astra', '2026-09-05').output, 40 * M);
+  } finally { db.close(); }
+});
+
+test('price book: Settings aliases price only a model without a price of its own', () => {
+  const db = openDb(':memory:');
+  try {
+    db.prepare(`INSERT INTO model_pricing (model, input, output, status) VALUES ('gpt-6-astra', ?, ?, 'ok')`).run(10 * M, 50 * M);
+    db.prepare(`INSERT INTO model_pricing (model, input, output, status) VALUES ('grok-4.5', ?, ?, 'ok')`).run(2 * M, 6 * M);
+    db.prepare(`INSERT INTO model_pricing (model, input, output, status) VALUES ('grok-4.5-build-free', 0, 0, 'ok')`).run();
+    db.prepare(`INSERT INTO model_pricing (model, status) VALUES ('zpt-6', 'missing')`).run();
+    const config = withFallbackAliases(normalizePriceConfig({}), {
+      'ZPT_6': 'gpt-6-astra',
+      'grok-4.5-build-free': 'grok-4.5'
+    });
+    const book = createPriceBook(db, config);
+    // Matched the way Settings aliases match: case and '_' do not matter.
+    assert.equal(book.key('zpt-6'), 'gpt-6-astra');
+    close(book.on('zpt-6', '2026-09-05').output, 50 * M);
+    // Has its own (free) price: only merged for display.
+    assert.equal(book.key('grok-4.5-build-free'), 'grok-4.5-build-free');
+    assert.equal(book.on('grok-4.5-build-free', '2026-09-05').output, 0);
+    // A price-history.json alias applies regardless.
+    const forced = withFallbackAliases(normalizePriceConfig({ aliases: { 'grok-4.5-build-free': 'grok-4.5' } }), {});
+    assert.equal(createPriceBook(db, forced).key('grok-4.5-build-free'), 'grok-4.5');
+  } finally { db.close(); }
+});
+
+test('refreshPricing: a Settings alias target is priced alongside the model itself', () => {
+  const db = openDb(':memory:');
+  try {
+    db.prepare(`INSERT INTO usage_daily (client, source_key, session_id, model, day, input_tokens) VALUES ('codex', 's', 'x', 'zpt-6', '2026-09-05', 1)`).run();
+    const asked = [];
+    refreshPricing(db, { bin: 'unused' }, {
+      lookup: (model) => { asked.push(model); return model === 'gpt-6-astra' ? { ...rates(10, 50), matched_key: model, source: 'LiteLLM' } : null; },
+      readCatalog: () => null,
+      priceConfig: withFallbackAliases(normalizePriceConfig({}), { 'zpt-6': 'gpt-6-astra' })
+    });
+    assert.deepEqual(asked.sort(), ['gpt-6-astra', 'zpt-6']);
   } finally { db.close(); }
 });
 

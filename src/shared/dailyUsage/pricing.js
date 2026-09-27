@@ -24,7 +24,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { tokscaleConfigDir } = require('../tokscaleConfig');
 const { TIER_BUCKETS, localDayKey } = require('./store');
-const { DEFAULT_ALERT_PERCENT, EMPTY_CONFIG, recordCatalogPrice } = require('./priceHistory');
+const { DEFAULT_ALERT_PERCENT, EMPTY_CONFIG, aliasMatchKey, recordCatalogPrice } = require('./priceHistory');
 
 const PRICE_MAX_AGE_MS = 20 * 60 * 60 * 1000;
 const MISSING_RETRY_MS = 20 * 60 * 60 * 1000;
@@ -100,15 +100,22 @@ function lookupPrice(model, command, spawn = spawnSync) {
   return parsePricingOutput(result.stdout);
 }
 
-// The price keys (a model, or the model its alias points to) whose price is
-// unknown or stale; all of them when force is set.
-function modelsNeedingPrice(db, now = Date.now(), { aliases = {}, force = false } = {}) {
+// The price keys whose price is unknown or stale, all of them when force is
+// set: each model (or the model its forced alias points to), plus the target
+// of its fallback alias, used when the model has no price of its own.
+function modelsNeedingPrice(db, now = Date.now(), { aliases = {}, fallbackAliases = {}, force = false } = {}) {
   const known = new Map(db.prepare('SELECT model, status, fetched_at FROM model_pricing').all()
     .map((row) => [row.model, row]));
-  const models = new Set(db.prepare(`
+  const models = new Set();
+  for (const { model } of db.prepare(`
     SELECT DISTINCT model FROM usage_daily
     WHERE official_cost_usd IS NULL AND model != ''
-  `).all().map((row) => aliases[row.model] || row.model));
+  `).all()) {
+    if (aliases[model]) { models.add(aliases[model]); continue; }
+    models.add(model);
+    const fallback = fallbackAliases[aliasMatchKey(model)];
+    if (fallback) models.add(fallback);
+  }
   return [...models].filter((model) => {
     const row = known.get(model);
     if (!row || force) return true;
@@ -140,7 +147,11 @@ function refreshPricing(db, command, options = {}) {
   let changed = 0;
   let notices = 0;
   const day = localDayKey(now);
-  for (const model of modelsNeedingPrice(db, now, { aliases: config.aliases, force: options.force })) {
+  for (const model of modelsNeedingPrice(db, now, {
+    aliases: config.aliases,
+    fallbackAliases: config.fallbackAliases,
+    force: options.force
+  })) {
     const price = lookup(model);
     if (price) {
       const row = { ...empty, model, ...price, ...tierRates(readCatalog(price.source, price.matched_key)) };
