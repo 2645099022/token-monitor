@@ -158,6 +158,44 @@ test('refreshPricing: a Settings alias target is priced alongside the model itse
   } finally { db.close(); }
 });
 
+test('custom pricing: the base price of every day, without a notice, until it is removed', () => {
+  const db = openDb(':memory:');
+  try {
+    const custom = (input, output) => ({ ...rates(input, output), source: 'Custom' });
+    recordCatalogPrice(db, 'gpt-5.6-sol', rates(4, 20, 0.4), { day: '2026-09-27' });
+    const config = normalizePriceConfig({ versions: [{ model: 'gpt-5.6-sol', from: '2026-12-01', input: 6, output: 36 }] });
+
+    // A 3x custom price: no notice, and it replaces the catalog and the
+    // announced prices on every day, while the user version keeps its dates.
+    assert.deepEqual(recordCatalogPrice(db, 'gpt-5.6-sol', custom(12, 60), { day: '2026-09-28' }), { model: 'gpt-5.6-sol', changePct: null, notice: null });
+    assert.equal(recordCatalogPrice(db, 'gpt-5.6-sol', custom(12, 60), { day: '2026-09-29' }), null);
+    assert.deepEqual(pendingPriceNotices(db), []);
+    let book = createPriceBook(db, config);
+    close(book.on('gpt-5.6-sol', '2026-07-20').output, 60 * M);
+    close(book.on('gpt-5.6-sol', '2026-10-01').output, 60 * M);
+    close(book.on('gpt-5.6-sol', '2026-12-02').output, 36 * M);
+
+    // Override removed, catalog unchanged: the earlier timeline is back.
+    assert.equal(recordCatalogPrice(db, 'gpt-5.6-sol', { ...rates(4, 20, 0.4), source: 'LiteLLM' }, { day: '2026-09-30' }), null);
+    book = createPriceBook(db, config);
+    close(book.on('gpt-5.6-sol', '2026-07-20').output, 30 * M);
+    close(book.on('gpt-5.6-sol', '2026-10-01').output, 20 * M);
+    assert.deepEqual(versions(db, 'gpt-5.6-sol').map((v) => [v.effective_from, v.status]), [
+      ['2026-09-27', 'active'], ['2026-09-28', 'void']
+    ]);
+  } finally { db.close(); }
+});
+
+test('priceConfigTemplate: help and examples are ignored when read', () => {
+  const { priceConfigTemplate } = require('../../src/shared/dailyUsage/priceHistory');
+  const json = JSON.parse(priceConfigTemplate(['line one', 'line two']));
+  assert.deepEqual(json._help, ['line one', 'line two']);
+  assert.equal(json._example.versions.length, 2);
+  assert.deepEqual(normalizePriceConfig(json), { aliases: {}, versions: [] });
+  // The example versions are themselves valid entries once copied over.
+  assert.equal(normalizePriceConfig({ versions: json._example.versions }).versions.length, 2);
+});
+
 test('notices: a change can be moved back to its real start, but not past the previous version', () => {
   const db = openDb(':memory:');
   try {

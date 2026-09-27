@@ -11,8 +11,15 @@
 //   user          price-history.json next to the database, edited by hand
 // The version in effect on a day is the latest one starting on or before it;
 // a day before every version uses the earliest one. A version marked backfill
-// supersedes every earlier version, so it also covers all days before it (a
-// price that was wrong rather than changed).
+// is the base price of every day: it replaces the earlier catalog and
+// announced versions (a price that was wrong rather than changed), while
+// user versions still apply from their own dates.
+//
+// A catalog price from tokscale's custom pricing (Settings > Custom model
+// pricing, source "Custom") is such a base price: tokscale bills it on all
+// history, so it is recorded as backfill and never raises a notice. When the
+// override is removed its versions are voided, which restores the catalog
+// timeline it had replaced.
 //
 // price-history.json:
 //   {
@@ -200,9 +207,12 @@ function createPriceBook(db, config = EMPTY_CONFIG) {
       ...observed,
       ...(manual.get(priceKey) || []).map((version) => ({ ...version, rates: completeRates(version.rates, reference) }))
     ].sort((a, b) => a.from.localeCompare(b.from) || a.rank - b.rank);
-    let start = 0;
-    list.forEach((version, index) => { if (version.backfill) start = index; });
-    const result = list.slice(start);
+    let base = -1;
+    list.forEach((version, index) => { if (version.backfill) base = index; });
+    const result = base < 0 ? list : [
+      { ...list[base], from: '' },
+      ...list.filter((version, index) => index > base || (index < base && version.rank === RANK.user))
+    ].sort((a, b) => a.from.localeCompare(b.from) || a.rank - b.rank);
     timelines.set(priceKey, result);
     return result;
   }
@@ -247,46 +257,86 @@ function changePercent(previous, next) {
   return max;
 }
 
-function latestVersion(db, model, activeOnly) {
+const CUSTOM_SOURCE_SQL = `LOWER(IFNULL(source, '')) = 'custom'`;
+
+function isCustomSource(source) {
+  return String(source || '').toLowerCase() === 'custom';
+}
+
+function latestVersion(db, model, { activeOnly = false, custom = false } = {}) {
   return db.prepare(`
     SELECT * FROM price_versions
-    WHERE model = ? ${activeOnly ? `AND status = 'active'` : ''}
+    WHERE model = ? ${activeOnly ? `AND status = 'active'` : ''} AND ${custom ? '' : 'NOT '}${CUSTOM_SOURCE_SQL}
     ORDER BY observed_on DESC, effective_from DESC LIMIT 1
   `).get(model);
 }
 
+function writeVersion(db, row) {
+  db.prepare(`
+    INSERT INTO price_versions (model, effective_from, observed_on, matched_key, source, change_pct, notice, backfill, ${RATE_COLUMNS.join(', ')})
+    VALUES (@model, @effective_from, @observed_on, @matched_key, @source, @change_pct, @notice, @backfill, ${RATE_COLUMNS.map((c) => `@${c}`).join(', ')})
+    ON CONFLICT(model, effective_from) DO UPDATE SET
+      ${[...RATE_COLUMNS, 'matched_key', 'source', 'observed_on', 'change_pct', 'backfill'].map((c) => `${c} = excluded.${c}`).join(', ')},
+      status = 'active',
+      notice = CASE WHEN excluded.notice = 'pending' OR price_versions.notice = 'pending' THEN 'pending' ELSE price_versions.notice END
+  `).run(row);
+}
+
 // Records today's catalog price of a model when it differs from the previous
 // observation. A change of at least alertPercent is flagged for review, since
-// a catalog can lag the real change or carry a transient error.
+// a catalog can lag the real change or carry a transient error. Custom
+// pricing is handled apart: see the note at the top.
 function recordCatalogPrice(db, model, price, { day, alertPercent = DEFAULT_ALERT_PERCENT } = {}) {
   if (!model || !DAY_RE.test(day || '')) return null;
-  const latest = latestVersion(db, model, false);
-  if (latest && sameRates(latest, price)) return null;
-  const active = latestVersion(db, model, true);
-  // Back to the price in effect before a version the user voided.
-  if (active && latest.status !== 'active' && sameRates(active, price)) return null;
-  const previous = active || latest;
-  const changePct = previous ? changePercent(previous, price) : null;
-  const notice = changePct != null && changePct >= Number(alertPercent) - 1e-9 ? 'pending' : null;
+  const custom = isCustomSource(price.source);
   const row = {
     model,
     effective_from: day,
     observed_on: day,
     matched_key: price.matched_key ?? null,
     source: price.source ?? null,
-    change_pct: changePct,
-    notice
+    change_pct: null,
+    notice: null,
+    backfill: custom ? 1 : 0
   };
   for (const column of RATE_COLUMNS) row[column] = price[column] ?? null;
-  db.prepare(`
-    INSERT INTO price_versions (model, effective_from, observed_on, matched_key, source, change_pct, notice, ${RATE_COLUMNS.join(', ')})
-    VALUES (@model, @effective_from, @observed_on, @matched_key, @source, @change_pct, @notice, ${RATE_COLUMNS.map((c) => `@${c}`).join(', ')})
-    ON CONFLICT(model, effective_from) DO UPDATE SET
-      ${[...RATE_COLUMNS, 'matched_key', 'source', 'observed_on', 'change_pct'].map((c) => `${c} = excluded.${c}`).join(', ')},
-      status = 'active',
-      notice = CASE WHEN excluded.notice = 'pending' OR price_versions.notice = 'pending' THEN 'pending' ELSE price_versions.notice END
-  `).run(row);
-  return { model, changePct, notice };
+
+  if (custom) {
+    const override = latestVersion(db, model, { activeOnly: true, custom: true });
+    if (override && sameRates(override, price)) return null;
+    writeVersion(db, row);
+    return { model, changePct: null, notice: null };
+  }
+
+  // The override is gone: drop it and fall back to the catalog timeline.
+  db.prepare(`UPDATE price_versions SET status = 'void' WHERE model = ? AND status = 'active' AND ${CUSTOM_SOURCE_SQL}`).run(model);
+  const latest = latestVersion(db, model);
+  if (latest && sameRates(latest, price)) return null;
+  const active = latestVersion(db, model, { activeOnly: true });
+  // Back to the price in effect before a version the user voided.
+  if (active && latest.status !== 'active' && sameRates(active, price)) return null;
+  const previous = active || latest;
+  row.change_pct = previous ? changePercent(previous, price) : null;
+  row.notice = row.change_pct != null && row.change_pct >= Number(alertPercent) - 1e-9 ? 'pending' : null;
+  writeVersion(db, row);
+  return { model, changePct: row.change_pct, notice: row.notice };
+}
+
+// A new price-history.json: the help lines and an example (keys starting
+// with '_' are not read) above empty aliases and versions.
+function priceConfigTemplate(helpLines = []) {
+  return `${JSON.stringify({
+    _help: helpLines,
+    _example: {
+      aliases: { 'proxy-model-name': 'gpt-6-astra' },
+      versions: [
+        { model: 'gpt-5.6-sol', from: '2026-11-22', input: 5, output: 30, cacheRead: 0.5 },
+        { model: 'some-model', from: '2026-09-01', input: 1, output: 4, backfill: true }
+      ]
+    },
+    aliases: {},
+    versions: []
+  }, null, 2)}\n`;
 }
 
 function perMillionRates(row) {
@@ -371,6 +421,7 @@ module.exports = {
   loadPriceConfig,
   normalizePriceConfig,
   pendingPriceNotices,
+  priceConfigTemplate,
   priceKeyResolver,
   recordCatalogPrice,
   resolvePriceNotice,

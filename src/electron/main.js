@@ -91,6 +91,7 @@ const {
   DEFAULT_ALERT_PERCENT: DEFAULT_PRICE_ALERT_PERCENT,
   loadPriceConfig,
   pendingPriceNotices,
+  priceConfigTemplate,
   resolvePriceNotice,
   withFallbackAliases
 } = require('../shared/dailyUsage/priceHistory');
@@ -2816,13 +2817,18 @@ function dailyPriceConfig() {
   return mergedPriceConfig.value;
 }
 
+const PRICE_CONFIG_HELP_LINES = 7;
+
 // Creates price-history.json from a template when it is missing (never
-// overwrites) and opens it in the system editor.
+// overwrites) and opens it in the system editor. The template's help is in
+// the interface language.
 async function openDailyPriceConfig() {
   const filePath = dailyPriceConfigPath();
   if (!filePath) return { ok: false, reason: 'unavailable' };
+  const locale = trayMenuLocale();
+  const help = Array.from({ length: PRICE_CONFIG_HELP_LINES }, (_, index) => translate(locale, `priceConfig.help${index + 1}`));
   try {
-    fs.writeFileSync(filePath, `${JSON.stringify({ aliases: {}, versions: [] }, null, 2)}\n`, { flag: 'wx' });
+    fs.writeFileSync(filePath, priceConfigTemplate(help), { flag: 'wx' });
   } catch (error) {
     if (error?.code !== 'EEXIST') return { ok: false, reason: error?.code || 'failed' };
   }
