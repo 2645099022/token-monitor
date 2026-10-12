@@ -14,6 +14,9 @@ set "HTTP_PROXY=http://127.0.0.1:7897"
 set "HTTPS_PROXY=http://127.0.0.1:7897"
 set "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/"
 
+REM --- Node.js: the project needs Node 22.15+; the same v24 as the starter ----
+set "NODE_HOME=G:\D file\Nodejs24\node-v24.18.0-win-x64"
+
 echo ============================================
 echo   Token Monitor - Auto Updater
 echo ============================================
@@ -25,6 +28,12 @@ set "TMPREAL=%TEMP%\tmu-real-%RANDOM%.txt"
 set "TMPWHITE=%TEMP%\tmu-white-%RANDOM%.txt"
 
 REM --- 0. Sanity: git and node/npm available ----------------------------------
+if not exist "%NODE_HOME%\node.exe" (
+  echo [X] Node.js v24 was not found at:
+  echo     %NODE_HOME%
+  set "EC=1" & goto :cleanup
+)
+set "PATH=%NODE_HOME%;%PATH%"
 where git >nul 2>nul
 if errorlevel 1 (
   echo [X] git not found. Install Git for Windows first.
