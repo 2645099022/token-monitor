@@ -4,12 +4,19 @@ Sources:
 - Lucide Icons: https://github.com/lucide-icons/lucide
   - actions/arrow-left.svg: arrow-left
   - actions/settings.svg: settings
+  - actions/pencil-line.svg: pencil-line
+  - actions/trash.svg: trash
   - settings/general.svg: sliders-horizontal
   - settings/main.svg: panels-top-left
   - settings/collection.svg: database
   - settings/sync.svg: cloud-sync
   - settings/appearance.svg: palette
   - views/home.svg: house
+  - views/session.svg: messages-square
+  - views/trends.svg: chart-no-axes-combined
+  - views/model.svg: atom
+  - views/tool.svg: bot
+  - views/status.svg: activity
 - Basil Icons by Craftwork: https://www.figma.com/community/file/931906394678748246
   - actions/zap.svg: lightning-alt-outline
     (modified with a subtle outline for small-size legibility)

@@ -10,8 +10,8 @@ const { openDb } = require('../../src/shared/persistence/db');
 const { refreshPricing } = require('../../src/shared/dailyUsage/pricing');
 const { sessionUsageInRange, dailyTotals } = require('../../src/shared/dailyUsage/query');
 const {
-  createPriceBook, loadPriceConfig, normalizePriceConfig, pendingPriceNotices, recordCatalogPrice, resolvePriceNotice,
-  withFallbackAliases
+  createPriceBook, loadPriceConfig, normalizePriceConfig, pendingPriceNotices, recordCatalogPrice, reopenPriceNotice,
+  resolvePriceNotice, settledPriceNotices, withFallbackAliases
 } = require('../../src/shared/dailyUsage/priceHistory');
 
 const M = 1e-6;
@@ -213,6 +213,41 @@ test('notices: a change can be moved back to its real start, but not past the pr
     assert.deepEqual(versions(db, 'm').map((v) => [v.effective_from, v.notice]), [['2026-08-10', null], ['2026-11-21', 'resolved']]);
     assert.deepEqual(pendingPriceNotices(db), []);
     assert.equal(resolvePriceNotice(db, { model: 'm', effectiveFrom: '2026-11-23', action: 'confirm' }).reason, 'not-found');
+  } finally { db.close(); }
+});
+
+test('notices: a settled change lists how it was settled and reopens as it was before', () => {
+  const db = openDb(':memory:');
+  try {
+    for (const model of ['a', 'b', 'c', 'd']) recordCatalogPrice(db, model, rates(4, 20), { day: '2026-08-10' });
+    for (const model of ['a', 'b', 'c', 'd']) recordCatalogPrice(db, model, rates(2, 10), { day: '2026-10-12' });
+    resolvePriceNotice(db, { model: 'a', effectiveFrom: '2026-10-12', action: 'confirm' });
+    resolvePriceNotice(db, { model: 'b', effectiveFrom: '2026-10-12', action: 'redate', date: '2026-10-07' });
+    resolvePriceNotice(db, { model: 'c', effectiveFrom: '2026-10-12', action: 'void' });
+    resolvePriceNotice(db, { model: 'd', effectiveFrom: '2026-10-12', action: 'backfill' });
+    assert.deepEqual(pendingPriceNotices(db), []);
+
+    const settled = settledPriceNotices(db);
+    assert.deepEqual(settled.map((notice) => [notice.model, notice.effectiveFrom, notice.action]), [
+      ['a', '2026-10-12', 'confirm'], ['b', '2026-10-07', 'redate'], ['c', '2026-10-12', 'void'], ['d', '2026-10-12', 'backfill']
+    ]);
+    assert.deepEqual(settled[0].before, { input: 4, output: 20, cacheRead: null, cacheWrite: null });
+    assert.deepEqual(settled[0].after, { input: 2, output: 10, cacheRead: null, cacheWrite: null });
+
+    for (const { model, effectiveFrom } of settled) {
+      assert.deepEqual(reopenPriceNotice(db, { model, effectiveFrom }), { ok: true });
+    }
+    assert.deepEqual(pendingPriceNotices(db).map((notice) => [notice.model, notice.effectiveFrom]), [
+      ['a', '2026-10-12'], ['b', '2026-10-07'], ['c', '2026-10-12'], ['d', '2026-10-12']
+    ]);
+    const rows = db.prepare(`SELECT model, status, backfill FROM price_versions WHERE effective_from >= '2026-10-07' ORDER BY model`).all();
+    assert.deepEqual(rows.map((row) => [row.model, row.status, row.backfill]), [
+      ['a', 'active', 0], ['b', 'active', 0], ['c', 'active', 0], ['d', 'active', 0]
+    ]);
+    assert.deepEqual(settledPriceNotices(db), []);
+    // Only a settled change reopens.
+    assert.equal(reopenPriceNotice(db, { model: 'a', effectiveFrom: '2026-10-12' }).reason, 'not-found');
+    assert.equal(reopenPriceNotice(db, { model: 'a', effectiveFrom: '2026-08-10' }).reason, 'not-found');
   } finally { db.close(); }
 });
 

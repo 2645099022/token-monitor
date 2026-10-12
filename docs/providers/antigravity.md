@@ -33,17 +33,31 @@ Token Monitor recognizes these native Antigravity roots under `~/.gemini/`:
 
 When Antigravity tracking is enabled and at least one native root exists, `maybeSyncAntigravity()` in `src/shared/providers/antigravity/selfSync.js` runs `tokscale antigravity sync` before the relevant scan. It is built once by the collector, which injects the process-wide self-sync throttle and the tokscale command resolver rather than letting this module create either. `tokscale` writes the normalized cache under its configured `antigravity-cache` directory.
 
-The normalized client id is `antigravity`. The tokscale alias `antigravity-cli` must continue to normalize and filter back to that parent id so targeted scans do not clear one partition and write another.
+The normalized client id is `antigravity`. The tokscale aliases `antigravity-cli` and `antigravity-extension` must continue to normalize and filter back to that parent id so targeted scans do not clear one partition and write another.
 
-The parse-local CLI source lives under `${GEMINI_CLI_HOME || ~/.gemini}/antigravity-cli/conversations`. It is a direct scan source rather than part of the native self-sync roots.
+The parse-local CLI source lives under `${GEMINI_CLI_HOME || ~/.gemini}/antigravity-cli/conversations`. The IDE extension's generation databases are read directly from `~/.gemini/antigravity/conversations/*.db`; this source follows the home directory and not `GEMINI_CLI_HOME`. Neither source depends on a successful `antigravity sync`. The extension directory is already inside a watched native root, while the CLI directory is watched separately.
+
+Normal scans include both database identities. A custom Antigravity root is passed only to `antigravity` and `antigravity-cli`: the CLI and extension use the same `*.db` parser, so passing one custom directory to both would count rows without response IDs twice. When a persisted custom root is inside the built-in extension directory — the pre-upgrade workaround for reading it — the `antigravity-cli` leg is dropped for that root so its files are not parsed a second time. A custom root that contains the extension directory keeps the leg because it may hold databases outside it; the shared subtree can still count rows without response IDs twice until Tokscale dedupes on canonical file paths.
 
 ### Watch behavior
 
-The native roots are watched because tokscale reads them without writing back to them. A change can therefore trigger an Antigravity-targeted refresh safely.
+The native roots are watched so that a change there triggers an Antigravity-targeted refresh. Reading them is not quite write-free: the extension keeps one SQLite database per conversation in WAL mode, and each read-only scan rewrites every conversation's `*.db-shm` wal-index. The collector therefore drops `-shm` events for Antigravity (`SELF_WATCHED_SQLITE_SIDECAR_CLIENTS`); otherwise every scan would schedule the next one, about every 2 s, with nothing new to collect. Real activity still arrives through the `*.db` and `*.db-wal` files.
 
 The generated `antigravity-cache` directory is deliberately not watched. Token Monitor's own sync writes it, so watching it would create a refresh loop.
 
-On Windows, running WSL distros are checked during full scans only. WSL discovery uses the same Antigravity source markers and never starts a stopped distro.
+### Session titles and project resolution
+
+Antigravity session entries are joined against the local `conversation_summaries.db` SQLite database located under the Antigravity configuration roots (`~/.gemini/antigravity`, or paths specified via `ANTIGRAVITY_HOME`/`ANTIGRAVITY_DATA_DIR`) and the CLI root beside its `conversations` directory. The CLI root follows the collector's existing `GEMINI_CLI_HOME` path policy; IDE roots remain under the configured home's `.gemini` directory.
+
+For each conversation ID:
+
+- The title is resolved from the `title` column (falling back to `preview` when the title is empty). Titles are trimmed and limited to 96 code points.
+- A missing project association is resolved from `workspace_uris` (file URLs); later summary changes refresh or clear that association across today/month/all-time and the persisted anchor. Provenance is per period: a native historical project remains authoritative even when Today receives the same project ID from the summary. WSL workspace URLs are decoded as POSIX paths even though the reader runs on Windows.
+- Summary updates preserve transcript activity timestamps, turn state, context and cache observations. `last_modified_time` is not a generation timestamp: renaming a conversation must not make it appear running.
+
+The reader opens the database read-only, queries only requested session IDs, and caches source rows and misses per database/WAL fingerprint. A changed fingerprint revalidates each requested row while preserving its last successful value on transient failures, including a temporarily missing or unstatable database; failed rows remain eligible for retry. Successfully clearing both title and preview, or confirming that a row is missing, removes only that catalog override, including on the first lookup after restart. Check all candidate stores before treating a missing row as deletion; an unreadable candidate is not proof of absence. Prefer usable titles over empty rows and fresh reads over stale rows. When only stale rows remain, retain the last selected source until an earlier candidate can be successfully revalidated. Each store's confirmed misses discard its old rows, even when the file becomes unavailable, without shadowing another store. The existing anchor also records the summary title source, so its temporary disappearance after restart cannot be mistaken for deletion in an unrelated store. Catalog title provenance uses the existing local metadata and anchor ledger, so watch renames and removals survive later read misses and restarts without changing usage baselines. Project identities are derived on each lookup so changing the Projects setting does not require a database write. WSL lookups ignore all host environment overrides, including `GEMINI_CLI_HOME`.
+
+The database and its WAL are watched, including under the environment overrides and the resolved CLI root. Metadata reads, discovery and watch policies share the collector's environment and configured home; the top-level environment takes precedence over an environment injected through metadata dependencies. Summary-only directories admit those exact files and attribute events to them rather than to the whole parent; unrelated runtime files and the reader's SHM writes do not trigger collection. Summary changes refresh labels without admitting an accelerated Antigravity RPC self-sync; conversation usage writes retain their source-sync behavior. Watch ticks refresh sessions present in today; month/all-time-only titles refresh on the next full scan.
 
 ### Boundary with quota collection
 
@@ -139,6 +153,7 @@ Token/session tracking remains dependent on local source data. OAuth does not ma
 | Concern | Primary files |
 | --- | --- |
 | Usage source roots, health and watch mapping | `src/shared/clientSources.js`, `src/shared/clientSourceObservations.js`, `src/shared/collector.js`, `src/shared/clientTracking.js`, `src/shared/clientHealth.js`, `src/shared/usage.js` |
+| Session metadata and conversation titles | `src/shared/providers/antigravity/sessionMetadata.js`, `src/shared/sessionMetadata.js` |
 | Self-sync and the tokscale sync lock | `src/shared/providers/antigravity/selfSync.js`, `src/shared/selfSyncThrottle.js` |
 | Local RPC and remote quota requests | `src/shared/providers/antigravity/probe.js`, `src/shared/providers/antigravity/oauth.js`, `src/shared/providers/antigravity/limits.js` |
 | Browser OAuth lifecycle | `src/electron/providers/antigravity/oauthLogin.js`, `src/electron/main.js`, `src/electron/preload.js` |

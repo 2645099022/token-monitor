@@ -37,7 +37,7 @@ const {
 } = require('../../src/shared/collector');
 const { KNOWN_CLIENTS } = require('../../src/shared/clientTracking');
 const { createSelfSyncThrottle } = require('../../src/shared/selfSyncThrottle');
-const { applySessionUsageArchive } = require('../../src/shared/sessionUsageArchive');
+const { applySessionUsageArchive } = require('../../src/shared/usage/sessionUsageArchive');
 const { aggregateDevices, mergeDeviceRecord, normalizeDeviceRecord } = require('../../src/shared/usage');
 
 installSourceEnvGuard(test);
@@ -326,10 +326,15 @@ test('every source-root id the collector emits is in the allowlist', () => {
   for (const id of ['antigravity-ide-source', 'antigravity-cli-data']) {
     assert.ok(CLIENT_SOURCE_CHECK_IDS.includes(id));
   }
-  // And nothing in the allowlist is dead weight. Two ids are exempt because they
-  // are discovered rather than constructed: `hermes-profile` comes from profiles
-  // found on disk, and `wsl-home` only appears on Windows with a running distro.
-  const discoveryDependent = new Set(['copilot-otel-exporter', 'hermes-profile', 'wsl-home']);
+  // And nothing in the allowlist is dead weight. Some ids are exempt because no
+  // client can construct them here: `copilot-otel-exporter` and `hermes-profile`
+  // come from files found on disk, `wsl-home` only appears on Windows with a
+  // running distro, and CatPaw is both platform- and discovery-conditional —
+  // `catpaw-data` is built only on darwin/win32, and `catpaw-db` only once an
+  // account database is actually found.
+  const discoveryDependent = new Set([
+    'copilot-otel-exporter', 'hermes-profile', 'wsl-home', 'catpaw-data', 'catpaw-db'
+  ]);
   const checked = new Set([...emitted, 'antigravity-ide-source', 'antigravity-cli-data']);
   for (const id of CLIENT_SOURCE_CHECK_IDS) {
     if (discoveryDependent.has(id)) continue;
@@ -393,6 +398,9 @@ test('the Cursor cache stays home-relative while Antigravity follows the config 
   assert.deepEqual(roots.antigravity, [{
     id: 'tokscale-antigravity-cache',
     dir: path.join(appData, 'tokscale', 'antigravity-cache')
+  }, {
+    id: 'antigravity-extension-data',
+    dir: path.join(homeDir, '.gemini', 'antigravity', 'conversations')
   }]);
   // The sync lock lives inside the Antigravity cache, so it has to move with it.
   assert.equal(
@@ -416,7 +424,29 @@ test('TOKSCALE_CONFIG_DIR moves the Antigravity cache but not the Cursor one', (
   assert.deepEqual(roots.antigravity, [{
     id: 'tokscale-antigravity-cache',
     dir: path.join('C:\\iso\\tokscale', 'antigravity-cache')
+  }, {
+    id: 'antigravity-extension-data',
+    dir: path.join(homeDir, '.gemini', 'antigravity', 'conversations')
   }]);
+});
+
+// The fork parses Proma and Qoder CN from tokscale-core home_dir() too, so their
+// watch roots must follow the same redirect rather than the Win32 profile.
+test('fork-only client roots follow an absolute Windows HOME override', () => {
+  const roots = clientSourceRoots('proma,qodercn', {
+    homeDir: 'C:\\Users\\alice',
+    platform: 'win32',
+    env: { APPDATA: 'C:\\Users\\alice\\AppData\\Roaming', HOME: 'D:\\profiles\\alice' }
+  });
+
+  assert.deepEqual(roots.proma, [{
+    id: 'proma-sessions',
+    dir: path.join('D:\\profiles\\alice', '.proma', 'agent-sessions')
+  }]);
+  assert.deepEqual(roots.qodercn.find(({ id }) => id === 'qodercn-projects'), {
+    id: 'qodercn-projects',
+    dir: path.join('D:\\profiles\\alice', '.qoder-cn', 'projects')
+  });
 });
 
 // tokscale-core home_dir() prefers an absolute $HOME on Windows, and cursor.rs
@@ -461,6 +491,55 @@ test('source resolution feeds watcher paths and exact-file diagnostics without c
   assert.equal(clientDiagnosticRoots('zcode', options).zcode.find((root) => root.id === 'zcode-cli-db').dir, zcodeDb.sourcePath);
 });
 
+test('Muse watches the same XDG sessions root used for source detection', () => {
+  const homeDir = path.join(os.tmpdir(), 'muse-source-home');
+  const env = { XDG_DATA_HOME: path.join(homeDir, 'xdg') };
+  const options = { homeDir, env };
+  const dir = path.join(env.XDG_DATA_HOME, 'muse', 'sessions');
+  assert.deepEqual(clientSourceRoots('muse', options).muse, [{ id: 'muse-sessions', dir }]);
+  assert.deepEqual(clientWatchCandidates('muse', options).muse, [dir]);
+  assert.deepEqual(clientSourceChecks('muse', options).muse.map((check) => check.id), ['muse-sessions']);
+});
+
+test('fx watches the home-relative sessions root used for source detection', () => {
+  const homeDir = path.join(os.tmpdir(), 'fx-source-home');
+  const options = { homeDir };
+  const dir = path.join(homeDir, '.fx', 'sessions');
+  assert.deepEqual(clientSourceRoots('fx', options).fx, [{ id: 'fx-sessions', dir }]);
+  assert.deepEqual(clientWatchCandidates('fx', options).fx, [dir]);
+  assert.deepEqual(clientSourceChecks('fx', options).fx.map((check) => check.id), ['fx-sessions']);
+});
+
+test('MiniMax Code watches every runtime store and the headless captures', () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-mcode-source-'));
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-mcode-linked-'));
+  try {
+    fs.mkdirSync(path.join(homeDir, '.minimax-work'));
+    fs.mkdirSync(path.join(homeDir, '.minimax'));
+    fs.symlinkSync(path.join(homeDir, '.minimax'), path.join(homeDir, '.mavis'), 'junction');
+    // A profile that is itself a link is still read by the fork, so it is watched too.
+    fs.symlinkSync(elsewhere, path.join(homeDir, '.mavis-team'), 'junction');
+    const env = { HOME: homeDir };
+    const options = { homeDir, env };
+    const sessions = (name) => path.join(homeDir, name, 'v2', 'sessions');
+    const headless = (...parts) => path.join(homeDir, ...parts, 'tokscale', 'headless', 'mcode');
+    assert.deepEqual(clientSourceRoots('mcode', options).mcode, [
+      { id: 'mcode-sessions', dir: sessions('.minimax') },
+      { id: 'mcode-sessions', dir: sessions('.mavis-team'), optional: true },
+      { id: 'mcode-sessions', dir: sessions('.minimax-work'), optional: true },
+      { id: 'mcode-sessions', dir: headless('.config'), optional: true },
+      { id: 'mcode-sessions', dir: headless('Library', 'Application Support'), optional: true }
+    ]);
+
+    const custom = path.join(homeDir, 'custom-data');
+    const overridden = clientSourceRoots('mcode', { homeDir, env: { ...env, MAVIS_DATA_DIR: custom } }).mcode;
+    assert.deepEqual(overridden.slice(0, 1), [{ id: 'mcode-sessions', dir: path.join(custom, 'v2', 'sessions') }]);
+  } finally {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
 test('source observations keep exact files, optional roots and WSL health in sync with diagnostics', () => {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-source-observations-'));
   const previousHome = os.homedir;
@@ -490,6 +569,7 @@ test('source observations keep exact files, optional roots and WSL health in syn
     assert.equal(deriveClientHealth('hermes', { clients: {} }, { sourceChecks: missing.checks }).clients.hermes.overall, 'waiting');
     assert.deepEqual(missing.checks.antigravity.map(({ id, exists }) => ({ id, exists })), [
       { id: 'tokscale-antigravity-cache', exists: false },
+      { id: 'antigravity-extension-data', exists: false },
       { id: 'antigravity-ide-source', exists: true },
       { id: 'antigravity-cli-data', exists: false }
     ]);
@@ -497,11 +577,16 @@ test('source observations keep exact files, optional roots and WSL health in syn
 
     fs.writeFileSync(path.join(dbDir, 'db.sqlite'), '');
     fs.mkdirSync(capture, { recursive: true });
+    const extensionDir = path.join(homeDir, '.gemini', 'antigravity', 'conversations');
+    fs.mkdirSync(extensionDir, { recursive: true });
     const present = observe();
     assert.deepEqual(present.checks.zcode.find((check) => check.id === 'zcode-cli-db'), { id: 'zcode-cli-db', exists: true });
     assert.equal(present.diagnostics.zcode.find((root) => root.id === 'zcode-cli-db').exists, true);
     assert.equal(present.visible.codex.some((root) => root.dir === capture), true);
     assert.equal(clientDataDirPresence('zcode', { sourceChecks: present.checks }).zcode, true);
+    assert.deepEqual(present.checks.antigravity.find((check) => check.id === 'antigravity-extension-data'),
+      { id: 'antigravity-extension-data', exists: true });
+    assert.equal(present.diagnostics.antigravity.find((root) => root.id === 'antigravity-extension-data').dir, extensionDir);
   } finally {
     os.homedir = previousHome;
     if (previousGeminiHome === undefined) delete process.env.GEMINI_CLI_HOME;
@@ -536,9 +621,11 @@ test('clientSourceChecks collapses same-kind roots into one entry', () => {
   assert.deepEqual(ids('copilot'), ['copilot-otel', 'copilot-data', 'copilot-session-store', 'vscode-workspace-storage']);
   assert.deepEqual(ids('zed'), ['zed-threads']);
   assert.deepEqual(ids('cline'), ['cline-tasks', 'cline-cli-sessions']);
-  // antigravity's watch candidate is only the tokscale cache; its two real
-  // sources are separate checks so the record can tell them apart.
-  assert.deepEqual(ids('antigravity'), ['tokscale-antigravity-cache', 'antigravity-ide-source', 'antigravity-cli-data']);
+  // The extension database is a direct parser source alongside the synced IDE
+  // cache and the separate CLI database.
+  assert.deepEqual(ids('antigravity'), [
+    'tokscale-antigravity-cache', 'antigravity-extension-data', 'antigravity-ide-source', 'antigravity-cli-data'
+  ]);
   for (const list of Object.values(checks)) {
     for (const check of list) assert.equal(typeof check.exists, 'boolean');
   }
@@ -607,13 +694,15 @@ test('diagnostic roots expose antigravity native sources without treating them a
     'antigravity-ide-source',
     'antigravity-ide-source',
     'antigravity-cli-data',
-    'tokscale-antigravity-cache'
+    'tokscale-antigravity-cache',
+    'antigravity-extension-data'
   ]);
   assert.deepEqual(
     diagnostics.slice(0, 3).map(({ dir }) => dir.split(/[\\/]/).at(-1)),
     ['antigravity', 'antigravity-ide', 'antigravity-backup']
   );
   assert.equal(diagnostics[3].dir.split(/[\\/]/).at(-1), 'conversations');
+  assert.equal(diagnostics[5].dir, path.join(os.homedir(), '.gemini', 'antigravity', 'conversations'));
   for (const root of diagnostics) {
     assert.equal(typeof root.dir, 'string');
     assert.equal(typeof root.exists, 'boolean');

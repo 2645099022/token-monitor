@@ -16,6 +16,8 @@ const WORKER_SHARED_MODULES = Object.freeze([
   'limits/providers.js',
   'limits/core.js',
   'usage.js',
+  'sessionLive.js',
+  'sessionActivityProviders.js',
   'history.js',
   'providers/reasonix/paths.js',
   'providers/reasonix/sessionGuard.js',
@@ -27,6 +29,7 @@ const WORKER_SHARED_MODULES = Object.freeze([
   'currency.js',
   'clientHealth.js',
   'hubProtocol.js',
+  'syncContent.js',
   'hubBuildIdentity.js'
 ]);
 const WORKER_SHARED_PACKAGE = Object.freeze({

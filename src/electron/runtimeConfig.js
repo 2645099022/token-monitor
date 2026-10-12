@@ -27,6 +27,7 @@ const MODE_STRUCTURAL_KEYS = Object.freeze([
 ]);
 const USAGE_STRUCTURAL_KEYS = Object.freeze([
   'clients',
+  'codexDotsEnabled',
   'customScanPaths',
   'allTimeSince',
   'collectionIntervalMs',
@@ -35,13 +36,15 @@ const USAGE_STRUCTURAL_KEYS = Object.freeze([
   'historyIntervalMs',
   'sessionUsageArchiveEnabled',
   'projectsEnabled',
-  'wslScanEnabled'
+  'wslScanEnabled',
+  'dailyUsageCorrectionEnabled'
 ]);
 // Functions and identity fields deliberately stay out: this key answers only
 // whether replacing the active usage runtime would change its collection work.
 // Values arrive from usageConfigFromSettings() after mode-specific normalization.
 const USAGE_CONFIG_FINGERPRINT_KEYS = Object.freeze([
   'clients',
+  'codexDotsEnabled',
   'customScanPaths',
   'allTimeSince',
   'intervalMs',
@@ -54,7 +57,8 @@ const USAGE_CONFIG_FINGERPRINT_KEYS = Object.freeze([
   'watchTriggersCollection',
   'intervalRequiresActivity',
   'watchDebounceMs',
-  'wslScanEnabled'
+  'wslScanEnabled',
+  'usageInProcess'
 ]);
 const LIMITS_RECONFIGURE_KEYS = Object.freeze([
   'limitsEnabled',
@@ -94,6 +98,8 @@ function normalizeAllTimeSince(value, fallback = DEFAULT_ALL_TIME_SINCE) {
 function usageConfigFromSettings(settings = {}, context = {}) {
   return {
     clients: clientsCsvForSetting(settings.clients),
+    codexDotsEnabled: settings.codexDotsEnabled === true,
+    codexDotsVisible: settings.codexDotsVisible !== false,
     customScanPaths: normalizeCustomScanPaths(settings.customScanPaths),
     allTimeSince: normalizeAllTimeSince(settings.allTimeSince),
     commandTimeoutMs: Number(context.commandTimeoutMs || 120 * 1000),
@@ -117,6 +123,9 @@ function usageConfigFromSettings(settings = {}, context = {}) {
     watchDebounceMs: Number(context.watchDebounceMs || 1500),
     wslScanEnabled: settings.wslScanEnabled !== false,
     // Day-split correction hooks (Electron only); see dailyUsage/correction.js.
+    // They run on the owner's thread, so while the correction is enabled the
+    // collector runs there too.
+    usageInProcess: settings.dailyUsageCorrectionEnabled !== false,
     beforeUpdate: context.beforeUpdate,
     transformHistoryGraph: context.transformHistoryGraph,
     onError: context.onError,

@@ -13,7 +13,6 @@ const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 
 const { emptyPeriod } = require('../../src/shared/usage');
-const { localDayKey } = require('../../src/shared/history');
 const {
   clampTimerDelayMs, SYNC_MIN_INTERVAL_MS, SYNC_SOURCE_EVENT_MIN_INTERVAL_MS
 } = require('../../src/shared/selfSyncThrottle');
@@ -422,6 +421,9 @@ test('watchIgnoreMatcher bounds Antigravity roots to source and metadata inputs'
     assert.equal(ignored(path.join(tmp, root, 'conversations', 'session-a.db-wal')), false);
     assert.equal(ignored(path.join(tmp, root, 'annotations', 'session-a.pbtxt')), false);
     assert.equal(ignored(path.join(tmp, root, 'agyhub_summaries_proto.pb')), false);
+    assert.equal(ignored(path.join(tmp, root, 'conversation_summaries.db')), false);
+    assert.equal(ignored(path.join(tmp, root, 'conversation_summaries.db-wal')), false);
+    assert.equal(ignored(path.join(tmp, root, 'conversation_summaries.db-shm')), true);
     assert.equal(ignored(path.join(tmp, root, 'builtin', 'keep.txt')), true);
     assert.equal(ignored(path.join(tmp, root, 'crashes', 'crash_1.log')), true);
     assert.equal(ignored(path.join(tmp, root, 'antigravity_state.pbtxt')), true);
@@ -431,6 +433,180 @@ test('watchIgnoreMatcher bounds Antigravity roots to source and metadata inputs'
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('Antigravity summary overrides watch and attribute only their exact database files', () => {
+  const tmp = withTmpHome(['catalog', path.join('.gemini', 'antigravity-cli', 'conversations')]);
+  const originalHome = os.homedir;
+  os.homedir = () => tmp;
+  try {
+    process.env.ANTIGRAVITY_HOME = path.join(tmp, 'catalog');
+    process.env.ANTIGRAVITY_DATA_DIR = tmp;
+    const { watchPathsForClients, watchAttributionRootsForClients, watchIgnoreMatcher, clientsForWatchPath } = freshCollector();
+    const roots = { antigravity: watchPathsForClients('antigravity') };
+    const attributed = watchAttributionRootsForClients('antigravity', roots);
+    const ignored = watchIgnoreMatcher('antigravity');
+    for (const dir of [tmp, path.join(tmp, 'catalog'), path.join(tmp, '.gemini', 'antigravity-cli')]) {
+      assert.ok(roots.antigravity.includes(dir), 'the parent is watched before the DB exists');
+      for (const suffix of ['', '-wal']) {
+        const file = path.join(dir, `conversation_summaries.db${suffix}`);
+        assert.equal(ignored(file), false);
+        assert.deepEqual(clientsForWatchPath(file, attributed), ['antigravity']);
+      }
+      assert.equal(ignored(path.join(dir, 'conversation_summaries.db-shm')), true);
+      assert.deepEqual(clientsForWatchPath(path.join(dir, 'unrelated.json'), attributed), []);
+    }
+    assert.equal(ignored(path.join(tmp, 'catalog', 'runtime', 'nested.db')), true);
+    const cliWrite = path.join(tmp, '.gemini', 'antigravity-cli', 'conversations', 'session.db-wal');
+    assert.equal(ignored(cliWrite), false, 'the CLI transcript root retains its recursive policy');
+    assert.deepEqual(clientsForWatchPath(cliWrite, attributed), ['antigravity']);
+    assert.equal(watchPathsForClients('claude').includes(path.join(tmp, 'catalog')), false);
+  } finally {
+    os.homedir = originalHome;
+    delete require.cache[collectorPath];
+    const temp = fs.realpathSync.native(os.tmpdir());
+    assert.ok(path.resolve(tmp).startsWith(path.resolve(temp) + path.sep));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Antigravity summary watches follow homeDir without replacing the process home', () => {
+  const roots = [path.join('.gemini', 'antigravity'), path.join('.gemini', 'antigravity-cli')];
+  const homeDir = withTmpHome(roots);
+  try {
+    const { watchPathsForClients, watchAttributionRootsForClients, watchIgnoreMatcher, clientsForWatchPath } = freshCollector();
+    const options = { homeDir, env: {} };
+    const watched = { antigravity: watchPathsForClients('antigravity', options) };
+    const attributed = watchAttributionRootsForClients('antigravity', watched, options);
+    const ignored = watchIgnoreMatcher('antigravity', options);
+    for (const root of roots) {
+      const dir = path.join(homeDir, root);
+      assert.ok(watched.antigravity.includes(dir));
+      for (const suffix of ['', '-wal']) {
+        const file = path.join(dir, `conversation_summaries.db${suffix}`);
+        assert.equal(ignored(file), false);
+        assert.deepEqual(clientsForWatchPath(file, attributed), ['antigravity']);
+      }
+      assert.equal(ignored(path.join(dir, 'conversation_summaries.db-shm')), true);
+      assert.equal(ignored(path.join(dir, 'unrelated.json')), true);
+      assert.deepEqual(clientsForWatchPath(path.join(dir, 'unrelated.json'), attributed),
+        root === path.join('.gemini', 'antigravity') ? ['antigravity'] : []);
+    }
+  } finally {
+    delete require.cache[collectorPath];
+    const temp = fs.realpathSync.native(os.tmpdir());
+    assert.ok(path.resolve(homeDir).startsWith(path.resolve(temp) + path.sep));
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+for (const source of ['native', 'override', 'configured-home', 'injected-env', 'metadata-env', 'env-precedence', 'cli-home']) {
+  test(`Antigravity ${source} summary WAL events refresh titles with an exact today delta`, async (t) => {
+    // Keep both 11-second advances on one local day, even at midnight.
+    t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 11, 12, 0).getTime() });
+    let sqlite;
+    try { sqlite = require('node:sqlite'); } catch (_) { t.skip('node:sqlite unavailable'); return; }
+    const sourceRoot = path.join('.gemini', 'antigravity');
+    const tmp = withTmpHome([sourceRoot, 'catalog', path.join('.config', 'tokscale', 'antigravity-cache')]);
+    const originalHome = os.homedir;
+    const chokidar = require('chokidar');
+    const originalWatch = chokidar.watch;
+    let handle;
+    let db;
+    t.after(() => {
+      handle?.stop();
+      db?.close();
+      os.homedir = originalHome;
+      chokidar.watch = originalWatch;
+      delete require.cache[collectorPath];
+      const temp = fs.realpathSync.native(os.tmpdir());
+      assert.ok(path.resolve(tmp).startsWith(path.resolve(temp) + path.sep));
+      fs.rmSync(tmp, { recursive: true, force: true });
+    });
+    if (source !== 'configured-home') os.homedir = () => tmp;
+    const cliHome = path.join(tmp, 'relocated-gemini');
+    if (source === 'cli-home') {
+      process.env.GEMINI_CLI_HOME = cliHome;
+      fs.mkdirSync(path.join(cliHome, 'antigravity-cli', 'conversations'), { recursive: true });
+    }
+    const dir = ['override', 'injected-env', 'metadata-env', 'env-precedence'].includes(source) ? path.join(tmp, 'catalog')
+      : source === 'cli-home' ? path.join(cliHome, 'antigravity-cli') : path.join(tmp, sourceRoot);
+    const depsDir = source === 'env-precedence' ? path.join(tmp, 'deps-catalog') : dir;
+    if (source === 'env-precedence') fs.mkdirSync(depsDir);
+    if (source === 'override') process.env.ANTIGRAVITY_HOME = dir;
+    const dbPath = path.join(dir, 'conversation_summaries.db');
+    db = new sqlite.DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT, workspace_uris TEXT)');
+    db.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)').run('title-session', 'Old title', '', null);
+    let watchHandler;
+    let ignored;
+    chokidar.watch = (dirs, options) => {
+      assert.ok(dirs.includes(dir), 'the summary parent is passed to the watch host');
+      if (source === 'env-precedence') assert.equal(dirs.includes(depsDir), false, 'top-level env takes precedence over metadata deps');
+      ignored = options.ignored;
+      const watcher = {
+        on(event, callback) { if (event === 'all') watchHandler = callback; return watcher; },
+        close() {}
+      };
+      return watcher;
+    };
+    const calls = [];
+    let syncs = 0;
+    const updates = [];
+    const { startCollector } = freshCollector();
+    handle = startCollector({
+      clients: 'antigravity', allTimeSince: '2024-01-01', commandTimeoutMs: 1000,
+      homeDir: source === 'configured-home' ? tmp : undefined,
+      env: source === 'injected-env' || source === 'env-precedence' ? { ANTIGRAVITY_HOME: dir } : undefined,
+      deviceId: 'fixture-device', agentVersion: 'fixture', intervalMs: 60 * 60 * 1000,
+      watchEnabled: true, watchUsePolling: false, watchTriggersCollection: true, watchDebounceMs: 10,
+      historyEnabled: false, dailyHistoryArchiveEnabled: false, anchorPersistenceEnabled: false,
+      codexLocalUsageEnabled: false, wslScanEnabled: false,
+      sessionMetadataDeps: {
+        sqlite, antigravityTitleCache: new Map(),
+        ...(['metadata-env', 'env-precedence'].includes(source) ? { env: { ANTIGRAVITY_HOME: depsDir } } : {})
+      }, runAntigravitySync: async () => { syncs += 1; },
+      runTokscale: async (input) => {
+        calls.push(input);
+        return { entries: [{ client: 'antigravity', sessionId: 'title-session', model: 'fixture-model', input: 100, output: 30, cost: 0.5 }] };
+      },
+      onUpdate: (summary) => updates.push(summary)
+    });
+    await waitForCondition(() => updates.length === 1);
+    assert.equal(updates[0].today.sessions['antigravity:title-session'].title, 'Old title');
+    assert.equal(calls.length, 3);
+    const initialSyncs = syncs;
+    t.mock.timers.tick(11000);
+    db.prepare('UPDATE conversation_summaries SET title = ?').run('Renamed title');
+    assert.equal(ignored(`${dbPath}-wal`), false);
+    watchHandler('change', `${dbPath}-wal`);
+    await waitForCondition(() => updates.length === 2);
+    assert.equal(calls.length, 4, 'one today scan replaces the three full-period scans');
+    assert.equal(syncs, initialSyncs, 'a pure summary rename never earns a source self-sync');
+    assert.equal(ignored(path.join(dir, 'runtime.json')), true, 'the watch host receives the same environment as discovery');
+    assert.deepEqual(calls[3].flags, ['--today']);
+    assert.equal(calls[3].clients, 'antigravity');
+    for (const name of ['today', 'month', 'allTime']) {
+      assert.equal(updates[1][name].sessions['antigravity:title-session'].title, 'Renamed title');
+      assert.equal(updates[1][name].totalTokens, updates[0][name].totalTokens);
+      assert.equal(updates[1][name].costUsd, updates[0][name].costUsd);
+    }
+    assert.equal(ignored(`${dbPath}-shm`), true);
+    await handle.whenIdle();
+    watchHandler('change', `${dbPath}-shm`);
+    await new Promise((resolve) => setTimeout(resolve, handle.getDiagnostics().watchDebounceMs + 30));
+    assert.equal(calls.length, 4, 'reader-created SHM writes never schedule another scan');
+    if (source === 'native' || source === 'configured-home') {
+      t.mock.timers.tick(11000);
+      const usageFile = path.join(dir, 'conversations', 'title-session.pb');
+      assert.equal(ignored(usageFile), false);
+      watchHandler('change', usageFile);
+      await waitForCondition(() => updates.length === 3);
+      assert.equal(calls.length, 5);
+      assert.equal(syncs, initialSyncs + 1, 'genuine conversation writes retain source self-sync');
+    }
+  });
+}
 
 test('watchIgnoreMatcher watches brain session dirs but never recurses into them', () => {
   // A new session shows up as a new brain/<id> directory, so brain/ itself has
@@ -557,7 +733,7 @@ test('Antigravity source events target its umbrella client without watching sync
     await waitForCondition(() => updates.length === 2);
     assert.equal(syncCalls, 1, 'a source event inside the floor reuses the fresh cache');
     const targeted = calls[calls.length - 1];
-    assert.equal(targeted[targeted.indexOf('--client') + 1], 'antigravity,antigravity-cli');
+    assert.equal(targeted[targeted.indexOf('--client') + 1], 'antigravity,antigravity-cli,antigravity-extension');
     assert.ok(targeted.includes('--today'));
 
     // The floor defers that sync, it does not drop it. No second event follows —
@@ -567,7 +743,7 @@ test('Antigravity source events target its umbrella client without watching sync
     await waitForCondition(() => syncCalls === 2);
     await waitForCondition(() => updates.length === 3);
     const caughtUp = calls[calls.length - 1];
-    assert.equal(caughtUp[caughtUp.indexOf('--client') + 1], 'antigravity,antigravity-cli');
+    assert.equal(caughtUp[caughtUp.indexOf('--client') + 1], 'antigravity,antigravity-cli,antigravity-extension');
     assert.ok(caughtUp.includes('--today'), 'the catch-up rescans behind the sync it waited for');
   } finally {
     Date.now = originalNow;
@@ -690,7 +866,7 @@ test('a catch-up that comes due mid-tick keeps its targeted scan scope', async (
     await waitForCondition(() => syncCalls === 2, 4000);
     const caughtUp = calls[calls.length - 1];
     const scanned = caughtUp[caughtUp.indexOf('--client') + 1];
-    assert.equal(scanned, 'antigravity,antigravity-cli', 'the catch-up stays targeted');
+    assert.equal(scanned, 'antigravity,antigravity-cli,antigravity-extension', 'the catch-up stays targeted');
     assert.equal(scanned.includes('claude'), false, 'and never widens to every tracked client');
   } finally {
     Date.now = originalNow;
@@ -883,7 +1059,7 @@ test('a failed forced sync hands the source event back instead of eating it', as
     t.mock.timers.reset();
     await waitForCondition(() => syncCalls === 3, 4000);
     const retried = calls[calls.length - 1];
-    assert.equal(retried[retried.indexOf('--client') + 1], 'antigravity,antigravity-cli');
+    assert.equal(retried[retried.indexOf('--client') + 1], 'antigravity,antigravity-cli,antigravity-extension');
   } finally {
     Date.now = originalNow;
     if (handle) handle.stop();
@@ -1352,7 +1528,7 @@ test('an Antigravity CLI event rescans without paying for an IDE sync', async ()
     await waitForCondition(() => updates.length === 2);
     assert.equal(syncCalls, 1, 'a CLI-only event leaves the sync on its idle cadence');
     const targeted = calls[calls.length - 1];
-    assert.equal(targeted[targeted.indexOf('--client') + 1], 'antigravity,antigravity-cli');
+    assert.equal(targeted[targeted.indexOf('--client') + 1], 'antigravity,antigravity-cli,antigravity-extension');
     assert.ok(targeted.includes('--today'));
   } finally {
     if (handle) handle.stop();
@@ -1751,13 +1927,16 @@ test('Kimi metadata discovery indexes session directories instead of probing eve
       period.sessions[`kimi:missing-${index}`] = { client: 'kimi', sessionId: `missing-${index}`, totalTokens: 1 };
     }
     let statCalls = 0;
+    let t3StoreProbes = 0;
     fs.statSync = (...args) => {
-      statCalls += 1;
+      if (String(args[0]).endsWith(`${path.sep}statev2.sqlite`) || String(args[0]).endsWith(`${path.sep}state.sqlite`)) t3StoreProbes += 1;
+      else statCalls += 1;
       return originalStatSync(...args);
     };
     const { applySessionTimestamps } = freshCollector();
     applySessionTimestamps({ allTime: period }, tmp, { resolveProjects: true });
     assert.equal(statCalls, 0, 'missing ids should not trigger workspace x session state.json probes');
+    assert.ok(t3StoreProbes <= 6, 'T3 discovery stays bounded independently of session count');
   } finally {
     fs.statSync = originalStatSync;
     os.homedir = originalHomedir;
@@ -2506,7 +2685,7 @@ test('antigravity sync runs at most once per throttle window across ticks', asyn
   }
 });
 
-test('collectUsageOnce scans tokscale for antigravity-cli when antigravity is tracked', async () => {
+test('collectUsageOnce scans tokscale for both Antigravity parse-local clients when tracked', async () => {
   // tokscale 4.x exposes Antigravity CLI (`agy`) under its own parse-local client
   // id `antigravity-cli`; our tracked-client list only knows the umbrella
   // `antigravity` id, so the scan filter must be widened or the CLI rows are
@@ -2535,6 +2714,7 @@ test('collectUsageOnce scans tokscale for antigravity-cli when antigravity is tr
       const ids = filter.split(',');
       assert.ok(ids.includes('antigravity'), `antigravity missing from --client ${filter}`);
       assert.ok(ids.includes('antigravity-cli'), `antigravity-cli missing from --client ${filter}`);
+      assert.ok(ids.includes('antigravity-extension'), `antigravity-extension missing from --client ${filter}`);
     }
   } finally {
     childProcess.spawn = originalSpawn;
@@ -3161,11 +3341,20 @@ test('self-watch db-shm events are ignored for every client whose scan recreates
   const { isSelfWatchSqliteSidecarEvent } = freshCollector();
   const qoderRoot = path.join(os.tmpdir(), 'QoderCN', 'db');
   const zcodeRoot = path.join(os.tmpdir(), 'zcode', 'cli', 'db');
-  const roots = { qodercn: [qoderRoot], zcode: [zcodeRoot] };
+  const antigravityRoot = path.join(os.tmpdir(), '.gemini', 'antigravity');
+  const antigravityConversation = path.join(antigravityRoot, 'conversations');
+  const cherryRoot = path.join(os.tmpdir(), 'CherryStudio', 'Data');
+  const roots = { antigravity: [antigravityRoot], cherrystudio: [cherryRoot], qodercn: [qoderRoot], zcode: [zcodeRoot] };
 
   // Each client keeps its own database basename: Qoder CN names it local.db,
-  // ZCode names it db.sqlite.
-  for (const [root, base] of [[qoderRoot, 'local.db'], [zcodeRoot, 'db.sqlite']]) {
+  // ZCode names it db.sqlite, Antigravity names one per conversation, below its
+  // watch root.
+  for (const [root, base] of [
+    [qoderRoot, 'local.db'],
+    [zcodeRoot, 'db.sqlite'],
+    [antigravityConversation, '1f17ba78-fe78-4ed6-9f69-07387625fdad.db'],
+    [cherryRoot, 'cherrystudio.sqlite']
+  ]) {
     assert.equal(isSelfWatchSqliteSidecarEvent(path.join(root, base + '-shm'), roots), true);
     assert.equal(isSelfWatchSqliteSidecarEvent(path.join(root, base + '-wal'), roots), false,
       'the -wal carries real data and must still trigger a scan');
@@ -3200,170 +3389,91 @@ test('a SQLite client whose scan does not recreate its sidecar still watches db-
 // was actually about. A suppressed shm event must not spawn a scan, while a real
 // -wal change from the same directory still must — otherwise the fix would have
 // traded a runaway loop for silent staleness.
-test('a zcode shm event does not spawn a scan while a -wal change still does', async () => {
-  const tmp = withTmpHome([path.join('.zcode', 'cli', 'db')]);
-  const originalHomedir = os.homedir;
-  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
-  os.homedir = () => tmp;
-  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+for (const client of ['zcode', 'cherrystudio']) {
+  test(`a ${client} shm event does not spawn a scan while WAL and database changes still do`, async () => {
+    const tmp = withTmpHome([]);
+    const originalHomedir = os.homedir;
+    const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+    os.homedir = () => tmp;
+    process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+    const { clientSourceRoots } = freshCollector();
+    const dbDir = clientSourceRoots(client)[client].find((root) => root.id === (client === 'zcode' ? 'zcode-db' : 'cherrystudio-db'))?.dir
+      || path.join(tmp, '.zcode', 'cli', 'db');
+    fs.mkdirSync(dbDir, { recursive: true });
+    const dbName = client === 'zcode' ? 'db.sqlite' : 'cherrystudio.sqlite';
 
-  const chokidar = require('chokidar');
-  const originalWatch = chokidar.watch;
-  let watchHandler = null;
-  chokidar.watch = () => {
-    const watcher = {
-      on(event, handler) {
-        if (event === 'all') watchHandler = handler;
-        return watcher;
-      },
-      close() {}
+    const chokidar = require('chokidar');
+    const originalWatch = chokidar.watch;
+    let watchHandler = null;
+    chokidar.watch = () => {
+      const watcher = {
+        on(event, handler) {
+          if (event === 'all') watchHandler = handler;
+          return watcher;
+        },
+        close() {}
+      };
+      return watcher;
     };
-    return watcher;
-  };
 
-  const childProcess = require('node:child_process');
-  const originalSpawn = childProcess.spawn;
-  const calls = [];
-  childProcess.spawn = recordingSpawn(calls);
+    const childProcess = require('node:child_process');
+    const originalSpawn = childProcess.spawn;
+    const calls = [];
+    childProcess.spawn = recordingSpawn(calls);
 
-  const dbDir = path.join(tmp, '.zcode', 'cli', 'db');
-  let handle = null;
-  try {
-    const { startCollector } = freshCollector();
-    const updates = [];
-    handle = startCollector({
-      clients: 'zcode',
-      allTimeSince: '2024-01-01',
-      commandTimeoutMs: 5000,
-      deviceId: 'test-device',
-      agentVersion: 'test',
-      intervalMs: 60 * 60 * 1000,
-      watchEnabled: true,
-      watchUsePolling: false,
-      watchTriggersCollection: true,
-      watchDebounceMs: 10,
-      limitsEnabled: false,
-      historyEnabled: false,
-      anchorPersistenceEnabled: false,
-      onUpdate: (summary, reason) => updates.push({ summary, reason })
-    });
+    let handle = null;
+    try {
+      const { startCollector } = freshCollector();
+      const updates = [];
+      handle = startCollector({
+        clients: client,
+        allTimeSince: '2024-01-01',
+        commandTimeoutMs: 5000,
+        deviceId: 'test-device',
+        agentVersion: 'test',
+        intervalMs: 60 * 60 * 1000,
+        watchEnabled: true,
+        watchUsePolling: false,
+        watchTriggersCollection: true,
+        watchDebounceMs: 10,
+        limitsEnabled: false,
+        historyEnabled: false,
+        anchorPersistenceEnabled: false,
+        onUpdate: (summary, reason) => updates.push({ summary, reason })
+      });
 
-    await waitForCondition(() => updates.length === 1);
-    const afterInitialTick = calls.length;
+      await waitForCondition(() => updates.length === 1);
+      const afterInitialTick = calls.length;
 
-    // Our own scan recreates this sidecar, so it must not schedule another scan.
-    watchHandler('change', path.join(dbDir, 'db.sqlite-shm'));
-    await new Promise((resolve) => { setTimeout(resolve, 120); });
-    assert.equal(calls.length, afterInitialTick,
-      'a self-watch shm event must not spawn another scan');
+      // Our own scan recreates this sidecar, so it must not schedule another scan.
+      watchHandler('change', path.join(dbDir, dbName + '-shm'));
+      await new Promise((resolve) => { setTimeout(resolve, 120); });
+      assert.equal(calls.length, afterInitialTick,
+        'a self-watch shm event must not spawn another scan');
 
-    // The same directory, but the write that carries real data.
-    watchHandler('change', path.join(dbDir, 'db.sqlite-wal'));
-    await waitForCondition(() => calls.length > afterInitialTick, 4000);
-    assert.ok(calls.length > afterInitialTick, 'a -wal change must still spawn a scan');
-  } finally {
-    if (handle) handle.stop();
-    childProcess.spawn = originalSpawn;
-    chokidar.watch = originalWatch;
-    os.homedir = originalHomedir;
-    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
-    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
-    delete require.cache[collectorPath];
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('collector preserves Qoder CN while publishing other clients after a bounded SQLite read fails', async () => {
-  const tmp = withTmpHome([]);
-  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
-  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
-
-  const qoderCnUsagePath = require.resolve('../../src/shared/providers/qodercn/usage');
-  const qoderCnUsage = require(qoderCnUsagePath);
-  const originalRows = qoderCnUsage.collectQoderCnRows;
-  const originalPeriods = qoderCnUsage.buildQoderCnPeriods;
-  let failReads = false;
-  let claudeTokens = 3;
-  const qoderCnReadOptions = [];
-  qoderCnUsage.collectQoderCnRows = async (options) => {
-    qoderCnReadOptions.push(options);
-    if (failReads) {
-      const error = new Error('qodercn sqlite read budget exceeded (rows limit 100000)');
-      error.code = 'QODER_CN_READ_BUDGET_EXCEEDED';
-      throw error;
+      // The same directory, but the write that carries real data.
+      watchHandler('change', path.join(dbDir, dbName + '-wal'));
+      await waitForCondition(() => calls.length > afterInitialTick, 4000);
+      assert.ok(calls.length > afterInitialTick, 'a -wal change must still spawn a scan');
+      await waitForCondition(() => updates.length >= 2);
+      const afterWalTick = calls.length;
+      watchHandler('change', path.join(dbDir, dbName));
+      await waitForCondition(() => calls.length > afterWalTick, 4000);
+      assert.ok(calls.length > afterWalTick, 'a database change must still spawn a scan');
+    } finally {
+      if (handle) handle.stop();
+      childProcess.spawn = originalSpawn;
+      chokidar.watch = originalWatch;
+      os.homedir = originalHomedir;
+      if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+      else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+      delete require.cache[collectorPath];
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
-    return [];
-  };
-  qoderCnUsage.buildQoderCnPeriods = () => ({
-    today: { entries: [{ client: 'qodercn', model: 'qmodel', input: 7 }] },
-    month: { entries: [{ client: 'qodercn', model: 'qmodel', input: 7 }] },
-    allTime: { entries: [{ client: 'qodercn', model: 'qmodel', input: 7 }] }
   });
-  delete require.cache[collectorPath];
+}
 
-  let handle = null;
-  try {
-    const { startCollector } = freshCollector();
-    const previews = [];
-    const updates = [];
-    const collectorOptions = {
-      clients: 'claude,qodercn',
-      allTimeSince: '2024-01-01',
-      commandTimeoutMs: 1000,
-      deviceId: 'test-device',
-      agentVersion: 'test',
-      intervalMs: 60 * 60 * 1000,
-      watchEnabled: false,
-      limitsEnabled: false,
-      historyEnabled: false,
-      runTokscale: async () => ({ entries: [{ client: 'claude', model: 'm', input: claudeTokens }] })
-    };
-    handle = startCollector({
-      ...collectorOptions,
-      onPreview: (summary) => previews.push(summary),
-      onUpdate: (summary) => updates.push(summary)
-    });
-
-    await waitForCondition(() => updates.length === 1);
-    assert.equal(qoderCnReadOptions[0].includeJsonl, true, 'production collection includes current JSONL transcripts');
-    const anchorPath = path.join(tmp, 'collector-anchor.json');
-    const firstAnchor = JSON.parse(fs.readFileSync(anchorPath, 'utf8'));
-    assert.equal(firstAnchor.qoderCnPeriods.today.clients.qodercn, 7);
-    const initialPreviewCount = previews.length;
-    failReads = true;
-    claudeTokens = 5;
-    await handle.tick('manual');
-
-    assert.equal(updates.length, 2, 'a Qoder CN failure must not suppress fresh data from other clients');
-    assert.equal(updates.at(-1).today.clients.qodercn, 7, 'final update keeps the last Qoder CN period');
-    assert.equal(updates.at(-1).today.clients.claude, 5, 'final update publishes the fresh Claude period');
-    const fallbackAnchor = JSON.parse(fs.readFileSync(anchorPath, 'utf8'));
-    assert.equal(fallbackAnchor.fullScanAt, firstAnchor.fullScanAt, 'a fallback is not recorded as a successful full scan');
-    const failedPreviews = previews.slice(initialPreviewCount);
-    assert.equal(failedPreviews.length, 2, 'the failed full scan still emits its two host previews');
-    assert.equal(Object.prototype.hasOwnProperty.call(failedPreviews.at(-1), 'qoderCnStatus'), false);
-    assert.equal(failedPreviews.at(-1).today.clients.qodercn, 7, 'preview keeps the anchored Qoder CN today partition');
-    assert.equal('month' in failedPreviews.at(-1), false, 'preview keeps the last complete month while Qoder CN is unavailable');
-
-    handle.stop();
-    handle = startCollector({
-      ...collectorOptions,
-      onUpdate: (summary) => updates.push(summary)
-    });
-    await waitForCondition(() => updates.length === 3);
-    assert.equal(updates.at(-1).today.clients.qodercn, 7, 'a persisted anchor keeps Qoder CN data after restart');
-  } finally {
-    if (handle) handle.stop();
-    qoderCnUsage.collectQoderCnRows = originalRows;
-    qoderCnUsage.buildQoderCnPeriods = originalPeriods;
-    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
-    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
-    delete require.cache[collectorPath];
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('collector does not reuse persisted Qoder CN periods after the DB path changes', async () => {
+test('collector does not reuse a persisted anchor after the Qoder CN DB path changes', async () => {
   const tmp = withTmpHome([]);
   const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
   const originalQoderCnDbPath = process.env.TOKEN_MONITOR_QODER_CN_DB_PATH;
@@ -3379,20 +3489,11 @@ test('collector does not reuse persisted Qoder CN periods after the DB path chan
   fs.writeFileSync(path.join(tmp, 'collector-anchor.json'), JSON.stringify({
     dateKey: initialCollector.localTodayKey(),
     today: emptyPeriod(),
-    month: emptyPeriod(),
-    allTime: emptyPeriod(),
-    qoderCnPeriods: { today: oldQoderCnPeriod, month: oldQoderCnPeriod, allTime: oldQoderCnPeriod },
-    configFingerprint: initialCollector.configFingerprint('claude,qodercn', '2024-01-01', true, oldDbPath),
+    month: oldQoderCnPeriod,
+    allTime: oldQoderCnPeriod,
+    configFingerprint: initialCollector.configFingerprint('claude,qodercn', '2024-01-01', true, oldDbPath, initialCollector.qoderCnProjectsDirForClients('claude,qodercn')),
     fullScanAt: new Date(Date.now() - 5 * 60 * 1000).toISOString()
   }));
-
-  const qoderCnUsagePath = require.resolve('../../src/shared/providers/qodercn/usage');
-  const qoderCnUsage = require(qoderCnUsagePath);
-  const originalRows = qoderCnUsage.collectQoderCnRows;
-  qoderCnUsage.collectQoderCnRows = async () => {
-    throw new Error('new Qoder CN database is temporarily unavailable');
-  };
-  delete require.cache[collectorPath];
 
   let handle = null;
   try {
@@ -3414,134 +3515,14 @@ test('collector does not reuse persisted Qoder CN periods after the DB path chan
 
     await waitForCondition(() => updates.length === 1);
     assert.equal(updates.at(-1).today.clients.claude, 3);
-    assert.equal(updates.at(-1).today.clients.qodercn || 0, 0, 'old-path Qoder CN fallback must not leak into the new path');
+    assert.equal(updates.at(-1).month.clients.qodercn || 0, 0, 'the old-path anchor must not leak into the new path');
+    assert.equal(updates.at(-1).allTime.clients.qodercn || 0, 0, 'the old-path anchor must not leak into the new path');
   } finally {
     if (handle) handle.stop();
-    qoderCnUsage.collectQoderCnRows = originalRows;
     if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
     else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
     if (originalQoderCnDbPath === undefined) delete process.env.TOKEN_MONITOR_QODER_CN_DB_PATH;
     else process.env.TOKEN_MONITOR_QODER_CN_DB_PATH = originalQoderCnDbPath;
-    delete require.cache[collectorPath];
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('collector publishes other clients when Qoder CN fails before the first complete snapshot', async () => {
-  const tmp = withTmpHome([]);
-  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
-  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
-
-  const qoderCnUsagePath = require.resolve('../../src/shared/providers/qodercn/usage');
-  const qoderCnUsage = require(qoderCnUsagePath);
-  const originalRows = qoderCnUsage.collectQoderCnRows;
-  let qoderCnReads = 0;
-  let claudeTokens = 3;
-  qoderCnUsage.collectQoderCnRows = async () => {
-    qoderCnReads += 1;
-    throw new Error('Qoder CN unavailable before first complete snapshot');
-  };
-  delete require.cache[collectorPath];
-
-  let handle = null;
-  try {
-    const { startCollector } = freshCollector();
-    const updates = [];
-    handle = startCollector({
-      clients: 'claude,qodercn',
-      allTimeSince: '2024-01-01',
-      commandTimeoutMs: 1000,
-      deviceId: 'test-device',
-      agentVersion: 'test',
-      intervalMs: 60 * 60 * 1000,
-      watchEnabled: false,
-      anchorPersistenceEnabled: false,
-      limitsEnabled: false,
-      historyEnabled: false,
-      runTokscale: async () => ({ entries: [{ client: 'claude', model: 'm', input: claudeTokens }] }),
-      onUpdate: (summary) => updates.push(summary)
-    });
-
-    await waitForCondition(() => updates.length === 1);
-    claudeTokens = 5;
-    await handle.tick('incremental', { todayOnly: true });
-
-    assert.equal(qoderCnReads, 2, 'Qoder CN is retried on the incremental read');
-    assert.equal(updates.length, 2, 'a first-read Qoder CN failure must not suppress other clients');
-    assert.equal(updates.at(-1).today.clients.claude, 5, 'the incremental Claude period is published');
-  } finally {
-    if (handle) handle.stop();
-    qoderCnUsage.collectQoderCnRows = originalRows;
-    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
-    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
-    delete require.cache[collectorPath];
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('collector publishes live periods when only Qoder CN history read fails', async () => {
-  const tmp = withTmpHome([]);
-  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
-  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
-
-  const qoderCnUsagePath = require.resolve('../../src/shared/providers/qodercn/usage');
-  const qoderCnUsage = require(qoderCnUsagePath);
-  const originalRows = qoderCnUsage.collectQoderCnRows;
-  const originalHistory = qoderCnUsage.buildQoderCnHistoryGraph;
-  let failHistory = false;
-  const todayKey = localDayKey();
-  qoderCnUsage.collectQoderCnRows = async () => [];
-  qoderCnUsage.buildQoderCnHistoryGraph = () => {
-    if (failHistory) throw new Error('temporary Qoder CN history read failure');
-    return {
-      contributions: [{
-        date: todayKey,
-        clients: [{ client: 'qodercn', modelId: 'qmodel', tokens: { input: 2 }, cost: 0, messages: 1 }]
-      }]
-    };
-  };
-  delete require.cache[collectorPath];
-
-  let handle = null;
-  try {
-    const { startCollector } = freshCollector();
-    const updates = [];
-    handle = startCollector({
-      clients: 'claude,qodercn',
-      allTimeSince: '2024-01-01',
-      commandTimeoutMs: 1000,
-      deviceId: 'test-device',
-      agentVersion: 'test',
-      intervalMs: 60 * 60 * 1000,
-      watchEnabled: false,
-      anchorPersistenceEnabled: false,
-      limitsEnabled: false,
-      historyEnabled: true,
-      runTokscale: async () => ({ entries: [{ client: 'claude', model: 'm', input: 3 }] }),
-      runGraph: async () => ({
-        contributions: [{
-          date: todayKey,
-          clients: [{ client: 'claude', modelId: 'm', tokens: { input: 3 }, cost: 0, messages: 1 }]
-        }]
-      }),
-      onUpdate: (summary) => updates.push(summary)
-    });
-
-    await waitForCondition(() => updates.length === 1);
-    failHistory = true;
-    await handle.tick('manual', { forceHistory: true });
-
-    assert.equal(updates.length, 2, 'history-only failure must not suppress fresh live periods');
-    assert.equal(Object.prototype.hasOwnProperty.call(updates.at(-1), 'qoderCnStatus'), false);
-    assert.equal(updates.at(-1).history.daily[0].perClient.claude.tokens, 3);
-    assert.equal(updates.at(-1).history.daily[0].perClient.qodercn.tokens, 2);
-    assert.equal(updates.at(-1).today.clients.claude, 3);
-  } finally {
-    if (handle) handle.stop();
-    qoderCnUsage.collectQoderCnRows = originalRows;
-    qoderCnUsage.buildQoderCnHistoryGraph = originalHistory;
-    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
-    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
     delete require.cache[collectorPath];
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -3872,6 +3853,96 @@ test('watch-descriptor exhaustion degrades to polling and stays there', async ()
   }
 });
 
+test('descriptor exhaustion over a tree too large to poll degrades to interval collection', async () => {
+  const tmp = withTmpHome([path.join('.claude', 'projects')]);
+  for (let index = 0; index < 5; index += 1) {
+    fs.writeFileSync(path.join(tmp, '.claude', 'projects', `session-${index}.jsonl`), '');
+  }
+  const originalHomedir = os.homedir;
+  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+  os.homedir = () => tmp;
+  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+
+  const chokidar = require('chokidar');
+  const originalWatch = chokidar.watch;
+  const watchOptions = [];
+  const errorHandlers = [];
+  let closed = 0;
+  chokidar.watch = (_dirs, options) => {
+    watchOptions.push(options);
+    return {
+      on: (event, handler) => { if (event === 'error') errorHandlers.push(handler); },
+      close: () => { closed += 1; }
+    };
+  };
+
+  const childProcess = require('node:child_process');
+  const originalSpawn = childProcess.spawn;
+  const calls = [];
+  childProcess.spawn = recordingSpawn(calls);
+
+  let handle = null;
+  const logs = [];
+  const events = [];
+  const updates = [];
+  try {
+    const { startCollector } = freshCollector();
+    handle = startCollector({
+      clients: 'claude',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 1000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      intervalMs: 80,
+      watchEnabled: true,
+      watchTriggersCollection: false,
+      intervalRequiresActivity: true,
+      watchPollingEntryLimit: 3,
+      limitsEnabled: false,
+      historyEnabled: false,
+      logger: (line) => logs.push(line),
+      onDiagnosticEvent: (event) => events.push(event),
+      onUpdate: (_summary, reason) => updates.push(reason)
+    });
+
+    await waitForCondition(() => errorHandlers.length === 1 && updates.length === 1);
+    const emfile = new Error('EMFILE: too many open files, watch');
+    emfile.code = 'EMFILE';
+    errorHandlers[0](emfile);
+
+    await waitForCondition(() => events.some((event) => event.code === 'watcher-interval-fallback'));
+    assert.equal(watchOptions.length, 1, 'no polling watcher is built over the oversized tree');
+    assert.equal(closed, 1, 'the exhausted native watcher is still released');
+    assert.deepEqual(events.at(-1), { subsystem: 'watcher', code: 'watcher-interval-fallback', detailCode: 'EMFILE' });
+    const diagnostics = handle.getDiagnostics();
+    assert.equal(diagnostics.watchMode, 'interval');
+    assert.equal(diagnostics.watchFallbackCode, 'EMFILE');
+    assert.ok(logs.some((line) => line.includes('Cannot watch safely')));
+
+    // Smart mode would otherwise wait for watch activity that can no longer
+    // arrive, and scan nothing but the hourly reconciliation.
+    const scansBefore = calls.length;
+    await waitForCondition(() => calls.length > scansBefore);
+    const interval = calls.at(-1);
+    assert.equal(interval.includes('--client') ? interval[interval.indexOf('--client') + 1] : 'claude', 'claude');
+
+    // Sticky: a later rebuild must not bring a watcher back.
+    fs.mkdirSync(path.join(tmp, '.claude', 'transcripts'), { recursive: true });
+    await handle.tick('manual');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(watchOptions.length, 1);
+  } finally {
+    if (handle) handle.stop();
+    childProcess.spawn = originalSpawn;
+    chokidar.watch = originalWatch;
+    os.homedir = originalHomedir;
+    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('a successful watcher rebuild clears the current watcher failure', async () => {
   const tmp = withTmpHome([path.join('.claude', 'projects')]);
   const originalHomedir = os.homedir;
@@ -3962,8 +4033,10 @@ test('watch roots reach chokidar canonicalised on Windows and untouched elsewher
   const chokidar = require('chokidar');
   const originalWatch = chokidar.watch;
   let watchedDirs = null;
-  chokidar.watch = (dirs) => {
+  let watchOptions = null;
+  chokidar.watch = (dirs, options) => {
     watchedDirs = dirs;
+    watchOptions = options;
     return { on: () => {}, close: () => {} };
   };
 
@@ -3993,11 +4066,13 @@ test('watch roots reach chokidar canonicalised on Windows and untouched elsewher
       // The junction must have been resolved away. Handing libuv a path it will
       // report events under in a different form is what fires the fs-event
       // assert, and that abort is not something the watcher can recover from.
-      assert.deepEqual(watchedDirs, [path.join(real, '.claude', 'projects')]);
+      assert.deepEqual(watchedDirs, [path.join(real, '.claude', 'projects'), path.join(real, '.claude')]);
+      assert.equal(watchOptions.ignored(path.join(real, '.claude', 'sessions', '123.json')), false);
     } else {
       // Off Windows this must be identity: resolving here would make the watch
       // roots disagree with the paths tokscale is pointed at.
-      assert.deepEqual(watchedDirs, [path.join(alias, '.claude', 'projects')]);
+      assert.deepEqual(watchedDirs, [path.join(alias, '.claude', 'projects'), path.join(alias, '.claude')]);
+      assert.equal(watchOptions.ignored(path.join(alias, '.claude', 'sessions', '123.json')), false);
     }
   } finally {
     if (handle) handle.stop();
@@ -4086,14 +4161,17 @@ test('the ignore matcher agrees with the roots chokidar was actually handed', as
   }
 });
 
-test('TOKEN_MONITOR_WATCH_POLLING=0 opts out of the descriptor fallback', async () => {
+// chokidar's own variable forbids polling just as ours does: it overrides the
+// options chokidar is handed, so a fallback that asked for polling would still
+// run native while diagnostics claimed otherwise.
+for (const pollingEnv of ['TOKEN_MONITOR_WATCH_POLLING', 'CHOKIDAR_USEPOLLING']) test(`${pollingEnv}=0 opts out of the descriptor fallback`, async () => {
   const tmp = withTmpHome([path.join('.claude', 'projects')]);
   const originalHomedir = os.homedir;
   const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
-  const originalPolling = process.env.TOKEN_MONITOR_WATCH_POLLING;
+  const originalPolling = process.env[pollingEnv];
   os.homedir = () => tmp;
   process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
-  process.env.TOKEN_MONITOR_WATCH_POLLING = '0';
+  process.env[pollingEnv] = '0';
 
   const chokidar = require('chokidar');
   const originalWatch = chokidar.watch;
@@ -4135,6 +4213,7 @@ test('TOKEN_MONITOR_WATCH_POLLING=0 opts out of the descriptor fallback', async 
 
     await new Promise((resolve) => setTimeout(resolve, 40));
     assert.equal(watchOptions.length, 1, 'an explicit "never poll" must survive descriptor exhaustion');
+    assert.equal(handle.getDiagnostics().watchMode, 'native');
   } finally {
     if (handle) handle.stop();
     childProcess.spawn = originalSpawn;
@@ -4142,8 +4221,8 @@ test('TOKEN_MONITOR_WATCH_POLLING=0 opts out of the descriptor fallback', async 
     os.homedir = originalHomedir;
     if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
     else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
-    if (originalPolling === undefined) delete process.env.TOKEN_MONITOR_WATCH_POLLING;
-    else process.env.TOKEN_MONITOR_WATCH_POLLING = originalPolling;
+    if (originalPolling === undefined) delete process.env[pollingEnv];
+    else process.env[pollingEnv] = originalPolling;
     delete require.cache[collectorPath];
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -4930,6 +5009,185 @@ test('custom Tokscale scan paths stay visible and use recursive extra-root watch
   }
 });
 
+test('custom roots prune dependency and VCS trees without touching built-in roots', () => {
+  const tmp = withTmpHome([path.join('.codex', 'sessions')]);
+  const originalHomedir = os.homedir;
+  const originalCodexHome = process.env.CODEX_HOME;
+  delete process.env.CODEX_HOME;
+  os.homedir = () => tmp;
+  try {
+    const { watchIgnoreMatcher } = freshCollector();
+    // #857: the custom root was a whole projects directory.
+    const projects = path.join(tmp, 'projects');
+    fs.mkdirSync(projects, { recursive: true });
+    const ignored = watchIgnoreMatcher('codex', { customScanPaths: { codex: [projects] } });
+
+    assert.equal(ignored(projects), false, 'the root itself is always kept');
+    assert.equal(ignored(path.join(projects, 'agent', 'sessions', 'rollout.jsonl')), false);
+    for (const pruned of ['node_modules', '.git', '.venv', '__pycache__']) {
+      assert.equal(ignored(path.join(projects, 'app', pruned)), true, `${pruned} is pruned`);
+      assert.equal(ignored(path.join(projects, 'app', pruned, 'deep', 'x.jsonl')), true, `below ${pruned} is pruned`);
+    }
+
+    // The built-in root beside it keeps its whole-tree contract.
+    const builtIn = path.join(tmp, '.codex', 'sessions');
+    assert.equal(ignored(path.join(builtIn, 'node_modules', 'x.jsonl')), false);
+
+    // A custom root nested in a pruned directory is its own source and survives.
+    const nested = path.join(projects, 'app', '.git', 'captured');
+    fs.mkdirSync(nested, { recursive: true });
+    const nestedIgnored = watchIgnoreMatcher('codex', { customScanPaths: { codex: [projects, nested] } });
+    assert.equal(nestedIgnored(path.join(nested, 'rollout.jsonl')), false);
+    assert.equal(nestedIgnored(path.join(projects, 'app', '.git', 'objects')), true);
+
+    // A client naming its own built-in root as a custom path does not turn
+    // that root into a pruned one.
+    const duplicateIgnored = watchIgnoreMatcher('codex', { customScanPaths: { codex: [projects, builtIn] } });
+    assert.equal(duplicateIgnored(path.join(builtIn, 'node_modules', 'x.jsonl')), false);
+    assert.equal(duplicateIgnored(path.join(projects, 'node_modules')), true);
+
+    // A directory that is a built-in root for any client keeps everything, even
+    // where another client names it as a custom root.
+    const sharedIgnored = watchIgnoreMatcher('codex,claude', { customScanPaths: { codex: [projects], claude: [builtIn] } });
+    assert.equal(sharedIgnored(path.join(builtIn, 'node_modules', 'x.jsonl')), false);
+    assert.equal(sharedIgnored(path.join(projects, 'node_modules')), true);
+  } finally {
+    os.homedir = originalHomedir;
+    if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = originalCodexHome;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Antigravity CLI polling counts overlapping summary parents and conversation roots once', () => {
+  const tmp = withTmpHome([path.join('.gemini', 'antigravity-cli', 'conversations')]);
+  try {
+    const { openWatch, watchPathsForClients } = freshCollector();
+    const conversations = path.join(tmp, '.gemini', 'antigravity-cli', 'conversations');
+    for (let index = 0; index < 10001; index += 1) fs.writeFileSync(path.join(conversations, `${index}.db`), '');
+    const options = { homeDir: tmp, env: {} };
+    const dirs = watchPathsForClients('antigravity', options);
+    assert.ok(dirs.includes(conversations));
+    assert.ok(dirs.includes(path.dirname(conversations)));
+    let opened = 0;
+    const chokidar = { watch: () => { opened += 1; return {}; } };
+    assert.doesNotThrow(() => openWatch(chokidar, { ...options, dirs, clients: 'antigravity', usePolling: true }));
+    assert.equal(opened, 1);
+    assert.throws(() => openWatch(chokidar, { ...options, dirs, clients: 'antigravity', usePolling: true, pollingEntryLimit: 10000 }), { code: 'watch-polling-limit' });
+  } finally {
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('the polling bound follows symlinked directories the way chokidar does', () => {
+  const tmp = withTmpHome([]);
+  try {
+    const { openWatch } = freshCollector();
+    const root = path.join(tmp, 'root');
+    const elsewhere = path.join(tmp, 'elsewhere');
+    fs.mkdirSync(root, { recursive: true });
+    fs.mkdirSync(elsewhere, { recursive: true });
+    for (let index = 0; index < 10; index += 1) fs.writeFileSync(path.join(elsewhere, `f${index}`), '');
+    const built = [];
+    const chokidar = { watch: (dirs, options) => { built.push(options); return {}; } };
+    const config = { dirs: [root], clients: 'claude', usePolling: true, pollingEntryLimit: 15 };
+
+    // chokidar follows symlinks by default, so a link into a large tree counts
+    // toward the bound like the tree itself.
+    fs.symlinkSync(elsewhere, path.join(root, 'first'), 'junction');
+    openWatch(chokidar, config);
+    assert.equal(built.length, 1, 'one link into a 10-entry tree fits under 15');
+
+    // chokidar dedupes links by their own path, not their target, so a second
+    // alias of the same tree is a second tree to poll.
+    fs.symlinkSync(elsewhere, path.join(root, 'second'), 'junction');
+    assert.throws(() => openWatch(chokidar, config), { code: 'watch-polling-limit' });
+    assert.equal(built.length, 1);
+
+    // Native watching is not bounded here; the descriptor fallback covers it.
+    openWatch(chokidar, { ...config, usePolling: false });
+    assert.equal(built.length, 2);
+  } finally {
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a symlink cycle ends the polling count instead of hanging it', () => {
+  const tmp = withTmpHome([]);
+  try {
+    const { openWatch } = freshCollector();
+    const root = path.join(tmp, 'root');
+    fs.mkdirSync(root, { recursive: true });
+    fs.symlinkSync(root, path.join(root, 'loop'), 'junction');
+    const chokidar = { watch: () => ({}) };
+    // Where the walk stops is the platform's symlink limit or the counter,
+    // whichever comes first; either answer is acceptable, never returning is not.
+    try {
+      openWatch(chokidar, { dirs: [root], clients: 'claude', usePolling: true, pollingEntryLimit: 20000 });
+    } catch (error) {
+      assert.equal(error.code, 'watch-polling-limit');
+    }
+  } finally {
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CHOKIDAR_USEPOLLING cannot switch chokidar to polling around the bound', () => {
+  const tmp = withTmpHome([]);
+  const original = process.env.CHOKIDAR_USEPOLLING;
+  try {
+    const { openWatch, resolveWatchUsePolling } = freshCollector();
+    const root = path.join(tmp, 'root');
+    fs.mkdirSync(root, { recursive: true });
+    for (let index = 0; index < 5; index += 1) fs.writeFileSync(path.join(root, `f${index}`), '');
+    const built = [];
+    const chokidar = { watch: (dirs, options) => { built.push(options); return {}; } };
+    const config = { dirs: [root], clients: 'claude', usePolling: false, pollingEntryLimit: 3 };
+
+    process.env.CHOKIDAR_USEPOLLING = 'true';
+    // chokidar applies the variable after our options, so native was asked for
+    // and polling is what would run.
+    assert.throws(() => openWatch(chokidar, config), { code: 'watch-polling-limit' });
+    assert.equal(built.length, 0);
+    // Diagnostics must report the mode chokidar really runs, over our own
+    // override as well.
+    assert.equal(resolveWatchUsePolling(false, { CHOKIDAR_USEPOLLING: '1', TOKEN_MONITOR_WATCH_POLLING: '0' }), true);
+    assert.equal(resolveWatchUsePolling(true, { CHOKIDAR_USEPOLLING: 'false' }), false);
+
+    process.env.CHOKIDAR_USEPOLLING = '0';
+    openWatch(chokidar, { ...config, usePolling: true });
+    assert.equal(built.length, 1, 'turned off, a polling request over the limit runs native');
+    assert.equal(built[0].usePolling, false);
+    // A host that must not open native descriptors gets no watcher at all.
+    assert.throws(
+      () => openWatch(chokidar, { ...config, usePolling: true, requirePolling: true }),
+      { code: 'watch-polling-unavailable' }
+    );
+    assert.equal(built.length, 1);
+
+    // chokidar's variable outranks ours, so it can still permit what ours forbids.
+    process.env.CHOKIDAR_USEPOLLING = '1';
+    const originalOwn = process.env.TOKEN_MONITOR_WATCH_POLLING;
+    process.env.TOKEN_MONITOR_WATCH_POLLING = '0';
+    try {
+      openWatch(chokidar, { ...config, pollingEntryLimit: 100, requirePolling: true });
+      assert.equal(built.at(-1).usePolling, true);
+    } finally {
+      if (originalOwn === undefined) delete process.env.TOKEN_MONITOR_WATCH_POLLING;
+      else process.env.TOKEN_MONITOR_WATCH_POLLING = originalOwn;
+    }
+  } finally {
+    if (original === undefined) delete process.env.CHOKIDAR_USEPOLLING;
+    else process.env.CHOKIDAR_USEPOLLING = original;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('custom Antigravity roots remain watchable without watching its self-sync cache', () => {
   const tmp = withTmpHome([]);
   const originalHomedir = os.homedir;
@@ -5025,6 +5283,185 @@ test('the quit variant of stop() skips the watcher walk and leans on `stopped`',
   } finally {
     if (replaced) replaced.stop();
     if (quitting) quitting.stop({ skipCloseWatchers: true });
+    childProcess.spawn = originalSpawn;
+    chokidar.watch = originalWatch;
+    os.homedir = originalHomedir;
+    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// A watch event clears the pending debounce timer and re-arms a fresh window, so
+// a source that changes more often than once per `watchDebounceMs` defers the
+// watch tick until the interval fallback runs. `watchMaxWaitMs` caps the
+// total deferral: once a storm has held the tick back for that long, the tick
+// runs even though events are still arriving.
+test('a watch-event storm faster than the debounce still ticks within the max-wait ceiling', async () => {
+  const tmp = withTmpHome([path.join('.claude', 'projects')]);
+  const originalHomedir = os.homedir;
+  os.homedir = () => tmp;
+  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+
+  const chokidar = require('chokidar');
+  const originalWatch = chokidar.watch;
+  let watchHandler = null;
+  chokidar.watch = () => ({
+    on: (event, handler) => { if (event === 'all') watchHandler = handler; },
+    close: () => {}
+  });
+
+  const childProcess = require('node:child_process');
+  const originalSpawn = childProcess.spawn;
+  const calls = [];
+  childProcess.spawn = (_bin, args) => {
+    calls.push(args);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { end: () => {} };
+    child.kill = () => {};
+    setTimeout(() => {
+      child.stdout.emit('data', Buffer.from(JSON.stringify({ entries: [] })));
+      child.emit('close', 0);
+    }, 5);
+    return child;
+  };
+
+  let handle = null;
+  let storm = null;
+  try {
+    const { startCollector } = freshCollector();
+    const updates = [];
+    handle = startCollector({
+      clients: 'claude',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 5000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      intervalMs: 60 * 60 * 1000,
+      watchEnabled: true,
+      watchDebounceMs: 10,
+      // Every other case here runs a 10ms debounce, so a ceiling left at its
+      // 5000ms default would never come due inside the test's own timeout.
+      watchMaxWaitMs: 50,
+      limitsEnabled: false,
+      historyEnabled: false,
+      onUpdate: (_summary, reason) => updates.push(reason)
+    });
+
+    // The startup tick is the interval one and says so. Every assertion below
+    // counts only `watch:` reasons, so a tick from startup — or from the hourly
+    // reconciliation — cannot stand in for a ceiling that never fired.
+    await waitForCondition(() => updates.length === 1);
+    assert.deepEqual(updates, ['interval']);
+    assert.ok(watchHandler, 'watcher handler captured');
+
+    // Events every 5ms, faster than the 10ms debounce: the un-ceilinged timer
+    // is cleared and re-armed before it can ever come due.
+    storm = setInterval(() => {
+      if (watchHandler) watchHandler('change', '/fake/session.jsonl');
+    }, 5);
+
+    const watchTicks = () => updates.filter((reason) => reason.startsWith('watch:'));
+    // Wide bound on purpose: this pins that the ceiling fires at all, not when.
+    // The ceiling is 50ms and the window is 40x that, so CI scheduling noise on
+    // Node 22 or 24 cannot decide the outcome.
+    const ticked = await waitForCondition(() => watchTicks().length > 0, 2000)
+      .then(() => true, () => false);
+    clearInterval(storm);
+    storm = null;
+
+    assert.ok(
+      ticked,
+      `no watch tick in 2000ms of a 5ms event storm against a 50ms ceiling; reasons: ${updates.join(', ') || '(none)'}`
+    );
+    assert.ok(calls.length > 3, 'the ceiling tick spawned a scan');
+  } finally {
+    if (storm) clearInterval(storm);
+    if (handle) handle.stop();
+    childProcess.spawn = originalSpawn;
+    chokidar.watch = originalWatch;
+    os.homedir = originalHomedir;
+    if (originalSharedDir === undefined) delete process.env.TOKEN_MONITOR_SHARED_DIR;
+    else process.env.TOKEN_MONITOR_SHARED_DIR = originalSharedDir;
+    delete require.cache[collectorPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// The ceiling bounds a storm and must not touch the ordinary path: one event
+// with nothing behind it still waits out the whole debounce before it scans.
+test('a single watch event still waits out the debounce and does not fire early', async () => {
+  const tmp = withTmpHome([path.join('.claude', 'projects')]);
+  const originalHomedir = os.homedir;
+  os.homedir = () => tmp;
+  const originalSharedDir = process.env.TOKEN_MONITOR_SHARED_DIR;
+  process.env.TOKEN_MONITOR_SHARED_DIR = tmp;
+
+  const chokidar = require('chokidar');
+  const originalWatch = chokidar.watch;
+  let watchHandler = null;
+  chokidar.watch = () => ({
+    on: (event, handler) => { if (event === 'all') watchHandler = handler; },
+    close: () => {}
+  });
+
+  const childProcess = require('node:child_process');
+  const originalSpawn = childProcess.spawn;
+  const calls = [];
+  childProcess.spawn = (_bin, args) => {
+    calls.push(args);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { end: () => {} };
+    child.kill = () => {};
+    setTimeout(() => {
+      child.stdout.emit('data', Buffer.from(JSON.stringify({ entries: [] })));
+      child.emit('close', 0);
+    }, 5);
+    return child;
+  };
+
+  let handle = null;
+  try {
+    const { startCollector } = freshCollector();
+    const updates = [];
+    handle = startCollector({
+      clients: 'claude',
+      allTimeSince: '2024-01-01',
+      commandTimeoutMs: 5000,
+      deviceId: 'test-device',
+      agentVersion: 'test',
+      intervalMs: 60 * 60 * 1000,
+      watchEnabled: true,
+      // A 10ms debounce leaves no honest window to observe "not yet", so this
+      // case runs a slower one. The ceiling sits above it, where a ceiling
+      // floored at the debounce has to sit.
+      watchDebounceMs: 120,
+      watchMaxWaitMs: 400,
+      limitsEnabled: false,
+      historyEnabled: false,
+      onUpdate: (_summary, reason) => updates.push(reason)
+    });
+
+    await waitForCondition(() => updates.length === 1);
+    assert.deepEqual(updates, ['interval']);
+    assert.ok(watchHandler, 'watcher handler captured');
+
+    const watchTicks = () => updates.filter((reason) => reason.startsWith('watch:'));
+    watchHandler('change', '/fake/session.jsonl');
+    // Well inside the 120ms debounce. Timers never fire early, so a short wait
+    // here is a real observation rather than a race.
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    assert.equal(watchTicks().length, 0, 'a lone event scanned before its debounce elapsed');
+
+    await waitForCondition(() => watchTicks().length > 0, 2000);
+  } finally {
+    if (handle) handle.stop();
     childProcess.spawn = originalSpawn;
     chokidar.watch = originalWatch;
     os.homedir = originalHomedir;

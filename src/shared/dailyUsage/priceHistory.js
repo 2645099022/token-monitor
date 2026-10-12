@@ -410,6 +410,38 @@ function resolvePriceNotice(db, { model, effectiveFrom, action, date } = {}) {
   return { ok: true };
 }
 
+// The action that settled a change, read back from its row.
+function settledAction(row) {
+  if (row.status === 'void') return 'void';
+  if (row.backfill === 1) return 'backfill';
+  return row.effective_from === row.observed_on ? 'confirm' : 'redate';
+}
+
+// Settled price changes, most recently observed first.
+function settledPriceNotices(db, { limit = 10 } = {}) {
+  return db.prepare(`SELECT * FROM price_versions WHERE notice = 'resolved' ORDER BY observed_on DESC, model LIMIT ?`)
+    .all(limit).map((row) => ({
+      model: row.model,
+      effectiveFrom: row.effective_from,
+      observedOn: row.observed_on,
+      changePct: row.change_pct,
+      action: settledAction(row),
+      before: perMillionRates(previousActiveVersion(db, row.model, row.effective_from)),
+      after: perMillionRates(row)
+    }));
+}
+
+// Puts a settled change back up for review, as it was before it was settled:
+// active, not a base price, pending. Its effective date stays, so a redated
+// change opens on the date chosen for it.
+function reopenPriceNotice(db, { model, effectiveFrom } = {}) {
+  const { changes } = db.prepare(`
+    UPDATE price_versions SET status = 'active', backfill = 0, notice = 'pending'
+    WHERE model = ? AND effective_from = ? AND notice = 'resolved'
+  `).run(model, effectiveFrom);
+  return changes > 0 ? { ok: true } : { ok: false, reason: 'not-found' };
+}
+
 module.exports = {
   ANNOUNCED_PRICES,
   DEFAULT_ALERT_PERCENT,
@@ -424,6 +456,8 @@ module.exports = {
   priceConfigTemplate,
   priceKeyResolver,
   recordCatalogPrice,
+  reopenPriceNotice,
   resolvePriceNotice,
+  settledPriceNotices,
   withFallbackAliases
 };

@@ -4,10 +4,14 @@
   const accountIdentityApi = typeof module === 'object' && module.exports
     ? require('../accountIdentity')
     : root?.TokenMonitorAccountIdentity;
-  const api = factory(accountIdentityApi);
+  const limitWindowLabelsApi = typeof module === 'object' && module.exports
+    ? require('../../../shared/limits/windowLabels')
+    : root?.TokenMonitorLimitWindowLabels;
+  const api = factory(accountIdentityApi, limitWindowLabelsApi || {});
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.TokenMonitorLimitProviderPresentation = api;
-})(typeof window !== 'undefined' ? window : null, function createLimitProviderPresentationApi(accountIdentityApi) {
+})(typeof window !== 'undefined' ? window : null, function createLimitProviderPresentationApi(accountIdentityApi, limitWindowLabelsApi) {
+  const { isMimoMembershipProduct } = limitWindowLabelsApi;
   const SOURCE_LABELS = {
     oauth: 'OAuth',
     cli: 'CLI',
@@ -37,12 +41,13 @@
     qoder: { web: 'Web' },
     deepseek: { api: 'API' },
     devin: { web: 'Web' },
-    openrouter: { api: 'API' },
     minimax: { api: 'API' },
+    openrouter: { api: 'API' },
     volcengine: { api: 'API', cli: 'arkcli' },
     ollama: { web: 'Web' },
     trae: { api: 'Web' },
     alibaba: { web: 'Web' },
+    stepfun: { web: 'Web' },
     thirdparty: { api: 'API' }
   };
 
@@ -66,7 +71,7 @@
     copilot: ['Manual login', 'API'],
     zed: ['Manual login', 'Web'],
     commandcode: ['Manual login', 'Web'],
-    mimo: ['Token Plan', 'Web'],
+    mimo: ['Auto', 'Desktop app', 'Token Plan'],
     zai: ['Auto', 'Coding Plan', 'API key'],
     zaiteam: ['Team Plan', 'API key'],
     kiro: ['Auto', 'CLI'],
@@ -74,13 +79,14 @@
     qoder: ['Manual login', 'Web'],
     deepseek: ['Pay-as-you-go', 'API key'],
     devin: ['Manual login', 'Web'],
+    minimax: ['Token Plan', 'API key'],
     typesafe: ['Manual login', 'Web'],
     openrouter: ['Pay-as-you-go', 'API key'],
-    minimax: ['Token Plan', 'API key'],
     volcengine: ['Auto', 'API key', 'CLI'],
     ollama: ['Manual login', 'Web'],
     trae: ['Manual login', 'Web'],
     alibaba: ['Token Plan', 'Web'],
+    stepfun: ['Coding/Token Plan', 'Web'],
     thirdparty: ['Relay', 'API']
   };
 
@@ -262,13 +268,21 @@
       if (!groups.has(entry.groupLabel)) groups.set(entry.groupLabel, []);
       groups.get(entry.groupLabel).push(entry);
     }
+    const tightest = (entries) => entries.slice().sort((a, b) => {
+      const aRemaining = compactWindowRemaining(a.window);
+      const bRemaining = compactWindowRemaining(b.window);
+      if (aRemaining !== bRemaining) return aRemaining - bRemaining;
+      return a.index - b.index;
+    })[0] || null;
+    // Home filters hidden items before this pick. With one visible model
+    // group, its two periods can occupy both compact slots.
+    if (groups.size === 1) {
+      return ['session', 'weekly']
+        .map((kind) => tightest(entries.filter((entry) => normalizeId(entry.window?.kind) === kind)))
+        .filter(Boolean)
+        .map((entry) => entry.window);
+    }
     const selected = [...groups.values()].map((groupEntries, groupIndex) => {
-      const tightest = (entries) => entries.slice().sort((a, b) => {
-        const aRemaining = compactWindowRemaining(a.window);
-        const bRemaining = compactWindowRemaining(b.window);
-        if (aRemaining !== bRemaining) return aRemaining - bRemaining;
-        return a.index - b.index;
-      })[0] || null;
       const session = tightest(groupEntries.filter((entry) => normalizeId(entry.window?.kind) === 'session'));
       const weekly = tightest(groupEntries.filter((entry) => normalizeId(entry.window?.kind) === 'weekly'));
       const sessionRemaining = compactWindowRemaining(session?.window);
@@ -296,17 +310,19 @@
     }
     if (providerId(providerOrId) !== 'antigravity') return '';
     const labels = (visibleWindows || []).map((candidate) => antigravityQuotaWindow(candidate)?.groupLabel || '');
-    const currentLabel = antigravityQuotaWindow(window)?.groupLabel || '';
-    if (labels.length < 2 || !currentLabel || labels.some((label) => !label)) return '';
-    return new Set(labels).size === labels.length ? currentLabel : '';
+    const quota = antigravityQuotaWindow(window);
+    if (!labels.length || !quota || labels.some((label) => !label)) return '';
+    const groups = new Set(labels);
+    if (groups.size === 1 && groups.has(quota.groupLabel)) return `${quota.groupLabel} ${quota.windowLabel}`;
+    return groups.size === labels.length ? quota.groupLabel : '';
   }
 
   function limitProviderCompactWindowPeriodLabel(providerOrId, window, visibleWindows = []) {
-    if (!limitProviderCompactWindowLabel(providerOrId, window, visibleWindows)) return '';
-    const kind = normalizeId(window?.kind);
-    if (kind === 'session') return '5-hour';
-    if (kind === 'weekly') return 'Weekly';
-    return '';
+    const quota = antigravityQuotaWindow(window);
+    // Single-group labels already include the period, even without reset data.
+    return quota && limitProviderCompactWindowLabel(providerOrId, window, visibleWindows) === quota.groupLabel
+      ? quota.windowLabel
+      : '';
   }
 
   function limitResetRemainingMs(value, nowMs = Date.now(), resetNowGraceMs = 60 * 1000) {
@@ -463,7 +479,7 @@
     if (status === 'notConfigured') {
       if (providerName === 'kimi') return { label: 'Add credential', tone: 'setup' };
       if (providerName === 'antigravity') return { label: 'Not set up', tone: 'setup' };
-      if (providerName === 'cursor' || providerName === 'copilot' || providerName === 'zed' || providerName === 'typesafe' || providerName === 'qoder' || providerName === 'trae' || providerName === 'workbuddy' || providerName === 'commandcode' || providerName === 'ollama' || providerName === 'alibaba') return { label: 'Sign in', tone: 'setup' };
+      if (providerName === 'cursor' || providerName === 'copilot' || providerName === 'zed' || providerName === 'typesafe' || providerName === 'stepfun' || providerName === 'qoder' || providerName === 'trae' || providerName === 'workbuddy' || providerName === 'commandcode' || providerName === 'ollama' || providerName === 'alibaba') return { label: 'Sign in', tone: 'setup' };
       if (providerName === 'thirdparty') return { label: 'Add credential', tone: 'setup' };
       // Cline joins the key-configured family: with neither a key nor a stored
       // sign-in, the one thing this application can be told is a key (the sign-in
@@ -595,6 +611,16 @@
     return tags;
   }
 
+  function limitProviderSettingsRecord(providers, id) {
+    const rows = (providers || []).filter((row) => row.provider === id);
+    if (id !== 'mimo') return rows.at(-1);
+    // Either healthy product keeps the provider connected. Otherwise prefer the
+    // Console status, since Settings manages that credential rather than membership.
+    return rows.findLast((row) => row.status === 'ok')
+      || rows.find((row) => !isMimoMembershipProduct(row))
+      || rows.at(-1);
+  }
+
   return {
     antigravityQuotaWindow,
     apiKeyAccountStatus,
@@ -616,6 +642,7 @@
     limitProviderSourceLabel,
     limitProviderStatusLabel,
     limitProviderSettingsTags,
+    limitProviderSettingsRecord,
     thirdPartyAdapterFamily,
     thirdPartyAdapterVisual,
     thirdPartyGroupPlanText,

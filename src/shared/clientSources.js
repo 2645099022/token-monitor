@@ -9,7 +9,9 @@ const { tokscaleConfigDir, tokscaleHomeDir } = require('./tokscaleConfig');
 const { claudeSessionRoots } = require('./providers/claude/paths');
 const { hermesProfileWatchDirs, resolveHermesHome } = require('./providers/hermes/profiles');
 const { kimiCodeSessionsHome, kimiWorkSessionsRoots } = require('./providers/kimi/sessionMetadata');
-const { qoderCnDataPaths } = require('./providers/qodercn/usage');
+const { catpawDataSources } = require('./providers/catpaw/paths');
+const { qoderCnDataPaths } = require('./providers/qodercn/paths');
+const { MCODE_SOURCE_CHECK_ID, mcodeSessionDirs } = require('./providers/mcode/paths');
 const { resolveReasonixStatsDir, REASONIX_SOURCE_CHECK_ID } = require('./providers/reasonix/paths');
 const { resolveDshSessionsDir, DSH_SOURCE_CHECK_ID } = require('./providers/dsh/paths');
 const {
@@ -136,7 +138,7 @@ function clineCliSessionRoot(home) {
 
 // Per-client data-dir candidates, keyed by client. The collector projects these
 // into detection status and, after interval-only/self-synced filtering, the
-// chokidar watch list; it adds Antigravity's read-only source roots separately.
+// chokidar watch list; it adds native Cursor and Antigravity source roots separately.
 // The roots are tagged with a stable id for their *kind*. One id may
 // cover several paths: Copilot's workspaceStorage has a variant per platform and
 // Kiro's IDE globalStorage has four, but "the VS Code workspace storage is
@@ -177,7 +179,7 @@ function clientSourceRoots(clientsCsv, options = {}) {
   // watcher prunes the rest of this broad app data root below.
   //
   // Only the roots tokscale declares as `PathRoot::XdgData` go through this —
-  // opencode, zed, kilo and micode (clients.rs), plus the CodeBuddy extension
+  // opencode, zed, kilo, micode and muse (clients.rs), plus the CodeBuddy extension
   // logs it resolves via `dirs::data_local_dir()`. Kiro's CLI database is
   // deliberately NOT one of them: tokscale spells it as a home-relative literal
   // (`{home}/.local/share/kiro-cli/data.sqlite3`, scanner.rs), so following XDG
@@ -218,7 +220,9 @@ function clientSourceRoots(clientsCsv, options = {}) {
   //                    the sync cache too.
   const tokscaleConfigRoot = tokscaleConfigDir({ env, platform, homeDir: home });
   add('cursor', ['tokscale-cursor-cache', path.join(tokscaleHome, '.config', 'tokscale', 'cursor-cache')]);
-  add('antigravity', ['tokscale-antigravity-cache', path.join(tokscaleConfigRoot, 'antigravity-cache')]);
+  add('antigravity',
+    ['tokscale-antigravity-cache', path.join(tokscaleConfigRoot, 'antigravity-cache')],
+    ['antigravity-extension-data', path.join(home, '.gemini', 'antigravity', 'conversations')]);
   // A whitespace-only KIMI_CODE_HOME counts as unset, matching tokscale: it
   // joins `sessions` onto the raw value, so a blank export would resolve to the
   // root-level /sessions and hide the real one.
@@ -301,6 +305,7 @@ function clientSourceRoots(clientsCsv, options = {}) {
     ['mimocode-data', path.join(xdgHome, 'mimocode')],
     ['mimocode-orca-data', path.join(home, 'Library', 'Application Support', 'orca', 'mimocode-hooks', 'shared', 'data')]
   );
+  add('muse', ['muse-sessions', path.join(xdgHome, 'muse', 'sessions')]);
   const zcodeDbDir = path.join(home, '.zcode', 'cli', 'db');
   add(
     'zcode',
@@ -351,8 +356,16 @@ function clientSourceRoots(clientsCsv, options = {}) {
     ['workbuddy-projects', path.join(home, '.workbuddy', 'projects')],
     ['workbuddy-projects', path.join(home, '.workbuddy-ai', 'projects')]
   );
-  // Proma — session transcripts at ~/.proma/agent-sessions/*.jsonl
-  add('proma', ['proma-sessions', path.join(home, '.proma', 'agent-sessions')]);
+  // Proma — session transcripts at ~/.proma/agent-sessions/*.jsonl. The fork
+  // parses it from tokscale's effective home, like the Qoder CN paths below.
+  add('proma', ['proma-sessions', path.join(tokscaleHome, '.proma', 'agent-sessions')]);
+  if (enabled.has('catpaw')) {
+    const catpaw = catpawDataSources({ ...options, platform, env });
+    add('catpaw',
+      ...catpaw.roots.map((dir) => ['catpaw-data', dir]),
+      ...catpaw.dbPaths.map((file) => ['catpaw-db', path.dirname(file), file])
+    );
+  }
   // Qoder CN — legacy SQLite DB under the platform Application Support dir,
   // or the JSONL transcript tree used by current builds.
   const qoderCnPaths = qoderCnDataPaths({ homeDir: home, platform, env });
@@ -360,6 +373,15 @@ function clientSourceRoots(clientsCsv, options = {}) {
     'qodercn',
     ...qoderCnPaths.dbPaths.map((dbPath) => ['qodercn-db', path.dirname(dbPath), dbPath]),
     ['qodercn-projects', qoderCnPaths.projectsDir]
+  );
+  // MiniMax Code — upstream reads only captured `tokscale headless mcode exec`
+  // streams; the fork adds the CLI and desktop runtime store from tokscale's
+  // effective home (providers/mcode/paths.js). Only the default `.minimax`
+  // store is expected; `.mavis`, profiles and captures are optional.
+  add(
+    'mcode',
+    ...mcodeSessionDirs({ env, homeDir: tokscaleHome }).map((dir, index) => [MCODE_SOURCE_CHECK_ID, dir, null, index > 0]),
+    ...tokscaleHeadlessRoots(home).map(({ dir, optional }) => [MCODE_SOURCE_CHECK_ID, path.join(dir, 'mcode'), null, optional])
   );
   add('reasonix', [
     REASONIX_SOURCE_CHECK_ID,
@@ -430,9 +452,11 @@ function clientSourceRoots(clientsCsv, options = {}) {
     platform: options.platform || process.platform,
     env: options.env || process.env
   });
+  const cherryDataDir = path.resolve(cherryRoots[1][1], '..', '..', 'Data');
   add(
     'cherrystudio',
-    ...cherryRoots
+    ...cherryRoots,
+    ['cherrystudio-db', cherryDataDir, path.join(cherryDataDir, 'cherrystudio.sqlite')]
   );
   // LM Studio's OpenAI-compatible local server writes nested monthly `.log`
   // files under this root. Tokscale's PathRoot::EnvVar treats a blank override
@@ -460,6 +484,10 @@ function clientSourceRoots(clientsCsv, options = {}) {
     ...devinRoots.cli.map((dir) => [DEVIN_CLI_SOURCE_CHECK_ID, dir, path.join(dir, 'sessions.db')]),
     ...devinRoots.desktop.map((dir) => [DEVIN_DESKTOP_SOURCE_CHECK_ID, dir])
   );
+  // fx (vercel-labs): one home-relative `~/.fx/sessions` tree on every
+  // platform (clients.rs PathRoot::Home), holding per-session
+  // `usage-v2.json` snapshots plus the shared `index.json` titles file.
+  add('fx', ...simpleHostSourceRoots('fx', home));
   const customScanPaths = normalizeCustomScanPaths(options.customScanPaths, { platform });
   for (const [client, dirs] of Object.entries(customScanPaths)) {
     if (!enabled.has(client)) continue;
@@ -471,14 +499,15 @@ function clientSourceRoots(clientsCsv, options = {}) {
 
 // The Antigravity CLI's parse-local directory is watched and checked as a
 // source; unlike the IDE cache, it is written by agy rather than our self-sync.
-function antigravityCliDataDir() {
-  const geminiHome = process.env.GEMINI_CLI_HOME || path.join(os.homedir(), '.gemini');
+function antigravityCliDataDir({ homeDir = os.homedir(), env = process.env } = {}) {
+  const geminiHome = env.GEMINI_CLI_HOME || path.join(homeDir, '.gemini');
   return path.join(geminiHome, 'antigravity-cli', 'conversations');
 }
 
 module.exports = {
   antigravityCliDataDir,
   canonicalWatchPath,
+  canonicalWatchFilePath,
   cherryStudioTranscriptRoots,
   clientSourceRoots,
   copilotExporterWatch
