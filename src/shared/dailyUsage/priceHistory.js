@@ -417,8 +417,9 @@ function settledAction(row) {
   return row.effective_from === row.observed_on ? 'confirm' : 'redate';
 }
 
-// Settled price changes, most recently observed first.
-function settledPriceNotices(db, { limit = 10 } = {}) {
+// Settled price changes, most recently observed first; all of them unless
+// limit is given.
+function settledPriceNotices(db, { limit = -1 } = {}) {
   return db.prepare(`SELECT * FROM price_versions WHERE notice = 'resolved' ORDER BY observed_on DESC, model LIMIT ?`)
     .all(limit).map((row) => ({
       model: row.model,

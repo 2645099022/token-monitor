@@ -593,11 +593,13 @@
               <div class="settings-actions">
                 <button id="openPriceConfigButton" type="button" data-i18n="settings.dailyUsage.openPriceConfig">Open price-history.json</button>
               </div>
-              <div class="settled-price-notices">
-                <span class="settings-item-title" data-i18n="settings.dailyUsage.settledTitle">Settled price changes</span>
-                <ul id="settledPriceNoticeList" class="settled-price-notice-list"></ul>
-                <p id="settledPriceNoticeEmpty" class="settings-note" data-i18n="settings.dailyUsage.settledEmpty">No price change has been settled yet.</p>
-              </div>
+              <details id="settledPriceNotices" class="settled-price-notices">
+                <summary><span class="settings-item-title" data-i18n="settings.dailyUsage.settledTitle">Settled price changes</span><span id="settledPriceNoticeCount" class="settled-price-notice-count"></span></summary>
+                <input id="settledPriceNoticeFilter" class="settled-price-notice-filter" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="settings.dailyUsage.settledFilter" placeholder="Filter by model" hidden />
+                <div id="settledPriceNoticeList" class="settled-price-notice-list"></div>
+                <button id="settledPriceNoticeMore" class="settled-price-notice-more" type="button" hidden></button>
+                <p id="settledPriceNoticeEmpty" class="settings-note"></p>
+              </details>
             </div>
             <div class="settings-subgroup daily-usage-archive-settings">
               <div class="settings-group-header"><span data-i18n="settings.dailyUsage.archiveTitle">Transcript backups</span></div>

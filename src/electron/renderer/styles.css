@@ -6097,19 +6097,79 @@ html.native-liquid-glass .view-switcher-menu-item { border-radius: 9px; }
   background: color-mix(in srgb, var(--yellow) 14%, transparent);
 }
 .price-notice-more { margin-left: auto; color: var(--muted); }
-/* Settled price changes in Settings, each one reopenable. */
+/* Settled price changes in Settings, each one reopenable: folded by default,
+   grouped by the day each change was seen. */
 .settled-price-notices {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   margin-top: 6px;
 }
+.settled-price-notices > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+.settled-price-notices > summary::-webkit-details-marker { display: none; }
+.settled-price-notices > summary::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--muted);
+  transition: transform 120ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+.settled-price-notices[open] > summary::before { transform: rotate(90deg); }
+.settled-price-notice-count {
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(var(--overlay-rgb), 0.08);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+.settled-price-notice-count:empty { display: none; }
+.settled-price-notice-filter {
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(var(--sunken-rgb), 0.48);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
 .settled-price-notice-list {
+  display: grid;
+  gap: 8px;
+}
+.settled-price-notice-day {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.settled-price-notice-items {
   display: grid;
   gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
+.settled-price-notice-more {
+  justify-self: start;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+.settled-price-notice-more:hover { background: rgba(var(--overlay-rgb), 0.08); }
 .settled-price-notice {
   display: flex;
   align-items: center;

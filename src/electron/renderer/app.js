@@ -12964,36 +12964,103 @@ async function reopenPriceNotice(notice) {
   els.refreshButton?.click();
 }
 
+// The settled list is folded by default and shown a page at a time; the
+// model filter appears once the list is long enough to need it.
+const SETTLED_PRICE_NOTICE_PAGE = 20;
+const SETTLED_PRICE_NOTICE_FILTER_MIN = 8;
+state.settledPriceNoticeQuery = '';
+state.settledPriceNoticeShown = SETTLED_PRICE_NOTICE_PAGE;
+
+// Settled changes whose model matches `query`, grouped by the day they were
+// seen, since one catalog update can move many models at once. `notices` is
+// newest day first; the groups hold the first `shown` matches, and each
+// group's count is all of its day's matches. Case, '.', '-', '_' and spaces
+// do not matter to the filter.
+function settledPriceNoticeGroups(notices, query = '', shown = Infinity) {
+  const key = (value) => String(value || '').toLowerCase().replace(/[._\s-]+/g, '');
+  const needle = key(query);
+  const matched = notices.filter((notice) => !needle || key(notice.model).includes(needle));
+  const counts = new Map();
+  for (const notice of matched) counts.set(notice.observedOn, (counts.get(notice.observedOn) || 0) + 1);
+  const groups = [];
+  for (const notice of matched.slice(0, shown)) {
+    const last = groups[groups.length - 1];
+    if (last?.date === notice.observedOn) last.notices.push(notice);
+    else groups.push({ date: notice.observedOn, count: counts.get(notice.observedOn), notices: [notice] });
+  }
+  return { groups, matched: matched.length, hidden: Math.max(0, matched.length - shown) };
+}
+
+function settledPriceNoticeItem(notice) {
+  const item = document.createElement('li');
+  item.className = 'settled-price-notice';
+  const text = document.createElement('span');
+  text.className = 'settled-price-notice-text';
+  const model = document.createElement('span');
+  model.className = 'settled-price-notice-model';
+  model.textContent = notice.model;
+  model.title = notice.model;
+  const detail = document.createElement('span');
+  detail.className = 'settings-note';
+  detail.textContent = [
+    priceNoticeChanges(notice),
+    t(`settings.dailyUsage.settledAction.${notice.action}`, { date: notice.effectiveFrom })
+  ].filter(Boolean).join(' · ');
+  text.append(model, detail);
+  const reopen = document.createElement('button');
+  reopen.type = 'button';
+  reopen.textContent = t('settings.dailyUsage.settledReopen');
+  reopen.title = t('settings.dailyUsage.settledReopenHint');
+  reopen.addEventListener('click', () => reopenPriceNotice(notice));
+  item.append(text, reopen);
+  return item;
+}
+
 function renderSettledPriceNotices() {
   const list = document.getElementById('settledPriceNoticeList');
-  const empty = document.getElementById('settledPriceNoticeEmpty');
   if (!list) return;
   const notices = state.settledPriceNotices;
-  if (empty) empty.hidden = notices.length > 0;
-  list.replaceChildren(...notices.map((notice) => {
-    const item = document.createElement('li');
-    item.className = 'settled-price-notice';
-    const text = document.createElement('span');
-    text.className = 'settled-price-notice-text';
-    const model = document.createElement('span');
-    model.className = 'settled-price-notice-model';
-    model.textContent = notice.model;
-    const detail = document.createElement('span');
-    detail.className = 'settings-note';
-    detail.textContent = [
-      priceNoticeChanges(notice),
-      t(`settings.dailyUsage.settledAction.${notice.action}`, { date: notice.effectiveFrom })
-    ].filter(Boolean).join(' · ');
-    text.append(model, detail);
-    const reopen = document.createElement('button');
-    reopen.type = 'button';
-    reopen.textContent = t('settings.dailyUsage.settledReopen');
-    reopen.title = t('settings.dailyUsage.settledReopenHint');
-    reopen.addEventListener('click', () => reopenPriceNotice(notice));
-    item.append(text, reopen);
-    return item;
+  const count = document.getElementById('settledPriceNoticeCount');
+  const filter = document.getElementById('settledPriceNoticeFilter');
+  const more = document.getElementById('settledPriceNoticeMore');
+  const empty = document.getElementById('settledPriceNoticeEmpty');
+  if (count) count.textContent = notices.length > 0 ? String(notices.length) : '';
+  if (filter) filter.hidden = notices.length <= SETTLED_PRICE_NOTICE_FILTER_MIN && !state.settledPriceNoticeQuery;
+  const { groups, matched, hidden } = settledPriceNoticeGroups(
+    notices, state.settledPriceNoticeQuery, state.settledPriceNoticeShown
+  );
+  list.replaceChildren(...groups.map((group) => {
+    const section = document.createElement('section');
+    section.className = 'settled-price-notice-group';
+    const heading = document.createElement('div');
+    heading.className = 'settled-price-notice-day';
+    heading.textContent = t('settings.dailyUsage.settledGroup', { date: group.date, count: group.count });
+    const items = document.createElement('ul');
+    items.className = 'settled-price-notice-items';
+    items.append(...group.notices.map(settledPriceNoticeItem));
+    section.append(heading, items);
+    return section;
   }));
+  if (more) {
+    more.hidden = hidden === 0;
+    more.textContent = t('settings.dailyUsage.settledMore', { count: hidden });
+  }
+  if (empty) {
+    empty.hidden = matched > 0;
+    empty.textContent = t(notices.length > 0 ? 'settings.dailyUsage.settledNoMatch' : 'settings.dailyUsage.settledEmpty');
+  }
 }
+
+document.getElementById('settledPriceNoticeFilter')?.addEventListener('input', (event) => {
+  state.settledPriceNoticeQuery = event.target.value;
+  state.settledPriceNoticeShown = SETTLED_PRICE_NOTICE_PAGE;
+  renderSettledPriceNotices();
+});
+
+document.getElementById('settledPriceNoticeMore')?.addEventListener('click', () => {
+  state.settledPriceNoticeShown += SETTLED_PRICE_NOTICE_PAGE;
+  renderSettledPriceNotices();
+});
 
 refreshPriceNotices();
 setInterval(refreshPriceNotices, PRICE_NOTICE_REFRESH_MS);
