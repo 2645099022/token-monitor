@@ -8,9 +8,11 @@ cd /d "%~dp0"
 REM --- Network: set your proxy or mirror here --------------------------------
 REM   7897 is your local proxy port. Toggle the lines you need.
 REM   Tip: if the proxy is flaky, swap to ELECTRON_MIRROR alone.
+REM   Electron's own binary download uses Node's fetch, which ignores
+REM   HTTP_PROXY, so it always goes through ELECTRON_MIRROR.
 set "HTTP_PROXY=http://127.0.0.1:7897"
 set "HTTPS_PROXY=http://127.0.0.1:7897"
-REM set "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/"
+set "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/"
 
 echo ============================================
 echo   Token Monitor - Auto Updater
@@ -179,6 +181,13 @@ if not "!DEPS_CHANGED!"=="0" (
   call npm install
   if errorlevel 1 (
     echo [X] npm install failed. Check the output above.
+    set "EC=1" & goto :cleanup
+  )
+  REM Electron 43+ downloads its binary on first launch, not on install.
+  echo     Downloading the Electron binary...
+  call node node_modules\electron\install.js
+  if errorlevel 1 (
+    echo [X] Electron binary download failed. Check ELECTRON_MIRROR above.
     set "EC=1" & goto :cleanup
   )
 ) else (
