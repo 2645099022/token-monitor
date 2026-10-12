@@ -193,8 +193,8 @@ function bucketCost(row, price, { bucket, thresholds }) {
 // Anthropic bills a 1-hour cache write at 2x the input price on every model,
 // against 1.25x for the 5-minute write that the catalogs' cache-write rate
 // describes (platform.claude.com/docs/en/about-claude/pricing). No catalog
-// carries the 1-hour rate and tokscale bills every write as 5-minute, so the
-// difference is added here, from the input rate in effect.
+// carries the 1-hour rate, so the difference is added here, from the input
+// rate in effect.
 const ANTHROPIC_MODEL = /(^|[/.])claude-/i;
 const ONE_HOUR_WRITE_MULTIPLIER = 2;
 
@@ -207,7 +207,8 @@ function oneHourCachePremium(row, price) {
 }
 
 // USD for one aggregated usage row at the given rates, or null without rates.
-// oneHourCache: false prices every cache write as 5-minute, as tokscale does.
+// oneHourCache: false prices every cache write as 5-minute, as earlier
+// tokscale releases do.
 function costWith(row, price, { oneHourCache = true } = {}) {
   if (!price) return null;
   const cost = TIER_BUCKETS.reduce((sum, bucket) => sum + bucketCost(row, price, bucket), 0);

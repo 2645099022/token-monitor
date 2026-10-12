@@ -10,10 +10,11 @@
 //             tokscale bills the whole session at today's price; its cost is
 //             spread over the days by each day's dated-price weight, scaled
 //             by the session's ratio of tokscale cost to its cost at today's
-//             price as tokscale computes it (every cache write at the
-//             5-minute rate). Session totals equal the rest of the app while
-//             a price is unchanged and no 1-hour cache was written, and
-//             follow the dated prices and the 1-hour cache premium otherwise.
+//             price as tokscale computes it (a 1-hour cache write at 2x
+//             input, or, in earlier tokscale releases, at the 5-minute rate).
+//             Session totals equal the rest of the app while a price is
+//             unchanged, and follow the dated prices and the 1-hour cache
+//             premium otherwise.
 //   price     tokens x the price in effect on the day (sessions tokscale
 //             never saw or billed at 0)
 // null means no price is known.
@@ -69,9 +70,15 @@ function tokscaleAnchors(db, book) {
     const reference = tokscale.get(groupKey(row));
     if (!reference || !(reference.cost > 0) || !(reference.tokens > 0)) continue;
     if (Math.abs(row.total_tokens / reference.tokens - 1) > ANCHOR_TOKEN_TOLERANCE) continue;
-    // Priced the way tokscale prices it, so the ratio keeps tokscale's own
-    // calibration and the 1-hour cache premium is added on top per day.
-    const weight = costWith(row, book.current(row.model), { oneHourCache: false });
+    // Priced the way tokscale prices it, so the ratio keeps only tokscale's
+    // own calibration and the 1-hour cache premium is counted once, per day.
+    // Earlier tokscale releases bill every cache write at the 5-minute rate,
+    // later ones bill a 1-hour write at 2x input; the weight follows the one
+    // the session's cost matches.
+    const price = book.current(row.model);
+    const as1h = costWith(row, price);
+    const as5m = costWith(row, price, { oneHourCache: false });
+    const weight = as1h != null && Math.abs(reference.cost - as1h) <= Math.abs(reference.cost - as5m) ? as1h : as5m;
     anchors.set(groupKey(row), weight > 0
       ? { perWeight: reference.cost / weight }
       : { perToken: reference.cost / row.total_tokens });

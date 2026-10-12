@@ -290,16 +290,22 @@ test('query: a 1-hour cache write bills at 2x input on Claude models, on top of 
       VALUES (?, 's', ?, ?, '2026-09-20', ?, ?, ?)
     `);
     insertDaily.run('claude', 'a', 'claude-opus-5', 1000, 800, 1000);
+    insertDaily.run('claude', 'c', 'claude-opus-5', 1000, 800, 1000);
     // Only Anthropic bills the 1-hour write differently.
     insertDaily.run('claude', 'b', 'grok-4.5', 1000, 800, 1000);
     db.prepare(`INSERT INTO model_pricing (model, input, output, cache_write, status) VALUES ('claude-opus-5', ?, ?, ?, 'ok')`).run(5 * M, 25 * M, 6.25 * M);
     db.prepare(`INSERT INTO model_pricing (model, input, output, cache_write, status) VALUES ('grok-4.5', ?, ?, ?, 'ok')`).run(2 * M, 6 * M, 2 * M);
-    // tokscale billed every write as 5-minute.
-    db.prepare(`INSERT INTO usage_records (client, session_id, model, total_tokens, cost_usd) VALUES ('claude', 'a', 'claude-opus-5', 1000, ?)`).run(1000 * 6.25 * M);
+    const insertRecord = db.prepare(`INSERT INTO usage_records (client, session_id, model, total_tokens, cost_usd) VALUES ('claude', ?, 'claude-opus-5', 1000, ?)`);
+    // An earlier tokscale billed every write as 5-minute; a later one bills the
+    // 1-hour write at 2x input. The premium is counted once either way.
+    insertRecord.run('a', 1000 * 6.25 * M);
+    insertRecord.run('c', 200 * 6.25 * M + 800 * 10 * M);
 
     const sessions = Object.fromEntries(sessionUsageInRange(db).map((row) => [row.session_id, row]));
     close(sessions.a.cost_usd, 200 * 6.25 * M + 800 * 10 * M);
     assert.equal(sessions.a.cost_source, 'tokscale');
+    close(sessions.c.cost_usd, 200 * 6.25 * M + 800 * 10 * M);
+    assert.equal(sessions.c.cost_source, 'tokscale');
     close(sessions.b.cost_usd, 1000 * 2 * M);
   } finally { db.close(); }
 });
